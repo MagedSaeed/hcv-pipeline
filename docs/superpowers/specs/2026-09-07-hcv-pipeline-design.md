@@ -17,7 +17,7 @@ LLM:
 - **Phase 1 — Expert seed.** Human experts author system descriptions and
   scenarios of human interaction that lead to exploitation of the 21
   human-centric vulnerabilities (HCVs).
-- **Phase 2 — Generation, two arms.**
+- **Phase 2 — Generation, two variants.**
   - *Run A (unbiased):* the LLM sees the seed pack only. The taxonomy is
     withheld. What it produces reveals what its training data already encodes.
   - *Run B (guided):* the LLM sees the seed pack **and** the 21 HCVs, and is
@@ -28,9 +28,10 @@ LLM:
   none.
 - **Phase 4 — Human review.** Out of scope for this build (see §11).
 
-The critical property the application must guarantee is **arm isolation**: Run A
-must never see the taxonomy, directly or through leaked context. Everything else
-in this design is in service of running that comparison reproducibly.
+The critical property the application must guarantee is **variant isolation**:
+Run A must never see the taxonomy, directly or through leaked context.
+Everything else in this design is in service of running that comparison
+reproducibly.
 
 ## 2. Non-goals
 
@@ -197,8 +198,8 @@ Template context, Phase 3: `scenario`, `system_description`, `taxonomy`
 (always), `fewshots`.
 
 The Run A template is authored without any taxonomy reference, and the renderer
-refuses to bind `taxonomy` for an arm-A run. Arm isolation is enforced at the
-context-construction layer, not left to prompt discipline.
+refuses to bind `taxonomy` for a variant-A run. Variant isolation is enforced
+at the context-construction layer, not left to prompt discipline.
 
 ### 5.4 `pipeline`
 
@@ -211,17 +212,17 @@ Experiment(
     generate_systems: bool, generate_scenarios: bool,
     target_system→ SystemDescription (null),
     n_systems, n_scenarios_per_system,
-    arms: JSON list, e.g. ["A", "B"],
+    variants: JSON list, e.g. ["A", "B"],
     created_by→, created_at)
 
 PipelineRun(experiment→, repetition_index, status, started_at, finished_at)
 
 PhaseRun(
     pipeline_run→ (null),        # null for ad-hoc iterate-mode runs
-    phase: 2 | 3, arm: A | B | null,
+    phase: 2 | 3, variant: A | B | null,
     model, temperature,
     prompt_template→,            # pinned version
-    taxonomy→,                   # pinned version; recorded for arm A, injected only for arm B
+    taxonomy→,                   # pinned always; injected into the prompt only for B
     source_phase_run→ (null),    # phase 3 records which phase-2 run it labels
     status: pending | running | completed | failed | cancelled,
     error, started_at, finished_at, created_by→)
@@ -255,7 +256,7 @@ Django-Q2 with a Redis broker, run as a separate `qcluster` process.
 
 - Launching a batch creates `PipelineRun` + its `PhaseRun` rows as `pending`,
   then enqueues one task per phase run.
-- **Phase 2** is one task per arm per repetition.
+- **Phase 2** is one task per variant per repetition.
 - **Phase 3** fans out to **one task per scenario**, so labelling parallelises
   across workers and a single failed scenario does not fail the run. A group
   callback marks the `PhaseRun` complete when all children finish.
@@ -264,8 +265,8 @@ Django-Q2 with a Redis broker, run as a separate `qcluster` process.
 - The frontend polls run status; TanStack Query handles the polling interval and
   cache invalidation.
 
-Arm A and arm B are separate tasks with separately constructed contexts. There
-is no shared conversation state between them at any point.
+Variant A and variant B are separate tasks with separately constructed
+contexts. There is no shared conversation state between them at any point.
 
 ### Provider
 
@@ -330,7 +331,7 @@ GET    /api/taxonomies/                       GET /api/taxonomies/{id}/hcvs/
 CRUD   /api/resources/                        upload + text extraction
 CRUD   /api/fewshots/                         ?phase=2|3
 CRUD   /api/system-descriptions/              ?origin=&run=
-CRUD   /api/scenarios/                        ?origin=&run=&arm=
+CRUD   /api/scenarios/                        ?origin=&run=&variant=
 CRUD   /api/prompts/                          ?phase=  (PATCH creates a new version)
 POST   /api/prompts/{id}/preview/             → exact rendered system+user strings
 GET    /api/models/                           OpenRouter model list, cached 1h
@@ -360,9 +361,9 @@ main tool for prompt refinement and must never diverge from what the task sends
 | Dashboard | experiments and recent runs with status |
 | Resources | upload text files, view extracted text, pair them into few-shots |
 | Taxonomy | the 21 HCVs, read-only, with version selector |
-| Corpus | system descriptions and scenarios; filter by origin, run, arm; edit; promote generated → seed |
+| Corpus | system descriptions and scenarios; filter by origin, run, variant; edit; promote generated → seed |
 | Prompt editor | Jinja2 editor, version history, live preview of the exact rendered prompt |
-| Experiment builder | models, prompts, taxonomy, seeds, few-shots, the two toggles, counts, arms, N |
+| Experiment builder | models, prompts, taxonomy, seeds, few-shots, the two toggles, counts, variants, N |
 | Run detail | live status, per-scenario progress, retry; call inspector showing rendered prompt beside raw response |
 | Labels | scenario × HCV matrix with evidence and rationale on hover |
 
@@ -384,8 +385,9 @@ Both deferrals are already accommodated by the schema and need no migration:
 pytest-django, TDD throughout. `FakeLLMClient` covers the pipeline end to end
 without network access. The tests that matter most:
 
-- **Arm isolation** — rendering a Run A prompt with a taxonomy in scope must
-  raise, and the rendered arm-A string must contain no HCV identifier or name.
+- **Variant isolation** — rendering a Run A prompt with a taxonomy in scope
+  must raise, and the rendered variant-A string must contain no HCV identifier
+  or name.
 - **Prompt version pinning** — editing a template mid-batch must not change what
   an in-flight run sends.
 - **Schema failure handling** — an out-of-vocabulary `hcv_id`, malformed JSON,
