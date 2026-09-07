@@ -145,12 +145,22 @@ FewShotExample(
     order, is_active)
 ```
 
-Three notes on the shape:
+Notes on the shape:
 
-- **`origin` is the only thing separating seed from generated material.** Both
-  live in the same tables, so anything the LLM produces can be edited, promoted
-  to a seed, or used as a few-shot without copying. Material the admin authors
-  by hand is `manual`.
+- **`origin` decides what may be edited.** Human-authored material — the
+  Phase 1 expert pack (`seed`) and anything the admin writes in the app
+  (`manual`) — is freely editable. **`generated` rows are immutable.** They are
+  the record of what the model produced, and editing them would silently
+  contaminate the measurement. If Phase 2 output is unsatisfactory, the response
+  is to change the prompt or the inputs and generate again, not to correct the
+  result by hand. Enforced in the serializer: `PATCH` on a `generated` row is
+  rejected.
+- **Deletion is per run, never per row.** A misconfigured or failed run can be
+  deleted whole, cascading to its systems and scenarios. Individual generated
+  rows cannot be deleted, because cherry-picking which outputs survive is
+  selective reporting.
+- Seed and generated material still share the same tables, so Phase 3 labels
+  every scenario through one code path regardless of where it came from.
 - **`FewShotExample` is an input/output pair**, so a Phase 2 few-shot is
   *(system description → scenarios)* and a Phase 3 few-shot is
   *(scenario → labels)*. Each side is either inline text or a `ResourceFile`
@@ -228,10 +238,15 @@ PhaseRun(
     error, started_at, finished_at, created_by→)
 
 LLMCall(
-    phase_run→, sequence,
+    phase_run→, sequence, scenario→ (null),   # which scenario, for phase 3
     rendered_system_prompt: text, rendered_user_prompt: text,
-    raw_response: text, parsed_ok: bool, parse_error: text,
-    model, prompt_tokens, completion_tokens, cost, latency_ms, created_at)
+    request_json: JSON,          # the complete body sent to OpenRouter
+    response_json: JSON,         # the complete OpenRouter response, verbatim
+    raw_response: text,          # assistant content, from response_json
+    parsed_ok: bool, parse_error: text,
+    http_status, transport_error: text,       # set when no body came back
+    model, finish_reason, prompt_tokens, completion_tokens, cost, latency_ms,
+    created_at)
 
 Label(
     phase_run→, scenario→, hcv→,
@@ -244,8 +259,29 @@ Label(
 a validator requires at least one to be true, and requires `target_system` when
 `generate_systems` is false.
 
-`LLMCall` stores the **exact rendered prompts and the raw response** for every
-call, successful or not. This is the reproducibility record.
+`LLMCall` stores **both complete payloads** for every call, successful or not:
+`request_json` is the exact body sent to OpenRouter, `response_json` the entire
+response object as returned. Nothing is truncated or normalised on the way in.
+
+`response_json` is the authoritative record. The scalar columns beside it —
+`model`, `finish_reason`, token counts, `cost` — are convenience projections
+extracted at write time so they can be filtered and summed in SQL, but anything
+not modelled as a column (the serving provider, generation id, native finish
+reason, per-token pricing, moderation fields) is still recoverable from the dump
+without a migration. `raw_response` is likewise a projection: the assistant
+message content, which is what the UI shows and what parsing consumed, so a
+malformed response is inspectable rather than lost.
+
+When a call fails before a body exists — rate limit, timeout, 5xx —
+`response_json` is null and `http_status` with `transport_error` carry the
+reason, so a failed call is still a full record rather than a gap.
+`finish_reason` separates a model that refused from one that hit the token
+ceiling mid-JSON: different problems, different fixes.
+
+Every call is therefore viewable in full, in both modes: after a single
+iterate-mode call, and for each of the calls behind a batch run. The same
+records are carried into the export (§9), so a downloaded batch is
+self-contained.
 
 `Label.source` and the nullable `created_by` are the Phase 4 seam: human labels
 land in the same table with `source="human"`, needing no migration.
@@ -280,13 +316,36 @@ then validated against a Pydantic model. A schema violation is recorded on the
 The client sits behind a small interface with a `FakeLLMClient` implementation,
 so the entire pipeline is testable with no network and no spend.
 
+### API key
+
+Two sources, checked in order:
+
+1. `User.openrouter_key` — set by each user on their profile screen. Optional.
+2. `OPENROUTER_API_KEY` — a project-wide key from the environment, used when the
+   user has none.
+
+Per-user keys mean spend is attributable to whoever launched the run; the
+project key means the app works out of the box for a single-researcher setup.
+Launching a run with neither resolvable fails immediately with a clear message
+rather than producing a run full of 401s, and `GET /api/models/` reports the
+same.
+
+The key is `write_only` in the serializer and shown masked (first four and last
+four characters) on read, following CoReview. It is **never** written to
+`LLMCall`: the `Authorization` header is stripped before `request_json` is
+stored, and the storage layer asserts no stored payload contains a value
+matching `sk-or-`. That assertion matters because the export ships request
+payloads, and an exported bundle is the artifact most likely to be shared with a
+collaborator or attached to a paper.
+
 ## 7. Authentication
 
 Custom `User` (email as username, no separate username field) with
-`must_change_password`. An admin creates accounts via Django admin or a
-management command and hands the user a password; first login forces a change.
-Session authentication with CSRF, `IsAuthenticated` as the DRF default. No
-social auth, no self-registration, no password reset email flow in v1.
+`must_change_password` and an optional `openrouter_key` (§6). An admin creates
+accounts via Django admin or a management command and hands the user a
+password; first login forces a change. Session authentication with CSRF,
+`IsAuthenticated` as the DRF default. No social auth, no self-registration, no
+password reset email flow in v1.
 
 `is_staff` gates the destructive and configuration surfaces: taxonomy import,
 prompt editing, experiment creation and run launching.
@@ -326,12 +385,14 @@ Session auth; every endpoint requires authentication except login.
 ```
 POST   /api/auth/login/                       GET /api/auth/me/
 POST   /api/auth/logout/                      POST /api/auth/change-password/
+GET    /api/profile/  PATCH /api/profile/     openrouter_key (masked on read)
 
 GET    /api/taxonomies/                       GET /api/taxonomies/{id}/hcvs/
 CRUD   /api/resources/                        upload + text extraction
 CRUD   /api/fewshots/                         ?phase=2|3
 CRUD   /api/system-descriptions/              ?origin=&run=
-CRUD   /api/scenarios/                        ?origin=&run=&variant=
+CRUD   /api/scenarios/                        ?origin=&run=&variant=  writes
+                                              on seed/manual rows only
 CRUD   /api/prompts/                          ?phase=  (PATCH creates a new version)
 POST   /api/prompts/{id}/preview/             → exact rendered system+user strings
 GET    /api/models/                           OpenRouter model list, cached 1h
@@ -353,6 +414,36 @@ configuration and returns the literal strings that would be sent. This is the
 main tool for prompt refinement and must never diverge from what the task sends
 — both go through the same renderer.
 
+`PATCH` and `DELETE` on a system description or scenario with
+`origin="generated"` return 403. Generated material is only removed by deleting
+the run that produced it, via `DELETE /api/phase-runs/{id}/`, which cascades.
+
+### Export contents
+
+`GET /api/experiments/{id}/export/` returns everything needed to reconstruct
+the experiment without database access:
+
+```
+experiment      config, model ids, temperatures, toggles, counts, N
+taxonomy        the pinned version, all 21 rows verbatim
+prompts         each pinned template, at the version used
+inputs          seed systems and few-shot pairs as they were rendered from
+runs            per repetition and variant: status, timings, tokens, cost
+systems         generated system descriptions
+scenarios       card fields, narrative, origin, source run and variant
+labels          hcv, evidence, rationale, source, and the call that produced it
+calls           every LLMCall in full — both rendered prompts, the complete
+                request and response JSON, parse errors, and the projected
+                model, finish_reason, tokens, cost and latency
+```
+
+`format=json` nests this as one bundle. `format=csv` emits a zip of flat tables
+on the same content, with `calls.csv` carrying the prompt and response columns
+in full rather than truncated — the export is an archival record, so size is
+the wrong thing to optimise. Deferred metrics and the offline ontology step both
+read this bundle, which is why it carries the prompts and calls rather than only
+the labels.
+
 ## 10. Screens
 
 | Screen | Purpose |
@@ -361,10 +452,10 @@ main tool for prompt refinement and must never diverge from what the task sends
 | Dashboard | experiments and recent runs with status |
 | Resources | upload text files, view extracted text, pair them into few-shots |
 | Taxonomy | the 21 HCVs, read-only, with version selector |
-| Corpus | system descriptions and scenarios; filter by origin, run, variant; edit; promote generated → seed |
+| Corpus | system descriptions and scenarios; filter by origin, run, variant; seed and manual rows editable, generated rows read-only and marked as such |
 | Prompt editor | Jinja2 editor, version history, live preview of the exact rendered prompt |
 | Experiment builder | models, prompts, taxonomy, seeds, few-shots, the two toggles, counts, variants, N |
-| Run detail | live status, per-scenario progress, retry; call inspector showing rendered prompt beside raw response |
+| Run detail | live status, per-scenario progress, retry; call inspector listing every call with the full rendered prompt beside the verbatim response, copyable, never truncated |
 | Labels | scenario × HCV matrix with evidence and rationale on hover |
 
 ## 11. Deferred
@@ -388,6 +479,17 @@ without network access. The tests that matter most:
 - **Variant isolation** — rendering a Run A prompt with a taxonomy in scope
   must raise, and the rendered variant-A string must contain no HCV identifier
   or name.
+- **Generated material is immutable** — `PATCH` and `DELETE` on a `generated`
+  system description or scenario must be refused, while the same requests on a
+  `seed` or `manual` row must succeed.
+- **Call records are complete** — every call must expose its two rendered
+  prompts and the untouched request and response JSON, including for calls that
+  failed to parse and for calls that never got a body; projected columns must
+  agree with the values inside `response_json`; and the export must round-trip
+  all of it, verified by comparing a downloaded bundle against the rows.
+- **No key leakage** — a stored `request_json`, an API response and an export
+  bundle must none of them contain an OpenRouter key, asserted against a run
+  made with a recognisable sentinel key.
 - **Prompt version pinning** — editing a template mid-batch must not change what
   an in-flight run sends.
 - **Schema failure handling** — an out-of-vocabulary `hcv_id`, malformed JSON,
