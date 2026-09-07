@@ -23,6 +23,9 @@ editing a `.docx`:
 
     python3 scripts/extract_docx.py resources/seeds/oldsmar/scenarios.docx
 
+Pass `--format html` to recover the source colour coding as semantic spans;
+see below.
+
 ## What each file feeds
 
 | File | Used by |
@@ -32,13 +35,53 @@ editing a `.docx`:
 | `ontology/vocabulary_*.md` | Reference for the offline ontology-validation step. Optionally injectable into prompts as a resource. |
 | `seeds/oldsmar/abox.json` | Reference only. ABox encoding is out of scope for phases 1-3. |
 
-## Known limitation: colour coding
+## Colour coding, and why Markdown drops it
 
-The source `.docx` files use colour to mark vocabulary terms — blue bold for a
-class, green italic for an object property, orange bold for a fixed value,
-black bold for an individual. Markdown has no colour, so that distinction is
-lost in extraction. Term names are still readable in place, and the vocabulary
-file remains the authoritative list of which name is which kind.
+The two seed `.docx` files mark vocabulary term *kind* by colour: blue bold a
+class, green italic an object property, orange bold a fixed value, purple italic
+a term with no vocabulary entry, bold-without-colour an individual. That is
+semantic, not decorative — the legend at the top of the system description says
+so. Markdown has no colour, so extraction drops it.
+
+That is deliberate. The information is recoverable almost everywhere else:
+
+| Kind | Recoverable from the vocabulary by name lookup |
+|------|--------|
+| fixed value | 100% |
+| object property | 96-100% |
+| class | 64-76%, the shortfall being classes the vocabulary omits |
+| individual | 0%, but the prose already writes `EP1 (ExternalParty)` — 29 such pairs in the seed scenarios |
+| undefined | 0%, and genuinely unique (see below) |
+
+Nothing in phases 1-3 reads term kinds, and the seed scenarios are used as
+Phase 2 few-shots where the HTML markup roughly doubles the token cost. When
+ABox encoding needs the annotation, recover it with:
+
+    python3 scripts/extract_docx.py --format html resources/seeds/oldsmar/scenarios.docx
+
+which emits `<span class="term-class">…</span>` and friends. The `.docx` files
+are kept in the repository precisely so that stays possible.
+
+Purple italic is the one signal with no other source: it means no vocabulary
+term exists for that phrase and the ontology needs extending. The Oldsmar seed
+carries three — `process data`, `identity data`, `help with their bills`.
+
+## Vocabulary gaps
+
+Two inconsistencies in `vocabulary_2026-08-26`, recorded here because the
+ontology-validation step will hit them. Neither is fixed by this repository.
+
+- §1.1 declares `SystemElement (55)` but lists 33 rows. The gap corresponds to
+  the ~21 `VulnerabilityCondition` subclasses that the HCV taxonomy references
+  in `condition_classes` and that the vocabulary discusses in prose but never
+  tabulates. `DataCategory` likewise declares 5 and lists 6.
+- Ten classes used in the Oldsmar seed have no vocabulary entry at all:
+  `OperatorWorkstation`, `SensingDevice`, `ActuatingDevice`, `AIService`,
+  `SelfServicePortal`, `NetworkInfrastructure`, `GovernmentOrganization`,
+  `CloudServiceProvider`, `IoTVendor`, `ManagedServiceProvider`.
+
+The vocabulary's own rule is that everything named in a system description must
+be an instance of a section 1 class, so these need reconciling upstream.
 
 ## Taxonomy note
 
