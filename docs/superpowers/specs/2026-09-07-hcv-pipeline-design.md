@@ -84,7 +84,7 @@ departures:
 ```
 backend/
   config/            settings, urls, wsgi, asgi
-  core/              User, auth views, admin bootstrap commands
+  core/              User, AppSettings, auth views, admin bootstrap commands
   taxonomy/          Taxonomy, HCV, import command
   corpus/            SystemDescription, Scenario, ResourceFile, FewShotExample
   prompts/           PromptTemplate, sandboxed Jinja2 rendering
@@ -318,37 +318,47 @@ so the entire pipeline is testable with no network and no spend.
 
 ### API key
 
-Two sources, checked in order:
+One key for the whole application, not one per user — every run is part of the
+same research project and bills to the same account.
 
-1. `User.openrouter_key` — set by each user on their profile screen. Optional.
-2. `OPENROUTER_API_KEY` — a project-wide key from the environment, used when the
-   user has none.
+```
+core.AppSettings              singleton, pk pinned to 1
+    openrouter_key: text (blank)
+    updated_by→, updated_at
+```
 
-Per-user keys mean spend is attributable to whoever launched the run; the
-project key means the app works out of the box for a single-researcher setup.
-Launching a run with neither resolvable fails immediately with a clear message
+Resolution order, highest first:
+
+1. `AppSettings.openrouter_key` — set by an admin on the Settings screen.
+2. `OPENROUTER_API_KEY` — read from the environment.
+
+The admin-entered key wins, so a key can be rotated in the running app without a
+redeploy or a container restart. The environment variable is the bootstrap path:
+it lets a fresh deployment work before anyone has opened the UI, and lets
+development and CI supply a key without writing one to the database.
+
+Launching a run when neither resolves fails immediately with a clear message
 rather than producing a run full of 401s, and `GET /api/models/` reports the
 same.
 
 The key is `write_only` in the serializer and shown masked (first four and last
-four characters) on read, following CoReview. It is **never** written to
-`LLMCall`: the `Authorization` header is stripped before `request_json` is
-stored, and the storage layer asserts no stored payload contains a value
-matching `sk-or-`. That assertion matters because the export ships request
-payloads, and an exported bundle is the artifact most likely to be shared with a
-collaborator or attached to a paper.
+four characters) on read. It is **never** written to `LLMCall`: the
+`Authorization` header is stripped before `request_json` is stored, and the
+storage layer asserts no stored payload contains a value matching `sk-or-`. That
+assertion matters because the export ships request payloads, and an exported
+bundle is the artifact most likely to be shared with a collaborator or attached
+to a paper.
 
 ## 7. Authentication
 
 Custom `User` (email as username, no separate username field) with
-`must_change_password` and an optional `openrouter_key` (§6). An admin creates
-accounts via Django admin or a management command and hands the user a
-password; first login forces a change. Session authentication with CSRF,
-`IsAuthenticated` as the DRF default. No social auth, no self-registration, no
-password reset email flow in v1.
+`must_change_password`. An admin creates accounts via Django admin or a
+management command and hands the user a password; first login forces a change.
+Session authentication with CSRF, `IsAuthenticated` as the DRF default. No
+social auth, no self-registration, no password reset email flow in v1.
 
-`is_staff` gates the destructive and configuration surfaces: taxonomy import,
-prompt editing, experiment creation and run launching.
+`is_staff` gates the destructive and configuration surfaces: the OpenRouter
+key, taxonomy import, prompt editing, experiment creation and run launching.
 
 ## 8. Output schemas
 
@@ -385,7 +395,8 @@ Session auth; every endpoint requires authentication except login.
 ```
 POST   /api/auth/login/                       GET /api/auth/me/
 POST   /api/auth/logout/                      POST /api/auth/change-password/
-GET    /api/profile/  PATCH /api/profile/     openrouter_key (masked on read)
+GET    /api/settings/  PATCH /api/settings/   openrouter_key, staff only
+                                              (write_only; masked on read)
 
 GET    /api/taxonomies/                       GET /api/taxonomies/{id}/hcvs/
 CRUD   /api/resources/                        upload + text extraction
@@ -449,6 +460,7 @@ the labels.
 | Screen | Purpose |
 |---|---|
 | Login | email + password; forced change on first login |
+| Settings | staff only: OpenRouter key, masked, with which source is currently in effect |
 | Dashboard | experiments and recent runs with status |
 | Resources | upload text files, view extracted text, pair them into few-shots |
 | Taxonomy | the 21 HCVs, read-only, with version selector |
@@ -490,6 +502,9 @@ without network access. The tests that matter most:
 - **No key leakage** — a stored `request_json`, an API response and an export
   bundle must none of them contain an OpenRouter key, asserted against a run
   made with a recognisable sentinel key.
+- **Key precedence** — with both sources set, the admin-entered key is the one
+  sent; clearing it must fall back to the environment variable; with neither,
+  launching a run must fail before any HTTP call is made.
 - **Prompt version pinning** — editing a template mid-batch must not change what
   an in-flight run sends.
 - **Schema failure handling** — an out-of-vocabulary `hcv_id`, malformed JSON,
