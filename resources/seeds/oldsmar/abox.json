@@ -1,0 +1,215 @@
+{
+  "case_id": "oldsmar",
+  "prefix": "old",
+  "case_iri": "https://cogcity.ontology.org/case/oldsmar",
+  "imports": "https://cogcity.ontology.org",
+  "note": "One ABox for the whole pack: system description plus sc_01, sc_02, sc_03. Every assertion carries the sentence that licenses it, per codebook rule A2. Closure is written only where the description gives an exhaustive list, per rule A6. Where the description is silent the row is left not assessable, per rule A3.",
+
+  "individuals": [
+
+    { "id": "PO1", "types": ["CityOperator"], "evidence": {"types": "PO1 to PO5, Plant Operators."} },
+    { "id": "PO2", "types": ["CityOperator"] },
+    { "id": "PO3", "types": ["CityOperator"] },
+    { "id": "PO4", "types": ["CityOperator"] },
+    { "id": "PO5", "types": ["CityOperator"] },
+
+    { "id": "SUP1", "types": ["CityOperator"],
+      "obj": {"holdsAuthority": ["Authority_OperationalControl"]},
+      "evidence": {"holdsAuthority": "Approves any change to the chemical feed above 200 parts per million."} },
+
+    { "id": "ITO1", "types": ["CityOperator"],
+      "obj": {"holdsAuthority": ["Authority_AccessGranting"]},
+      "evidence": {"holdsAuthority": "Creates and removes the accounts on those machines."} },
+
+    { "id": "BC1", "types": ["CityOperator"],
+      "obj": {"holdsAuthority": ["Authority_PaymentRelease", "Authority_DataRelease"]},
+      "evidence": {"holdsAuthority": "passes approved invoices to the city finance team for payment. Also answers written requests from residents about the records the Utility holds on them."} },
+
+    { "id": "CityManager", "types": ["CityOperator"],
+      "evidence": {"types": "grantedBy the City Manager, when the Plant was commissioned in 2013."} },
+
+    { "id": "MVE1", "types": ["User"] },
+    { "id": "MVE2", "types": ["User"] },
+    { "id": "CL1", "types": ["User"] },
+
+    { "id": "R2210", "types": ["Citizen"],
+      "obj": {"interactsWith": ["AquaAccountPortal"]},
+      "evidence": {"interactsWith": "sc_03 step 1. R2210 opens the help form on the AquaAccount Portal on her laptop."} },
+
+    { "id": "R4471", "types": ["SeniorCitizen"],
+      "obj": {"hasVulnerabilityFactor": ["Factor_Age_Senior"], "interactsWith": ["AquaAccountApp"]},
+      "evidence": {"types": "The 2,100 in the older band are SeniorCitizen.",
+                   "interactsWith": "sc_03 step 2. R4471, aged 78, opens the same form on the AquaAccount App."} },
+
+    { "id": "VendorHelpDesk", "types": ["ExternalParty"],
+      "evidence": {"types": "The SCADA Service permitsContactWith that help desk, an ExternalParty."} },
+    { "id": "InvoiceSender", "types": ["ExternalParty"],
+      "evidence": {"types": "DF9 Inbound mailbox. hasSource an ExternalParty."} },
+    { "id": "RemoteAddress", "types": ["ExternalParty"],
+      "evidence": {"types": "DF4 Remote session. hasSource an address on the internet, held by an ExternalParty."} },
+
+    { "id": "W1", "types": ["OperatorWorkstation"],
+      "obj": {"usedBy": ["PO1","PO2","PO3","PO4","PO5"], "operatedBy": ["PO1","PO2","PO3","PO4","PO5"],
+              "configuredBy": ["ITO1"], "hasConfigState": ["Config_ShippedDefault"]},
+      "data": {"allowsRemovableMedia": true},
+      "evidence": {"hasConfigState": "Each runs the configuration supplied by the integrator at commissioning.",
+                   "allowsRemovableMedia": "Each machine has two USB ports on the front panel."} },
+    { "id": "W2", "types": ["OperatorWorkstation"],
+      "obj": {"usedBy": ["PO1","PO2","PO3","PO4","PO5"], "operatedBy": ["PO1"], "configuredBy": ["ITO1"], "hasConfigState": ["Config_ShippedDefault"]},
+      "data": {"allowsRemovableMedia": true} },
+    { "id": "W3", "types": ["OperatorWorkstation"],
+      "obj": {"usedBy": ["PO1"], "operatedBy": ["PO1"], "configuredBy": ["ITO1"], "hasConfigState": ["Config_ShippedDefault"]},
+      "data": {"allowsRemovableMedia": true} },
+    { "id": "W4", "types": ["OperatorWorkstation"],
+      "obj": {"usedBy": ["PO1"], "operatedBy": ["PO1"], "configuredBy": ["ITO1"], "hasConfigState": ["Config_ShippedDefault"]},
+      "data": {"allowsRemovableMedia": true} },
+
+    { "id": "DC1", "types": ["ActuatingDevice"], "obj": {"hasConsequenceType": ["Consequence_Safety"]} },
+    { "id": "DC2", "types": ["ActuatingDevice"], "obj": {"hasConsequenceType": ["Consequence_Safety"]} },
+    { "id": "AU1", "types": ["SensingDevice"] },
+    { "id": "S1", "types": ["SensingDevice"] },
+
+    { "id": "M0001", "types": ["SensingDevice"],
+      "represents": "M0001 to M9800, all fitted the same way under the 2019 supply contract.",
+      "obj": {"configuredBy": ["MVE1"], "hasConfigState": ["Config_ShippedDefault"]},
+      "notMitigatedBy": ["ForcedSecureSetup"],
+      "evidence": {"hasConfigState": "The vendor contractor fitted them under the 2019 supply contract, using the administrator credentials supplied with the units.",
+                   "notMitigatedBy": "A6. The units still run the shipped configuration, so nothing forced a secure setup before operation."} },
+
+    { "id": "SCADAService", "types": ["Service"],
+      "obj": {"operatedBy": ["PO1","PO2","PO3","PO4","PO5"],
+              "permitsContactWith": ["VendorHelpDesk"],
+              "mitigatedBy": ["ManualOverride","ActiveMonitoringTask"],
+              "monitoredBy": ["AnomalyAlerting"]},
+      "noControlFamily": ["ContactVerificationControl"],
+      "evidence": {"mitigatedBy": "The means of taking control back are two. And: the duties on an operator shift are three: take lab readings, set the chemical feed, and watch the console.",
+                   "permitsContactWith": "When an operator needs the vendor help desk, they call the number printed in an email footer.",
+                   "noControlFamily": "A6. The published contact routes are three: the general customer number, the billing address printed on the bill, and the shared mailbox."} },
+
+    { "id": "DoseAdvisor", "types": ["AIService"],
+      "obj": {"operatedBy": ["PO1","PO2","PO3","PO4","PO5"],
+              "hasAutomationLevel": ["Automation_High"],
+              "mitigatedBy": ["ManualOverride","ActiveMonitoringTask"]},
+      "evidence": {"hasAutomationLevel": "DoseAdvisor hasAutomationLevel Automation_High.",
+                   "mitigatedBy": "The SCADA Service and DoseAdvisor are each mitigatedBy ManualOverride. Watching the console is one of the three shift duties."} },
+
+    { "id": "MeterSync", "types": ["Service"] },
+
+    { "id": "AquaAccount", "types": ["Service"],
+      "obj": {"makesAutomatedDecisionAbout": ["R2210","R4471"],
+              "hasDecisionImpact": ["Impact_Consequential"],
+              "receivesFlow": ["DF6"]},
+      "evidence": {"makesAutomatedDecisionAbout": "A machine learning model ranks those applications, and that ranking sets who is contacted first.",
+                   "hasDecisionImpact": "sc_03 step 4 and 5. The ranking sets the order in which residents are telephoned."} },
+
+    { "id": "ProcessStore", "types": ["DataStore"] },
+
+    { "id": "CustomerStore", "types": ["DataStore"],
+      "obj": {"storesDataCategory": ["FinancialData","HealthData"], "mitigatedBy": ["SecureDisposalProcedure"]},
+      "evidence": {"mitigatedBy": "Customer Store records are deleted seven years after an account closes, and the Billing Clerk starts each deletion."} },
+
+    { "id": "MeterStore", "types": ["DataStore"],
+      "obj": {"storesDataCategory": ["BehavioralData","LocationData"], "mitigatedBy": ["RetentionLimitEnforcement"]},
+      "evidence": {"mitigatedBy": "The Meter Store is kept two years and the vendor deletes it automatically."} },
+
+    { "id": "LogStore", "types": ["DataStore"],
+      "obj": {"mitigatedBy": ["RetentionLimitEnforcement"]},
+      "evidence": {"mitigatedBy": "The Log Store keeps 30 days and then overwrites itself automatically."} },
+
+    { "id": "HelpApplicationCabinet", "types": ["DataStore"],
+      "obj": {"storesDataCategory": ["HealthData","FinancialData"]},
+      "noControlFamily": ["DataLifecycleControl"],
+      "evidence": {"storesDataCategory": "It holds HealthData and FinancialData.",
+                   "noControlFamily": "A6. When it is full the oldest applications are cleared out into the site waste. The waste services at the site are two: general waste and mixed recycling."} },
+
+    { "id": "HMIConsole", "types": ["Interface"], "obj": {"interfaceOf": ["SCADAService"]} },
+    { "id": "TeamViewerSession", "types": ["Interface"], "obj": {"interfaceOf": ["SCADAService"]} },
+    { "id": "AquaAccountPortal", "types": ["SelfServicePortal"], "obj": {"interfaceOf": ["AquaAccount"]} },
+    { "id": "AquaAccountApp", "types": ["MobileApp"], "obj": {"interfaceOf": ["AquaAccount"]} },
+    { "id": "VendorDownloadAddress", "types": ["WebAccessChannel"] },
+    { "id": "ContractorNotesSite", "types": ["WebAccessChannel"] },
+
+    { "id": "PlantSegment", "types": ["NetworkInfrastructure"] },
+
+    { "id": "PlantAdminGrant", "types": ["AccessGrant"],
+      "obj": {"grantedTo": ["PO1","PO2","PO3","PO4","PO5","SUP1","ITO1"],
+              "grantedBy": ["CityManager"],
+              "grantsAccessTo": ["SCADAService","HMIConsole"],
+              "hasAccessScope": ["Scope_Privileged"]},
+      "notMitigatedBy": ["LeastPrivilegeEnforcement","PeriodicAccessReview"],
+      "evidence": {"hasAccessScope": "One shared plant administrator account.",
+                   "grantedBy": "grantedBy the City Manager, when the Plant was commissioned in 2013.",
+                   "notMitigatedBy": "A6. The activities carried out on these grants are two: account creation and account removal on the workstations."} },
+
+    { "id": "MeterVendorGrant", "types": ["AccessGrant"],
+      "obj": {"grantedTo": ["MVE1","MVE2"], "grantsAccessTo": ["MeterStore","M0001"], "hasAccessScope": ["Scope_Privileged"]},
+      "notMitigatedBy": ["LeastPrivilegeEnforcement","PeriodicAccessReview"],
+      "evidence": {"grantedBy": "NOT ASSERTED. The record of this grant names the 2019 supply contract as its source, not a person."} },
+
+    { "id": "ResidentGrant", "types": ["AccessGrant"],
+      "obj": {"grantedTo": ["R2210","R4471"], "grantsAccessTo": ["CustomerStore"], "hasAccessScope": ["Scope_Standard"]} },
+
+    { "id": "PlantConsoleAuth", "types": ["AuthenticationMechanism"],
+      "obj": {"protects": ["SCADAService"], "requiresTask": ["CredentialEntryTask"], "decisionMechanism": ["RuleBasedLogic"]},
+      "noControlFamily": ["PasswordControl"],
+      "evidence": {"requiresTask": "requiresTask CredentialEntry.",
+                   "noControlFamily": "A6. Section 5 lists the controls on every route in. This mechanism lists none."} },
+
+    { "id": "AquaAccountAuth", "types": ["AuthenticationMechanism"],
+      "obj": {"protects": ["AquaAccount"], "requiresTask": ["CredentialEntryTask2"], "decisionMechanism": ["RuleBasedLogic"],
+              "mitigatedBy": ["PasswordStrengthEnforcement"]},
+      "evidence": {"mitigatedBy": "a password of six characters or more, which the service enforces."} },
+
+    { "id": "MeterVendorAuth", "types": ["AuthenticationMechanism"],
+      "obj": {"protects": ["MeterStore","M0001"], "requiresTask": ["CredentialEntryTask3"], "decisionMechanism": ["RuleBasedLogic"],
+              "mitigatedBy": ["MultiFactorAuthentication"]},
+      "evidence": {"mitigatedBy": "An engineer enters a vendor password and then a one-time code."} },
+
+    { "id": "CredentialEntryTask", "types": ["CredentialEntry"] },
+    { "id": "CredentialEntryTask2", "types": ["CredentialEntry"] },
+    { "id": "CredentialEntryTask3", "types": ["CredentialEntry"] },
+
+    { "id": "ControlRoom", "types": ["RestrictedArea"] },
+    { "id": "ChemicalStore", "types": ["RestrictedArea"] },
+
+    { "id": "PerimeterGate", "types": ["PhysicalEntryPoint"],
+      "obj": {"admissionBy": ["PO1","PO2","PO3","PO4","PO5"], "monitoredBy": ["ChallengeProcedure"]},
+      "notMitigatedBy": ["AntiTailgatingBarrier"],
+      "evidence": {"admissionBy": "the operator on shift admits people through it, so the gate is admissionBy the Plant Operators.",
+                   "notMitigatedBy": "A6. The physical measures at the site are three: the perimeter gate, the two coded doors, and the reception desk."} },
+
+    { "id": "ControlRoomDoor", "types": ["PhysicalEntryPoint"],
+      "obj": {"controlsEntryTo": ["ControlRoom"], "monitoredBy": ["ChallengeProcedure"]},
+      "notMitigatedBy": ["AntiTailgatingBarrier"] },
+
+    { "id": "ChemicalStoreDoor", "types": ["PhysicalEntryPoint"],
+      "obj": {"controlsEntryTo": ["ChemicalStore"], "monitoredBy": ["ChallengeProcedure"]},
+      "notMitigatedBy": ["AntiTailgatingBarrier"] },
+
+    { "id": "DF4", "types": ["DataFlow"],
+      "obj": {"hasSource": ["RemoteAddress"], "hasDestination": ["W2"], "crossesBoundary": ["ServiceToThirdParty"]},
+      "evidence": {"hasSource": "sc_01 step 1. An ExternalParty opens a TeamViewer Session to W2."} },
+
+    { "id": "DF5", "types": ["DataFlow"],
+      "obj": {"hasSource": ["M0001"], "hasDestination": ["MeterStore"],
+              "hasDataCategory": ["BehavioralData","LocationData"], "crossesBoundary": ["ServiceToThirdParty"]},
+      "notMitigatedBy": ["UnderstandablePurposeNotice"],
+      "evidence": {"notMitigatedBy": "A6. The notices given to residents are two. The leaflet says the meter is read remotely, and does not say why or where the reading goes."} },
+
+    { "id": "DF6", "types": ["DataFlow"],
+      "obj": {"hasSource": ["R4471"], "hasDestination": ["AquaAccount"],
+              "hasDataCategory": ["HealthData","FinancialData"], "crossesBoundary": ["CitizenToService"]},
+      "notMitigatedBy": ["UnderstandablePurposeNotice"],
+      "evidence": {"hasSource": "sc_03 step 3. R4471 sends the form with four words in the box.",
+                   "notMitigatedBy": "A6. The privacy notice is sent with the first bill, not at the point of disclosure."} },
+
+    { "id": "DF7", "types": ["DataFlow"],
+      "obj": {"hasSource": ["AquaAccount"], "hasDestination": ["CustomerStore"],
+              "hasDataCategory": ["HealthData","FinancialData"], "crossesBoundary": ["ServiceToCloud"]},
+      "notMitigatedBy": ["UnderstandablePurposeNotice"] },
+
+    { "id": "DF9", "types": ["DataFlow"],
+      "obj": {"hasSource": ["InvoiceSender"], "hasDestination": ["BC1"], "crossesBoundary": ["ServiceToThirdParty"]},
+      "evidence": {"hasDestination": "About thirty invoices and vendor notices a day, at one shared mailbox, answered by the Billing Clerk."} }
+  ]
+}

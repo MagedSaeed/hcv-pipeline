@@ -1,0 +1,109 @@
+Oldsmar Water Treatment Case
+
+Colour	What does it mean	Example
+Blue, bold	A class from the vocabulary. The thing named is an instance of it.	OperatorWorkstation
+Green, italic	An object property. It joins two named things.	interfaceOf
+Orange, bold	A fixed value from section 3. The value is taken from that list.	Config_ShippedDefault
+Purple, italic	Other values are required in the system descriptions and no term for it in the corpus. (those need to be given as a list at the end of the case)	process data
+Black, bold	The name of an individual in this case. Not a vocabulary term.	W1
+
+
+
+Part 1. System Description
+1. Purpose and scope
+The Bruce T. Haddock Water Treatment Plant, called the Plant, treats the drinking water for Oldsmar, Florida, a town of about 14,000 people. It opened in 2013. The city Public Works department, called the Utility, runs it. The Utility is a GovernmentOrganization. It also reads household water meters, issues the bills, and answers residents who contact it.
+2. Elements
+2.1 Devices
+W1 to W4, four industrial control system workstations (OperatorWorkstation), stand in the control room. An operator monitors the Plant and changes settings from them, so each is usedBy the Plant Operators and operatedBy them. Each runs Windows 7; the vendor ended support for that version in January 2020. Each has its own connection to the internet, and each carries TeamViewer, a remote access product, so the machines can be reached from off site. Each runs the configuration supplied by the integrator at commissioning, so each hasConfigState Config_ShippedDefault, and each is configuredBy the City IT Officer, who administers them. Each machine has two USB ports on the front panel, which the calibration engineers use for the dongles they bring on site.
+DC1 and DC2, two dosing controllers (ActuatingDevice), set the sodium hydroxide feed. The normal setting is 100 parts per million. Each hasConsequenceType Consequence_Safety.
+AU1, the pH alarm unit (SensingDevice), raises an audible and on-screen alarm at the console when treated water moves outside a set band. That alarm is its output.
+S1 to S12, the plant sensors (SensingDevice), read pH, alkalinity, temperature, turbidity and flow.
+M0001 to M9800, 9,800 smart meters (SensingDevice), are fitted at household connections and run with no person present. Each holds an administrator account. The vendor contractor fitted them under the 2019 supply contract, using the administrator credentials supplied with the units, so each hasConfigState Config_ShippedDefault and each is configuredBy a Meter Vendor Engineer.
+2.2 Services
+The SCADA Service (Service) reads the sensors and applies the setpoint it holds. The dose that suits the water depends on the water arriving that hour: its pH, its alkalinity, its temperature, how cloudy it is, and how fast it is flowing. Rain, a hot day, or a change in the source all move it. An operator takes a lab reading, decides the dose, and types the setpoint in at the console, each shift and again when the water changes. The Service is operatedBy the Plant Operators.
+DoseAdvisor (AIService), added in 2020, uses a machine learning model to predict the chemical dose needed for the next four hours and writes that setpoint straight to the dosing controllers. It looks forward instead of backward. Chemical dosing has a delay: the chemical added now shows in the pH reading minutes later, so a feedback loop is always chasing. Predicting the next four hours from flow, temperature and turbidity sets the dose before the water arrives, which holds the treated water steadier and uses less chemical. DoseAdvisor hasAutomationLevel Automation_High and is operatedBy the Plant Operators.
+MeterSync (Service) collects meter readings.
+AquaAccount (Service) is the service through which residents view bills, pay them, and apply for help when someone cannot pay. A machine learning model ranks those applications, and that ranking sets who is contacted first, so AquaAccount makesAutomatedDecisionAbout the residents and hasDecisionImpact Impact_Consequential.
+2.3 Data stores
+The Process Store (DataStore) sits on a server in the Plant building and holds setpoints, sensor readings and alarms, which are process data.
+The Customer Store (DataStore) is hosted with a CloudServiceProvider and holds 9,800 records: names, addresses, bank details, and what residents wrote when applying for help. It storesDataCategory FinancialData and HealthData, and also identity data.
+The Meter Store (DataStore) is held by the meter vendor and holds half-hourly household consumption. It storesDataCategory BehavioralData and LocationData. In v12 the categorySensitivity of LocationData is Sensitivity_High and of BehavioralData is Sensitivity_Medium.
+The Log Store (DataStore) sits on the Plant server and holds remote access sessions and setpoint changes.
+The Help Application Cabinet (DataStore) stands in the billing office and holds the paper applications for help with a bill. It holds HealthData and FinancialData.
+
+2.4 Interfaces
+The HMI Console (Interface) stands in the control room and is the interfaceOf the SCADA Service. The TeamViewer Session (Interface) presents that same console over the internet and is also the interfaceOf the SCADA Service. The AquaAccount Portal (SelfServicePortal) is on the web and the AquaAccount App (MobileApp) is on a phone; both are the interfaceOf AquaAccount. The Vendor Download Address and the Contractor Notes Site (WebAccessChannel) are the two web addresses staff type into a browser: the first to install the remote access product, the second to read a water industry contractor technical notes and downloads.
+2.5 Networks and Boundaries
+The site has one network segment (NetworkInfrastructure). The workstations, the dosing controllers and the office computers all sit on it, and it reaches the internet through a single connection.
+The trust boundaries (TrustBoundary) in this system are CitizenToService, ServiceToCloud and ServiceToThirdParty.
+3. People and Roles
+The roles in this description are exactly the seven below. Every person named anywhere in this pack holds one of them.
+Role	Class	What the role does
+PO1 to PO5, Plant Operators	CityOperator	Work shifts covering 06:00 to 22:00. They take lab readings and set the chemical feed at the console.
+SUP1, Plant Supervisor	CityOperator	Approves any change to the chemical feed above 200 parts per million. holdsAuthority Authority_OperationalControl.
+ITO1, City IT Officer	CityOperator	Administers the four workstations, alongside the same duty for four other city departments. Creates and removes the accounts on those machines. holdsAuthority Authority_AccessGranting.
+BC1, Billing Clerk	CityOperator	Answers the general customer number, reads the shared mailbox, checks incoming invoices against the order, and passes approved invoices to the city finance team for payment. Also answers written requests from residents about the records the Utility holds on them. holdsAuthority Authority_PaymentRelease and Authority_DataRelease.
+MVE1 and MVE2, Meter Vendor Engineers	User	Work for the meter company, an IoTVendor, not for the Utility.
+CL1, cleaning contractor staff	User	Work for a ManagedServiceProvider.
+R0001 to R9800, Residents	Citizen	Hold the 9,800 AquaAccount records. Each interactsWith the AquaAccount Portal or the AquaAccount App.
+
+
+The personal characteristics the Utility records are two: the age band of the account holder, and whether the holder receives help with the bill. The recorded age bands are under 70, with 7,700 holders, and 70 or over, with 2,100 holders. The 2,100 in the older band are SeniorCitizen and each hasVulnerabilityFactor Factor_Age_Senior. 340 holders receive help with their bills.
+The preparation the Utility gives staff is one day at the console on joining and an annual refresher on chemical handling. Each is monitoredBy AwarenessPreparation.
+4. Access Grants
+The access grants (AccessGrant) in this system are exactly these three.
+Grant	Facts recorded on it
+PlantAdminGrant	One shared plant administrator account. grantedTo the five Plant Operators, the Plant Supervisor and the City IT Officer. grantsAccessTo the SCADA Service and the HMI Console. hasAccessScope Scope_Privileged. grantedBy the City Manager, when the Plant was commissioned in 2013.
+MeterVendorGrant	Standing access to the Meter Store and to every smart meter in the town. grantedTo the two Meter Vendor Engineers. grantsAccessTo the Meter Store and the smart meters. hasAccessScope Scope_Privileged. The record of this grant names the 2019 supply contract as its source.
+ResidentGrant	grantedTo each resident. grantsAccessTo that resident own record in the Customer Store. hasAccessScope Scope_Standard.
+
+
+The activities carried out on these grants are two: account creation and account removal on the workstations, both done by the City IT Officer.
+5. Authentication
+The authentication mechanisms (AuthenticationMechanism) in this system are exactly these three, and between them they cover every route in.
+Mechanism	Facts recorded on it
+PlantConsoleAuth	protects the SCADA Service. Reached through the HMI Console and through the TeamViewer Session. requiresTask CredentialEntry. decisionMechanism RuleBasedLogic. The credential is one shared password, set at commissioning in 2013 and the one in use. The TeamViewer Session accepts connections from any address on the internet.
+AquaAccountAuth	protects AquaAccount. Reached through the Portal and the App. requiresTask CredentialEntry. decisionMechanism RuleBasedLogic. A resident enters an email address and a password of six characters or more, which the service enforces, so it is mitigatedBy PasswordStrengthEnforcement.
+MeterVendorAuth	protects the Meter Store and the smart meters. requiresTask CredentialEntry. decisionMechanism RuleBasedLogic. An engineer enters a vendor password and then a one-time code, so it is mitigatedBy MultiFactorAuthentication.
+
+
+6. Automation
+DoseAdvisor runs every fifteen minutes. It reads flow, temperature and turbidity from the SCADA Service and returns a setpoint for the next four hours, which it writes to the dosing controllers over the plant network.
+The SCADA Service accepts a setpoint from three sources: DoseAdvisor, the HMI Console in the control room, and a TeamViewer session. A setpoint takes effect when it is received.
+The AquaAccount ranking runs nightly and returns the order in which applications are queued. The Billing Clerk telephones people in that order.
+The duties on an operator shift are three: take lab readings, set the chemical feed, and watch the console. Shifts run 06:00 to 22:00.
+The means of taking control back are two: typing the correct setpoint at the console, and pulling the network cable out of a workstation. Each takes under a minute, and both have been done. The SCADA Service and DoseAdvisor are each mitigatedBy ManualOverride.
+AU1 raises its alarm at the console when treated water moves outside its band, so the SCADA Service is monitoredBy AnomalyAlerting.
+7. Data flows
+The data flows (DataFlow) in this system are exactly these ten.
+Flow	Facts recorded on it
+DF1 Sensor reading	hasSource S1 to S12. hasDestination the SCADA Service. Continuous. Carries process data. Stays on the plant segment.
+DF2 Setpoint request	hasSource the SCADA Service. hasDestination DoseAdvisor. Every fifteen minutes. Carries process data.
+DF3 Setpoint write	hasSource DoseAdvisor. hasDestination DC1 and DC2. Every fifteen minutes. Carries process data.
+DF4 Remote session	hasSource an address on the internet, held by an ExternalParty. hasDestination W1 to W4. Opened whenever a person opens one. Carries full console control. crossesBoundary ServiceToThirdParty.
+DF5 Meter reading	hasSource M0001 to M9800. hasDestination MeterSync and on to the Meter Store. Every half hour. hasDataCategory BehavioralData and LocationData. crossesBoundary ServiceToThirdParty. The leaflet handed over at installation says the meter is read remotely.
+DF6 Help application	hasSource a resident. hasDestination AquaAccount. On each use. hasDataCategory HealthData and FinancialData. crossesBoundary CitizenToService. Because its source is a person it is a UserInputFlow.
+DF7 Customer store write	hasSource AquaAccount. hasDestination the Customer Store. On each use. hasDataCategory HealthData and FinancialData. crossesBoundary ServiceToCloud.
+DF8 Ranking read	hasSource the Customer Store. hasDestination the AquaAccount ranking model. Nightly. hasDataCategory HealthData and FinancialData.
+DF9 Inbound mailbox	hasSource an ExternalParty. hasDestination BC1, the Billing Clerk. About thirty invoices and vendor notices a day, at one shared mailbox. crossesBoundary ServiceToThirdParty.
+DF10 Firmware push	hasSource the meter vendor. hasDestination M0001 to M9800. Over the air.
+
+
+8. Retention and disposal
+Process Store records are kept for the life of the Plant.
+The Log Store keeps 30 days and then overwrites itself automatically, so it is mitigatedBy RetentionLimitEnforcement.
+Customer Store records are deleted seven years after an account closes, and the Billing Clerk starts each deletion. The Store is mitigatedBy SecureDisposalProcedure.
+The Meter Store is kept two years and the vendor deletes it automatically, so it is mitigatedBy RetentionLimitEnforcement.
+The Help Application Cabinet is filled from the front. When it is full the oldest applications are cleared out into the site waste. The waste services at the site are two: general waste and mixed recycling.
+9. Physical places and entry
+Two areas are restricted (RestrictedArea): the control room and the chemical store.
+The entry points (PhysicalEntryPoint) at the site are three: the perimeter gate, the control room door and the chemical store door. The control room door controlsEntryTo the control room and the chemical store door controlsEntryTo the chemical store.
+Entry through the two doors is by a four digit keypad code, set in 2013 and the one in use. The people who hold the code are ten: the five Plant Operators, the Plant Supervisor, the City IT Officer, and the three cleaning contractor staff.
+The physical measures at the site are three: the perimeter gate, the two coded doors, and the reception desk. The perimeter gate stands open while a shift is running, and the operator on shift admits people through it, so the gate is admissionBy the Plant Operators. Contractors and cleaners walk in on their own. Staff are told to challenge a person they do not recognise, so each entry point is monitoredBy ChallengeProcedure.
+10. Reporting and dealing with outside parties
+The notices given to residents are two: a two page privacy notice sent with the first bill, in English, which says data is shared with our suppliers; and the meter leaflet handed over at installation, which says the meter is read remotely.
+A resident who objects does so by letter.
+The published contact routes are three: the general customer number, the billing address printed on the bill, and the shared mailbox. The general customer number is answered by the Billing Clerk, who also handles billing.
+A staff member who notices something calls the City IT Officer.
+When an operator needs the vendor help desk, they call the number printed in an email footer. The SCADA Service permitsContactWith that help desk, an ExternalParty.
+Operators and the City IT Officer read a water industry contractor website for technical notes and downloads. The remote access product is installed from the vendor web address, typed into a browser. Both are reached through a WebAccessChannel.

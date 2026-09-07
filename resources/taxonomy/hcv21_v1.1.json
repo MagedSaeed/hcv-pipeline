@@ -1,0 +1,133 @@
+{
+  "vocabulary_id": "HCV-21",
+  "version": "1.1",
+  "What are these row": "Closed label list for the scenario benchmark. A label outside this list is a schema error. If condition_classes is an empty list, this means the ontology carries no condition class for that row by design (out of scope) , so the reasoner can never infer it. Those rows stay in the label vocabulary, so that coverage of the taxonomy by the ontology becomes a reportable result.",
+  "rows": [
+    {
+      "hcv_id": "HCV-01",
+      "name": "Limited User Involvement in AI-based Authentication",
+      "definition": "Vulnerable populations* cannot complete the active steps required in AI-based authentication tasks, leading to bypassed or weakened verifications.",
+      "condition_classes": ["LimitedAuthenticationInvolvementCondition"]
+    },
+    {
+      "hcv_id": "HCV-02",
+      "name": "Poor HCI Design Limiting Participation",
+      "definition": "Complex or non-inclusive interfaces prevent users, especially vulnerable groups, from safely completing security or privacy actions, pushing them toward insecure workarounds.",
+      "condition_classes": ["PoorParticipatoryInterfaceCondition"]
+    },
+    {
+      "hcv_id": "HCV-03",
+      "name": "Operator Error Due to Overreliance on Automation",
+      "definition": "Heavy automation causes operators to disengage, missing anomalies or failing to act when needed.",
+      "condition_classes": ["UnmonitoredAutomationCondition"]
+    },
+    {
+      "hcv_id": "HCV-04",
+      "name": "Lack of Human Override in Automation",
+      "definition": "Operators cannot quickly correct AI malfunctions if the system lacks an adequate manual override.",
+      "condition_classes": ["MissingManualOverrideCondition"]
+    },
+    {
+      "hcv_id": "HCV-05",
+      "name": "Misinterpreted Emotional Responses",
+      "definition": "Emotion-sensing AI misreads emotional cues from citizens struggling with complex systems, leading to incorrect decisions that can affect them in areas like immigration in cognitive cities.",
+      "condition_classes": ["UnreviewedEmotionDecisionCondition"]
+    },
+    {
+      "hcv_id": "HCV-06",
+      "name": "Susceptibility to Deceptive Communication",
+      "definition": "Users' tendency to trust communications from seemingly legitimate sources makes them vulnerable to deceptive attacks, including phishing, smishing, and vishing.",
+      "condition_classes": ["InboundExternalCommunicationCondition"]
+    },
+    {
+      "hcv_id": "HCV-07",
+      "name": "Malicious Insiders",
+      "definition": "Authorized insiders misuse access to compromise systems.",
+      "condition_classes": ["UnconstrainedInsiderAccessCondition"]
+    },
+    {
+      "hcv_id": "HCV-08",
+      "name": "Curiosity-Based Baiting Risk",
+      "definition": "A tendency to act on curiosity without proper verification exposes users to baiting attacks, where attackers use enticing items such as USB drives to introduce malware or steal data.",
+      "condition_classes": ["UnrestrictedRemovableMediaCondition"]
+    },
+    {
+      "hcv_id": "HCV-09",
+      "name": "Propaganda",
+      "definition": "Individuals who do not critically assess information may be easily influenced by misleading or false information, undermining public trust and decision-making processes.",
+      "condition_classes": []
+    },
+    {
+      "hcv_id": "HCV-10",
+      "name": "Tailgating",
+      "definition": "An unauthorized individual follows an authorized person into restricted areas to gain access.",
+      "condition_classes": ["UnchallengedPhysicalEntryCondition"]
+    },
+    {
+      "hcv_id": "HCV-11",
+      "name": "TypoSquatting from Poor Domain Checks",
+      "definition": "A lack of effective interface alerts or domain-checking practices makes users vulnerable to mistyped or deceptive domain names that mimic legitimate sites.",
+      "condition_classes": ["UnverifiedDomainAccessCondition"]
+    },
+    {
+      "hcv_id": "HCV-12",
+      "name": "Reverse Social Engineering",
+      "definition": "Users approach unverified individuals they perceive as experts and disclose sensitive information to them. Trust is higher than in ordinary social engineering as the user initiates the contact.",
+      "condition_classes": ["UnverifiedContactChannelCondition"]
+    },
+    {
+      "hcv_id": "HCV-13",
+      "name": "Inadequate Privacy Settings",
+      "definition": "Complex or confusing privacy controls make it difficult for individuals to adjust settings properly, leading to accidental data exposure.",
+      "condition_classes": ["PermissiveDefaultPrivacyCondition", "UnscopedDevicePermissionCondition", "InadequatePrivacySettingCondition"]
+    },
+    {
+      "hcv_id": "HCV-14",
+      "name": "Unwillingness to Share Data",
+      "definition": "Fear of data misuse leads people to refuse data sharing, limiting AI system performance.",
+      "condition_classes": []
+    },
+    {
+      "hcv_id": "HCV-15",
+      "name": "Sharing Data Without Understanding",
+      "definition": "Users over-share personal data, risking repurposing, identity theft, or impersonation attacks.",
+      "condition_classes": ["UninformedCollectionCondition", "UninformedTransferCondition", "UninformedDisclosureCondition"]
+    },
+    {
+      "hcv_id": "HCV-16",
+      "name": "Poor Disposal of Sensitive Data",
+      "definition": "Failure to securely destroy documents/data leads to privacy leakage.",
+      "condition_classes": ["UnmanagedDisposalCondition"]
+    },
+    {
+      "hcv_id": "HCV-17",
+      "name": "Weak Passwords Practices",
+      "definition": "Simple or reused passwords are exploited by attackers.",
+      "condition_classes": ["UnprotectedPasswordAuthenticationCondition"]
+    },
+    {
+      "hcv_id": "HCV-18",
+      "name": "Weak Access Controls",
+      "definition": "Insufficient oversight of access rights leaves users with excessive privileges, enabling unauthorized privilege elevation.",
+      "condition_classes": ["UnreviewedAccessGrantCondition"]
+    },
+    {
+      "hcv_id": "HCV-19",
+      "name": "Unreported Security Incidents",
+      "definition": "Users do not inform proper channels of suspicious activity or breaches.",
+      "condition_classes": []
+    },
+    {
+      "hcv_id": "HCV-20",
+      "name": "Resistance to Change",
+      "definition": "Reluctance to adopt updated security measures leaves outdated or unsupported controls in place, which remain exploitable.",
+      "condition_classes": []
+    },
+    {
+      "hcv_id": "HCV-21",
+      "name": "User-Driven IoT Misconfiguration",
+      "definition": "IoT devices are left in insecure states because users keep default settings, exposing them to attacks.",
+      "condition_classes": ["ShippedDefaultConfigurationCondition"]
+    }
+  ]
+}
