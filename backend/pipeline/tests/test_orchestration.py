@@ -1176,6 +1176,34 @@ def test_run_labelling_executes_a_queued_run(_client, experiment):
 
 
 @pytest.mark.django_db
+def test_run_labelling_refuses_a_phase_two_phase_run(_client, experiment):
+    """The guard against a shape of bug this codebase has been bitten by more
+    than once: a check that lives only at a CALLER (`execute_pipeline_run`
+    only ever schedules labelling for a genuine `phase=3` row; so does the
+    API) rather than at the function that actually owns the guarantee.
+    `label_scenario` renders through `build_phase3_context`, which ALWAYS
+    injects the taxonomy — correct for phase 3, the labeller — and never
+    attaches the phase-2 final-request choke point
+    (`pipeline.generation._preflight`) at all. A hand-invoked
+    `run_labelling`/`run_phase3_task` against a phase-2 `PhaseRun` id would
+    otherwise render that run's phase-2 template under a taxonomy-bearing
+    context with no scan protecting it. Not reachable from any production
+    caller today, but refused here regardless, before a provider is ever
+    contacted."""
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    generation = run.phase_runs.get(phase=2, variant="A")
+
+    result = run_labelling(generation)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "phase-3" in result.error
+    assert LLMCall.objects.count() == 0
+    assert len(_client.calls) == 0
+
+
+@pytest.mark.django_db
 def test_run_labelling_does_not_re_execute_a_finished_run(_client, experiment):
     """M1: `run_labelling` had no re-entry guard, so calling it twice made two
     provider calls for one scenario — double-counting tokens and cost — while

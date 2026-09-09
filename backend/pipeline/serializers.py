@@ -191,6 +191,14 @@ class PhaseRunSerializer(serializers.ModelSerializer):
     def get_leak_scan_ran(self, obj):
         """Whether the Run A isolation backstop ran for EVERY archived call.
 
+        For a phase-2 call this now stands for TWO checks, not one:
+        `LLMCall.leak_scan_ran` (see its own field comment) is only ever
+        True when both the render-time backstop AND the final-request
+        choke point (`pipeline.generation._preflight`, wired into
+        `llm.client`'s `preflight`) ran clean — a call the second one
+        caught never gets archived at all, so it cannot pull this aggregate
+        down by contributing a False row; it simply contributes no row.
+
         `any(...)` used to report True the moment ONE call had run the scan,
         even with other calls in the same run that had not — read by an
         operator as "this run's isolation is proven" when it was only

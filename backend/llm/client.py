@@ -2,13 +2,26 @@
 
 The client never raises on a provider failure: a rate limit, a timeout or a 502
 comes back as an LLMResult with `ok=False`, so a run stores a complete row rather
-than a gap. The only exception it does raise is SecretLeak, because storing an
-API key in a payload that later ships in an export is not a recoverable state.
+than a gap. The exceptions it DOES raise are SecretLeak (storing an API key in a
+payload that later ships in an export is not a recoverable state) and whatever a
+caller's own `preflight` callable raises.
+
+This module is deliberately generic: it knows what an API key looks like
+(`_guard`), but nothing about variants, taxonomies, or any other domain policy —
+that belongs to whichever caller has it, `pipeline/` today. `complete()`'s
+`preflight` parameter is the seam: an optional callable invoked on the FINAL,
+fully-built request dict, immediately before the HTTP call and after every other
+piece of request construction, so nothing added to the request afterwards can
+evade it. It may raise to refuse the call outright — nothing is sent, and no
+`LLMResult` comes back, only the exception. Same shape as `_guard`, one seam
+lower: `_guard` is this client's own fixed check; `preflight` is where a caller
+plugs in one of its own.
 """
 
 import inspect
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -88,6 +101,7 @@ class LLMClient(Protocol):
         temperature: float = 0.0,
         json_schema: dict | None = None,
         timeout: int = DEFAULT_TIMEOUT,
+        preflight: Callable[[dict], None] | None = None,
     ) -> LLMResult: ...
 
 
@@ -180,6 +194,7 @@ class OpenRouterClient:
         temperature=0.0,
         json_schema=None,
         timeout=DEFAULT_TIMEOUT,
+        preflight=None,
     ):
         request = build_request(model, system_prompt, user_prompt, temperature, json_schema)
         # The key lives on the client, never in the recorded body.
@@ -190,6 +205,20 @@ class OpenRouterClient:
         # `extra_body` really does get merged back into that same JSON body
         # on the wire. Only the arguments handed to the SDK call get split.
         body, extra = split_request_for_the_sdk(request)
+
+        # The caller's last word before anything goes over the wire. Called
+        # on the FULL, unsplit `request` — the same dict `request_json` below
+        # archives — because that dict, once `extra_body` is merged back in
+        # by the SDK, IS the body that ships. Nothing in this function reads
+        # `request` again after this line, so there is no later step a
+        # preflight could fail to see. This client has no idea what
+        # `preflight` checks or why (see `_guard` above for the one check
+        # this client DOES know about — a secret, not a policy); a caller
+        # that has something to enforce before sending — pipeline.generation's
+        # taxonomy-isolation choke point, today — passes a callable and this
+        # client runs it, raise-and-all, with nothing sent if it raises.
+        if preflight is not None:
+            preflight(request)
 
         started = time.monotonic()
         try:

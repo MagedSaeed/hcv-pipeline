@@ -4,6 +4,17 @@ The run reaches a terminal status whatever happens. A provider failure, a
 malformed body and a schema violation are all recorded on the call and end the
 run as FAILED — none of them raises, because a run that dies mid-flight leaves
 no evidence of what went wrong.
+
+`_call_and_persist` attaches `_preflight(phase_run)` to every provider call as
+the client's `preflight` — the choke point that scans the FINAL request dict,
+immediately before the HTTP call, for taxonomy content under variant A (see
+`prompts.rendering.assert_request_not_leaking_taxonomy`). Unlike every other
+failure this module anticipates, that one is never recorded on an `LLMCall`:
+it raises BEFORE the provider is ever contacted and before any call row is
+constructed, so it propagates out of `_call_and_persist` uncaught and is
+picked up by `run_phase2`'s own broad `except Exception` below, the same path
+every other unanticipated failure takes — no provider call, no archived row,
+just a FAILED phase run with the reason on `error`.
 """
 
 import json
@@ -21,6 +32,7 @@ from prompts.rendering import (
     VARIANT_UNBIASED,
     PromptRenderError,
     TaxonomyLeak,
+    assert_request_not_leaking_taxonomy,
     build_phase2_context,
     render,
 )
@@ -49,6 +61,41 @@ def _build_context(phase_run, config):
         taxonomy=None if unbiased else phase_run.taxonomy,
         guard_taxonomy=phase_run.taxonomy if unbiased else None,
     )
+
+
+def _preflight(phase_run):
+    """The choke point every phase-2 request — both variants — passes
+    through immediately before the HTTP call. See `llm.client
+    .OpenRouterClient.complete`'s `preflight` parameter: this builds the
+    callable it invokes on the FINAL request dict, after every other piece
+    of request construction and before anything is sent.
+
+    Attached UNCONDITIONALLY, for every phase-2 call regardless of variant —
+    deliberately not "attach this only for Run A", which would put the
+    variant check back at the call site, exactly the kind of thing a future
+    refactor could forget. The callable itself resolves the variant and
+    decides: `assert_request_not_leaking_taxonomy` scans under variant A,
+    and correctly no-ops under variant B (which legitimately carries the
+    taxonomy) — see its own docstring for the fail-closed rules if the
+    variant or the guard taxonomy cannot be determined at all.
+
+    `phase_run.taxonomy` — not the resolved generation `config`'s pinned
+    material — is the SAME object `_build_context` passes as `guard_taxonomy`
+    for the render-time backstop (Django caches a ForeignKey after its first
+    fetch, so this is not a second query producing a second, possibly
+    different row): both scans check the request against the identical
+    taxonomy, so a persisted call's `guarded_by` names exactly what BOTH
+    layers checked.
+    """
+
+    def scan(request):
+        assert_request_not_leaking_taxonomy(
+            variant=phase_run.variant,
+            guard_taxonomy=phase_run.taxonomy,
+            request=request,
+        )
+
+    return scan
 
 
 def _fail(phase_run, message):
@@ -322,8 +369,11 @@ def run_phase2(phase_run):
     except Exception as error:  # noqa: BLE001 — nothing may strand this run
         # Deliberately as broad as run_labelling's guard, and for the same
         # reason. The client call raises MissingAPIKey when no key is
-        # configured and SecretLeak when a key-shaped string reaches the
-        # request body; either escaping leaves this phase run stuck at RUNNING
+        # configured, SecretLeak when a key-shaped string reaches the request
+        # body, and TaxonomyLeak when `_preflight`'s final-request scan (see
+        # this module's own docstring) catches taxonomy content that reached
+        # a variant-A request by some route the render-time backstop never
+        # saw; any of them escaping leaves this phase run stuck at RUNNING
         # with its PipelineRun stuck RUNNING too — and a second
         # execute_pipeline_run then hits the idempotency guard and merely
         # re-rolls it up, so the repetition can never be re-driven at all. A
@@ -347,8 +397,22 @@ def _call_and_persist(phase_run, rendered, config):
             phase_run.prompt_template.output_schema
             or phase2_json_schema(generate_systems=config["generate_systems"])
         ),
+        preflight=_preflight(phase_run),
     )
 
+    # `leak_scan_ran`/`guarded_by` are still assigned straight from `rendered`
+    # — the render-time backstop's own verdict — but reaching this line at
+    # all is now stronger evidence than it used to be. `preflight=_preflight
+    # (phase_run)` just above ran on the SAME provider call: if it had found
+    # anything, `.complete()` would have raised TaxonomyLeak and this line
+    # would never execute (see `run_phase2`'s broad except and this module's
+    # own docstring) — no LLMCall would exist to carry a `leak_scan_ran`
+    # value at all. So a persisted `leak_scan_ran=True` now certifies BOTH
+    # scans ran and found nothing, not only the render-time one; no new
+    # column is needed to say so, because the guarantee is structural, not
+    # advisory — a leak the render-time scan missed can never reach a
+    # persisted row with `leak_scan_ran=True` on it, whatever value that
+    # field carries.
     call = LLMCall(
         phase_run=phase_run,
         sequence=1,

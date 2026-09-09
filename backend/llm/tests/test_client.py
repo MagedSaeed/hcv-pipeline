@@ -300,6 +300,68 @@ def test_a_key_in_the_model_name_is_refused_through_complete_with_no_network_cal
     assert stub.seen is None
 
 
+# --- `preflight`: the seam a caller plugs its own policy into, same shape as
+# `_guard` above but for a check this client itself knows nothing about (see
+# pipeline.generation._preflight / prompts.rendering
+# .assert_request_not_leaking_taxonomy for the one real caller). These tests
+# are deliberately taxonomy-agnostic — they prove the SEAM works (called on
+# the final request, before the HTTP call, raise-and-all, with no network
+# access if it raises), independent of what any particular preflight checks.
+
+
+def test_a_preflight_that_raises_is_refused_with_no_network_call():
+    stub = StubCompletions(BODY)
+    client = client_with(stub)
+
+    def boom(request):
+        raise RuntimeError("policy says no")
+
+    with pytest.raises(RuntimeError, match="policy says no"):
+        client.complete(model="m", system_prompt="", user_prompt="u", preflight=boom)
+    assert stub.seen is None
+
+
+def test_a_preflight_receives_the_full_final_request_body():
+    """The exact dict `request_json` later archives — model, messages, and
+    anything `build_request` adds, like `response_format` when a schema is
+    pinned — not a partial or pre-processed view of it."""
+    stub = StubCompletions(BODY)
+    client = client_with(stub)
+    schema = {"type": "object", "properties": {"labels": {"type": "array"}}}
+    seen = {}
+
+    client.complete(
+        model="m",
+        system_prompt="sys",
+        user_prompt="usr",
+        json_schema=schema,
+        preflight=seen.update,
+    )
+
+    assert seen["model"] == "m"
+    assert seen["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "usr"},
+    ]
+    assert seen["response_format"]["json_schema"]["schema"] == schema
+
+
+def test_a_preflight_that_does_not_raise_lets_the_call_through():
+    stub = StubCompletions(BODY)
+    client = client_with(stub)
+    result = client.complete(
+        model="m", system_prompt="", user_prompt="u", preflight=lambda request: None
+    )
+    assert result.ok is True
+    assert stub.seen is not None
+
+
+def test_no_preflight_behaves_exactly_as_before_this_parameter_existed():
+    stub = StubCompletions(BODY)
+    result = client_with(stub).complete(model="m", system_prompt="", user_prompt="u")
+    assert result.ok is True
+
+
 def test_a_key_of_any_shape_is_caught_by_the_identity_check_not_just_the_prefix():
     """The prefix check only catches sk-or-; the client also refuses to record
     its own key verbatim regardless of shape (a rotated key, sk-ant-, etc.),

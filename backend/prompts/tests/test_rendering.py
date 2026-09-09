@@ -4,7 +4,10 @@ from corpus.models import FewShotExample, Origin, ResourceFile, Scenario, System
 from prompts.models import PromptTemplate
 from prompts.rendering import (
     PromptRenderError,
+    RenderedPrompt,
     TaxonomyLeak,
+    assert_no_taxonomy_leak,
+    assert_request_not_leaking_taxonomy,
     build_phase2_context,
     build_phase3_context,
     format_hcv_table,
@@ -300,6 +303,179 @@ def test_build_phase3_context_spreads_the_card_and_renders(system, taxonomy):
         render(template, context).user
         == "S1/Operator/Remote command injection./A narrative./Oldsmar"
     )
+
+
+# --- assert_request_not_leaking_taxonomy: the FINAL choke point's own shared
+# predicate. It is a thin wrapper around assert_no_taxonomy_leak (above), not a
+# second, divergent notion of "taxonomy content" — see pipeline/tests
+# /test_choke_point.py for the integration-level proof this exists to provide:
+# a leak render()'s own scan cannot see (because it is added to the request
+# AFTER rendering) is still caught here, because this scans the actual request
+# dict, not the two prompt strings. ----------------------------------------
+
+
+@pytest.mark.django_db
+def test_request_scan_rejects_an_unrecognised_variant(taxonomy):
+    """Fail closed: if the caller cannot even say A or B, refuse rather than
+    guess which side of the isolation guarantee applies to this request."""
+    with pytest.raises(TaxonomyLeak, match="variant A or B"):
+        assert_request_not_leaking_taxonomy(
+            variant="C", guard_taxonomy=taxonomy, request={"model": "m"}
+        )
+
+
+@pytest.mark.django_db
+def test_request_scan_rejects_variant_a_with_no_taxonomy_to_check_against():
+    """Fail closed: `guard_taxonomy=None` means the scan cannot run at all,
+    and this is the LAST checkpoint before a real provider call — refused
+    outright, not merely warned about the way render()'s own backstop would."""
+    with pytest.raises(TaxonomyLeak, match="No taxonomy"):
+        assert_request_not_leaking_taxonomy(
+            variant="A", guard_taxonomy=None, request={"model": "m"}
+        )
+
+
+@pytest.mark.django_db
+def test_request_scan_rejects_variant_a_against_an_empty_taxonomy(db):
+    """Fail closed, the second way assert_no_taxonomy_leak cannot run: a
+    taxonomy with zero HCV rows. Contrast with test_isolation.py's R2 case
+    (test_an_empty_guard_taxonomy_warns_and_still_renders) — render()'s own
+    backstop only warns and lets the render through there; this, being the
+    LAST checkpoint before the provider is contacted, refuses outright."""
+    empty = Taxonomy.objects.create(vocabulary_id="HCV-EMPTY-REQ", version="1.0")
+    with pytest.raises(TaxonomyLeak, match="has no HCV rows"):
+        assert_request_not_leaking_taxonomy(
+            variant="A", guard_taxonomy=empty, request={"model": "m"}
+        )
+
+
+@pytest.mark.django_db
+def test_request_scan_skips_variant_b_entirely(taxonomy):
+    """Variant B legitimately carries the taxonomy by design — scanning it
+    would just raise on material that belongs there — so it is not scanned
+    at all, and the function reports that plainly (False, not an exception)."""
+    request = {
+        "model": "m",
+        "messages": [{"role": "user", "content": format_hcv_table(taxonomy)}],
+    }
+    assert (
+        assert_request_not_leaking_taxonomy(variant="B", guard_taxonomy=taxonomy, request=request)
+        is False
+    )
+
+
+@pytest.mark.django_db
+def test_request_scan_passes_a_clean_variant_a_request(taxonomy):
+    request = {"model": "m", "messages": [{"role": "user", "content": "Generate scenarios."}]}
+    assert (
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=taxonomy, request=request)
+        is True
+    )
+
+
+@pytest.mark.django_db
+def test_request_scan_catches_a_leak_in_a_field_that_is_not_a_prompt(taxonomy):
+    """The whole reason this function exists: it scans the ENTIRE request
+    dict, not just message content, so a taxonomy identifier hiding in
+    response_format — or anything else a future field might carry — is
+    caught exactly the same way as one hiding in a prompt string."""
+    request = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Generate scenarios."}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": {"enum": ["HCV-07"]}},
+        },
+    }
+    with pytest.raises(TaxonomyLeak, match="HCV-07"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=taxonomy, request=request)
+
+
+@pytest.mark.django_db
+def test_request_scan_refuses_a_request_it_cannot_walk(taxonomy):
+    """A request dict cannot be scanned at all if it cannot even be WALKED —
+    concretely, a circular reference (a dict that contains itself), which
+    `_iter_request_text` refuses with `ValueError` rather than recursing
+    until the stack overflows. Refused for the same fail-closed reason as an
+    unresolvable taxonomy: if it cannot be verified taxonomy-free, it cannot
+    be sent. This is deliberately narrower than "cannot be JSON-serialised" —
+    an ordinary exotic value (not a str/dict/list/tuple/number/bool/None) is
+    coerced with `str()` and scanned, not refused; see
+    test_request_scan_scans_the_text_of_an_exotic_value below for that case."""
+    request = {"model": "m"}
+    request["self"] = request
+    with pytest.raises(TaxonomyLeak, match="could not be walked"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=taxonomy, request=request)
+
+
+@pytest.mark.django_db
+def test_request_scan_scans_the_text_of_an_exotic_value_instead_of_refusing(taxonomy):
+    """The other half of the docstring's precise claim: a value that is not
+    JSON-native (not a str/dict/list/tuple/number/bool/None) is coerced with
+    `str()` and scanned like anything else — not silently skipped, and not
+    refused outright the way an unwalkable structure is."""
+
+    class Exotic:
+        def __str__(self):
+            return "leaked HCV-07 right here"
+
+    request = {"model": "m", "odd_field": Exotic()}
+    with pytest.raises(TaxonomyLeak, match="HCV-07"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=taxonomy, request=request)
+
+
+@pytest.fixture
+def taxonomy_with_escapable_names(db):
+    """Four HCVs whose NAMES each embed a character JSON escaping treats
+    specially: a double quote, a backslash, a real newline, a real tab. This
+    is exactly the shape that let the request scan disagree with the
+    render-time scan when it used to serialise the whole request with
+    `json.dumps` before scanning: `json.dumps` turns a literal `"` into the
+    two characters `\\"`, a literal newline into the two characters `\\n`,
+    and so on, so a plain substring match against the RAW name fails against
+    the escaped blob even though the raw text is right there in the request.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-ESCAPE", version="1.0", is_active=True)
+    names = [
+        'Say "Hello" Attack',
+        "Path\\Traversal Concept",
+        "Multi\nLine Concept",
+        "Tab\tSeparated Concept",
+    ]
+    for index, name in enumerate(names, start=1):
+        HCV.objects.create(taxonomy=tax, hcv_id=f"ESC-{index}", name=name, order=index)
+    return tax
+
+
+@pytest.mark.django_db
+def test_request_scan_catches_names_containing_json_escapable_characters(
+    taxonomy_with_escapable_names,
+):
+    """The disagreement this predicate must never have again: a taxonomy
+    name containing a quote, backslash, newline or tab must be found by the
+    request scan exactly as reliably as by the render-time scan. Both scans
+    are proven here, side by side, against the SAME raw text — if either one
+    regresses to comparing against a `json.dumps`'d blob, it alone stops
+    matching and this test tells them apart."""
+    names = [row.name for row in taxonomy_with_escapable_names.hcvs.all()]
+    leaked_text = " and also: ".join(names)
+
+    # The render-time scan: raw system/user strings, no request dict at all.
+    rendered = RenderedPrompt(system="", user=f"Generate scenarios. {leaked_text}")
+    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+        assert_no_taxonomy_leak(taxonomy_with_escapable_names, rendered)
+
+    # The request scan: the identical text, but reached the way it actually
+    # would in production — inside a nested request dict, not passed as a
+    # bare string.
+    request = {
+        "model": "m",
+        "messages": [{"role": "user", "content": f"Generate scenarios. {leaked_text}"}],
+    }
+    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+        assert_request_not_leaking_taxonomy(
+            variant="A", guard_taxonomy=taxonomy_with_escapable_names, request=request
+        )
 
 
 @pytest.mark.django_db

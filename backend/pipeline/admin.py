@@ -63,6 +63,21 @@ class PhaseRunAdmin(admin.ModelAdmin):
 class LLMCallAdmin(admin.ModelAdmin):
     list_display = ("__str__", "model", "parsed_ok", "http_status", "cost")
     list_filter = ("parsed_ok",)
+    # `leak_scan_ran`/`guarded_by` are the archived PROOF that the taxonomy-
+    # isolation checks ran on this call — since `pipeline.generation
+    # ._call_and_persist` wires in the final-request choke point
+    # unconditionally, a persisted `leak_scan_ran=True` on a phase-2 row now
+    # certifies BOTH the render-time backstop and the final-request scan ran
+    # clean (see `LLMCall.leak_scan_ran`'s own field comment). A bare
+    # `ModelAdmin` renders a `BooleanField`/`ForeignKey` as an editable
+    # widget, which is a live hand-edit route to falsely claiming a call was
+    # scanned when it never was — the exact hole `PipelineRunAdmin.config`
+    # was made read-only to close for the config snapshot (see its own
+    # comment); it matters more here, because this field is what an operator
+    # or the export ultimately trusts as evidence the isolation guarantee
+    # held. Read-only removes the write path instead of relying on nobody
+    # using it.
+    readonly_fields = ("leak_scan_ran", "guarded_by")
 
 
 @admin.register(Label)

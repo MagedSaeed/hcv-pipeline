@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
 
-from pipeline.admin import ExperimentAdmin, PhaseRunAdmin, PipelineRunAdmin
+from pipeline.admin import ExperimentAdmin, LLMCallAdmin, PhaseRunAdmin, PipelineRunAdmin
 from pipeline.models import Experiment
 from pipeline.orchestration import launch
 from prompts.models import PromptTemplate
@@ -33,6 +33,21 @@ def test_pipeline_run_admin_config_is_read_only():
     alone cannot distinguish from an honest one, since a hand edit produces
     the identical shape. Read-only closes the write path instead."""
     assert "config" in PipelineRunAdmin.readonly_fields
+
+
+def test_llm_call_admin_leak_scan_evidence_is_read_only():
+    """The same hole as `PipelineRunAdmin.config`, closed the same way, and
+    it matters more here: `LLMCall.leak_scan_ran`/`guarded_by` are the
+    archived PROOF the taxonomy-isolation checks ran on this call — since
+    `pipeline.generation._call_and_persist` wires in the final-request
+    choke point unconditionally, a persisted `leak_scan_ran=True` on a
+    phase-2 row certifies BOTH the render-time backstop and the
+    final-request scan ran clean. A bare `ModelAdmin` would render both as
+    editable widgets, a live hand-edit route to falsely claiming a call was
+    scanned when it never was — read-only closes the write path instead of
+    trusting nobody uses it."""
+    assert "leak_scan_ran" in LLMCallAdmin.readonly_fields
+    assert "guarded_by" in LLMCallAdmin.readonly_fields
 
 
 @pytest.fixture

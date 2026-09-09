@@ -20,7 +20,23 @@ left to whoever writes the template:
   `response_format.json_schema.schema`), and it is one of `COPIED_FIELDS`, so a
   `new_version(name=...)` or a renaming PATCH forks a Run B schema — enum of
   every hcv_id, definitions in its descriptions — into a Run A template with
-  prompts that look entirely innocent.
+  prompts that look entirely innocent;
+- `assert_request_not_leaking_taxonomy()` walks the FINAL request dict and
+  scans every raw string it contains — not the two prompt strings `render()`
+  sees, but everything about to be sent to the provider, including whatever
+  a future field carries — immediately before the HTTP call. Deliberately
+  RAW text, not a `json.dumps`'d blob: JSON's own escaping of a quote,
+  backslash, newline or tab would otherwise hide a taxonomy name or
+  definition containing one of those characters from a plain substring
+  match, disagreeing with the render-time scan (which compares against raw
+  prompt strings) about what counts as "the same content". This is the
+  layer that survives a mistake the other three cannot even see: a
+  field added to the request AFTER rendering (an `output_schema` copied
+  straight into the body instead of coming from the template, say), which
+  `render()`'s own scan has no visibility into no matter how thorough it is.
+  Wired into `llm.client.OpenRouterClient.complete()` as a `preflight`
+  callable — see `pipeline.generation` for how phase 2 attaches it to every
+  call, both variants, so nobody has to remember to do so only for Run A.
 
 Whether that backstop actually ran is recorded on the `RenderedPrompt` itself
 (`leak_scan_ran`, `guarded_by`) rather than left to a warning on someone's
@@ -96,6 +112,17 @@ class RenderedPrompt:
     result can prove the isolation check ran rather than merely asserting it.
     Both stay False/None for Run B and for phase 3, where there is nothing to
     isolate.
+
+    Scoped strictly to the RENDER-time scan: these two fields say nothing
+    about `assert_request_not_leaking_taxonomy`, the separate final-request
+    choke point a phase-2 call additionally passes through immediately
+    before the HTTP call (see `pipeline.generation._preflight`) — this
+    dataclass is built and returned by `render()`, before a request dict
+    (or a client, or a call) exists to scan at all. `pipeline.models.LLMCall
+    .leak_scan_ran`, which this feeds via straight assignment, ends up
+    meaning something WIDER once both scans are wired in for phase 2 — see
+    that field's own comment for why a persisted `True` there is stronger
+    evidence than this dataclass field is on its own.
     """
 
     system: str
@@ -170,6 +197,154 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
         raise TaxonomyLeak(
             f"Run A request contains {combined_count} taxonomy names/definitions "
             f"{matches[:5]}. That is a taxonomy listing, not incidental prose."
+        )
+    return True
+
+
+def _iter_request_text(value, _ancestors=frozenset()):
+    """Walk a JSON-like value (nested dicts/lists/tuples) and yield every
+    string leaf it contains, RAW — never round-tripped through `json.dumps`.
+
+    That distinction is load-bearing, not cosmetic: `json.dumps` ESCAPES a
+    `"`, a backslash, a real newline and a real tab inside a string value
+    (`"` becomes the two characters `\\"`, a real newline becomes the two
+    characters `\\n`, and so on). A taxonomy name or definition containing
+    any of those characters, embedded verbatim in a request field, therefore
+    stops being a literal substring of a JSON-serialised blob even though it
+    IS a literal substring of the raw text — exactly the gap that let the
+    render-time scan (which compares against `rendered.system`/`.user`,
+    never JSON-encoded) catch content the request scan, when it used to
+    serialise the whole request first, silently missed. Walking the
+    structure and comparing raw string leaves is what keeps this predicate
+    genuinely the SAME as `assert_no_taxonomy_leak`'s own comparison, not a
+    second one that happens to agree only on ASCII, quote-free content.
+
+    Anything that is not a string, a dict, a list/tuple, a number, a bool or
+    `None` is coerced with `str()` rather than dropped — the same "capture
+    unknown content instead of silently skipping it" principle a bare
+    `default=str` served when this used to go through `json.dumps`.
+
+    Cycle-safe: `_ancestors` carries the `id()` of every dict/list/tuple
+    currently being walked (never mutated — each recursive call gets its own
+    extended copy, so two branches that happen to share the same sub-object
+    are not mistaken for a cycle). A value that contains one of its own
+    ancestors raises `ValueError`, the same failure shape `json.dumps` itself
+    raises on a circular structure, rather than recursing until the stack
+    overflows.
+    """
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict | list | tuple):
+        marker = id(value)
+        if marker in _ancestors:
+            raise ValueError("Circular reference detected while scanning the request.")
+        nested = _ancestors | {marker}
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            yield from _iter_request_text(item, nested)
+        return
+    if value is None or isinstance(value, bool | int | float):
+        return
+    yield str(value)
+
+
+def assert_request_not_leaking_taxonomy(*, variant, guard_taxonomy, request):
+    """The final choke point: scan every string in the request about to go to
+    the provider — walked, not serialised — immediately before the HTTP call,
+    for variant A only.
+
+    This is deliberately not the same check as `assert_no_taxonomy_leak`
+    above, which scans the two rendered prompt strings (plus the template's
+    own `output_schema`) at RENDER time, before a request dict even exists.
+    That backstop can only ever see what it is handed; it has no way to see
+    something a LATER step adds to the request — an `output_schema` copied
+    straight into the body by a refactor instead of coming from the
+    template, a field nobody has invented yet. This function closes exactly
+    that gap by running LAST, on the actual dict about to be sent, so a
+    field added to the request tomorrow is covered automatically — nobody
+    has to remember to teach a second scanner about it.
+
+    It is a thin caller around `assert_no_taxonomy_leak`, not a second,
+    divergent notion of "taxonomy content": every string in the request is
+    collected, RAW, by `_iter_request_text` (walking the structure — see its
+    own docstring for why this is NOT the same as `json.dumps`-then-scan,
+    which used to let a taxonomy name or definition containing a quote,
+    backslash, newline or tab slip past this function while the render-time
+    scan still caught it) and joined into one blob handed to
+    `assert_no_taxonomy_leak` as `extra`, so the identical matching rules
+    apply (any single `hcv_id` match, or three or more distinct names/
+    definitions combined) against the identical KIND of text the render-time
+    scan compares against. Two hand-maintained ideas of what counts as a
+    leak is exactly the defect pattern this codebase keeps re-discovering;
+    this keeps it to one — and now keeps them from disagreeing about what
+    "the same text" even means.
+
+    Fails CLOSED wherever `assert_no_taxonomy_leak` itself would only warn
+    and let a render through — deliberately stricter, because this is the
+    LAST checkpoint before a real provider call, not a backstop with another
+    layer behind it:
+    - `variant` not being "A" or "B" means this function cannot tell
+      whether the request even needs scanning — refused rather than assumed
+      safe;
+    - under variant A, `guard_taxonomy=None`, or a guard taxonomy with zero
+      HCV rows, both mean `assert_no_taxonomy_leak` cannot actually compare
+      anything (it returns False rather than raising, for either — see its
+      own docstring) — refused here instead of sent unverified;
+    - a request whose structure cannot be walked at all — concretely, a
+      circular reference, which raises `ValueError` — is refused for the
+      same reason: if it cannot be scanned, it cannot be sent. This is
+      narrower than it sounds: an ordinary "weird" value (some object that
+      is not a string/dict/list/tuple/number/bool/`None`) is not refused —
+      `_iter_request_text` coerces it with `str()` and scans that instead,
+      so only a structure that cannot be WALKED at all trips this, not
+      merely one that is exotic.
+
+    Variant B is not scanned at all — it legitimately carries the taxonomy,
+    by design, and scanning it would simply raise on material that belongs
+    there. Phase 3 labelling has no variant of its own and must never reach
+    this function at all; that scoping is the CALLER's job (only
+    `pipeline.generation`'s phase-2 call site wires this in as a client
+    `preflight` — see `llm.client.OpenRouterClient.complete` — while
+    `pipeline.labelling`'s phase-3 call site does not), not something this
+    function can determine from a bare `variant` string alone.
+
+    Returns True if a scan actually ran (variant A, resolved against a real
+    taxonomy), False if it was correctly skipped (variant B) — mirroring
+    `assert_no_taxonomy_leak`'s own return contract, for the same reason: so
+    a caller can record that distinction rather than assume one.
+    """
+    if variant not in (VARIANT_UNBIASED, VARIANT_GUIDED):
+        raise TaxonomyLeak(
+            f"Cannot determine whether this request is variant A or B (got "
+            f"{variant!r}). Refusing to send a request whose isolation "
+            "requirement is unknown."
+        )
+    if variant != VARIANT_UNBIASED:
+        return False
+    if guard_taxonomy is None:
+        raise TaxonomyLeak(
+            "No taxonomy to check this variant-A request against before "
+            "sending it. Refusing to send a request that cannot be "
+            "verified taxonomy-free."
+        )
+    try:
+        blob = "\n".join(_iter_request_text(request))
+    except (TypeError, ValueError) as error:
+        raise TaxonomyLeak(
+            "The final request body could not be walked for scanning "
+            f"({error}). Refusing to send a request that cannot be "
+            "verified taxonomy-free."
+        ) from error
+    scanned = assert_no_taxonomy_leak(
+        guard_taxonomy, RenderedPrompt(system="", user=""), extra=blob
+    )
+    if not scanned:
+        raise TaxonomyLeak(
+            f"Guard taxonomy {guard_taxonomy} has no HCV rows: the final "
+            "request scan cannot run, and this is the last checkpoint before "
+            "the provider call. Refusing to send an unscanned variant-A "
+            "request."
         )
     return True
 

@@ -314,9 +314,40 @@ def run_labelling(phase_run, on_progress=None):
     the same loop iteration — would get resurrected: `is_terminal` reads
     whatever `.status` the in-memory object currently holds, which is not
     necessarily what the database says right now.
+
+    Refuses outright if `phase_run.phase != 3`. `label_scenario` renders
+    through `build_phase3_context`, which ALWAYS injects the taxonomy — that
+    is correct for phase 3, the labeller, but it means `label_scenario`
+    never attaches the phase-2 final-request choke point
+    (`pipeline.generation._preflight`; see `prompts.rendering
+    .assert_request_not_leaking_taxonomy`) at all. `execute_pipeline_run`
+    only ever creates a labelling task for a genuine `phase=3` row, and
+    `RunViewSet`'s retry action guards the same way — but both of those are
+    guards living at a CALLER, and this codebase has already been bitten
+    more than once by exactly that shape of gap (see
+    `pipeline.execution_config`'s own module docstring for the taxonomy leak
+    a permissive reader one layer away from the guarantee actually produced
+    once). A hand-invoked `run_phase3_task(<a phase-2 run id>)` — or any
+    future caller — would otherwise render whatever template that phase-2
+    `PhaseRun` carries under a taxonomy-bearing phase-3 context with no scan
+    protecting it at all. Checked here, where the guarantee actually lives,
+    not only at whoever currently happens to call in correctly: refused
+    before a single scenario is looked up or a provider is ever contacted,
+    the same way `run_phase2` fails a phase-2 run with no variant set.
     """
     phase_run.refresh_from_db(fields=["status"])
     if phase_run.is_terminal:
+        return phase_run
+    if phase_run.phase != 3:
+        phase_run.status = PhaseRun.Status.FAILED
+        phase_run.error = (
+            "run_labelling requires a phase-3 PhaseRun; this one is phase "
+            f"{phase_run.phase}. Labelling always renders under a taxonomy-"
+            "bearing context, which is only safe for phase 3."
+        )
+        phase_run.failed_children = 0
+        phase_run.finished_at = timezone.now()
+        phase_run.save(update_fields=["status", "error", "failed_children", "finished_at"])
         return phase_run
 
     phase_run.status = PhaseRun.Status.RUNNING

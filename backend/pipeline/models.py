@@ -333,6 +333,19 @@ class LLMCall(models.Model):
 
     rendered_system_prompt = models.TextField(blank=True, default="")
     rendered_user_prompt = models.TextField(blank=True, default="")
+    # Written from `RenderedPrompt.leak_scan_ran`/`.guarded_by` — the render-
+    # time backstop's verdict (`prompts.rendering.assert_no_taxonomy_leak`,
+    # via `render()`) — but for a phase-2 call the meaning is wider than that
+    # alone: `pipeline.generation._call_and_persist` attaches a SECOND scan,
+    # `assert_request_not_leaking_taxonomy`, as the client's `preflight`,
+    # scanning the fully serialised request immediately before the HTTP call.
+    # That one raises before an LLMCall is ever constructed, so a row simply
+    # does not exist to carry a leaked call's `leak_scan_ran` value — a
+    # persisted `True` on a phase-2 row therefore certifies BOTH scans ran
+    # and found nothing, structurally, not by trusting this column alone.
+    # Phase 3 (`pipeline.labelling`) attaches no second scan — it legitimately
+    # renders with the taxonomy present — so this field there still means
+    # only what it always has: nothing, since it stays False throughout.
     leak_scan_ran = models.BooleanField(default=False)
     guarded_by = models.ForeignKey(
         "taxonomy.Taxonomy",

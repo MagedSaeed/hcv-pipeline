@@ -50,11 +50,21 @@ class FakeLLMClient:
         temperature=0.0,
         json_schema=None,
         timeout=DEFAULT_TIMEOUT,
+        preflight=None,
     ):
         # Built by the same function the real client uses, so a test asserting
         # on request_json — that a schema was pinned, say — means the same thing
         # against the fake as it does against OpenRouter.
         request = build_request(model, system_prompt, user_prompt, temperature, json_schema)
+        # Same seam the real client offers, at the same point: the caller's
+        # last word before anything would go over the wire, on the same full
+        # request dict — checked here too, not just on OpenRouterClient, so a
+        # broken preflight wiring fails the same way in every test that runs
+        # against the fake (which is nearly all of them) as it would live.
+        # No queued response is consumed and no call is recorded below if
+        # this raises.
+        if preflight is not None:
+            preflight(request)
         # Same split the real client applies at its call site, then proof
         # that the typed half is something `Completions.create` would
         # actually accept — reject here exactly as a live call would reject,

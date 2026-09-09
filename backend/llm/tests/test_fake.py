@@ -89,3 +89,52 @@ def test_constructor_accepts_plain_strings_as_documented():
 
     assert first.raw_response == '{"labels": []}'
     assert second.raw_response == "second"
+
+
+# --- `preflight`: same seam as OpenRouterClient's (see llm/tests/test_client
+# .py), checked here too — not just on the real client — because nearly
+# every test in this codebase runs its calls through THIS fake (see this
+# module's own `_CREATE_SIGNATURE.bind` comment for why that matters: a
+# check that only lived on the real client would never be exercised by the
+# 700+ tests that never touch OpenRouterClient at all).
+
+
+def test_a_preflight_that_raises_leaves_no_call_recorded_and_the_queue_untouched():
+    client = FakeLLMClient()
+    client.queue("ok")
+
+    def boom(request):
+        raise RuntimeError("policy says no")
+
+    with pytest.raises(RuntimeError, match="policy says no"):
+        client.complete(model="m", system_prompt="", user_prompt="u", preflight=boom)
+
+    assert client.calls == []
+    # The queued response was never consumed — a caller that retries after
+    # fixing whatever the preflight objected to still finds it waiting.
+    second = client.complete(model="m", system_prompt="", user_prompt="u")
+    assert second.raw_response == "ok"
+
+
+def test_a_preflight_receives_the_same_request_shape_as_the_real_client():
+    client = FakeLLMClient()
+    client.queue("ok")
+    seen = {}
+
+    client.complete(model="m", system_prompt="sys", user_prompt="usr", preflight=seen.update)
+
+    assert seen["model"] == "m"
+    assert seen["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "usr"},
+    ]
+
+
+def test_a_preflight_that_does_not_raise_lets_the_call_through():
+    client = FakeLLMClient()
+    client.queue("ok")
+    result = client.complete(
+        model="m", system_prompt="", user_prompt="u", preflight=lambda request: None
+    )
+    assert result.raw_response == "ok"
+    assert len(client.calls) == 1
