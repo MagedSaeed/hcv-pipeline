@@ -355,6 +355,55 @@ def test_a_taxonomy_with_no_hcv_rows_is_refused_at_validation(experiment):
 
 
 @pytest.mark.django_db
+def test_a_taxonomy_of_content_free_rows_is_refused_too(experiment):
+    """Round 4, leak 1 — the DEEPER of that leak's two fixes.
+
+    `taxonomy_missing_rows_error` used to ask `taxonomy.hcvs.exists()`,
+    which is not the property variant A's backstop actually needs.
+    `assert_no_taxonomy_leak` skips every falsy `hcv_id`/`name`/
+    `definition` it walks past, so a row blank in all three satisfies
+    `.exists()` while contributing NOTHING to the scan: the taxonomy
+    scanned for nothing, found nothing, and returned True — strictly worse
+    than a zero-row taxonomy, which at least records
+    `leak_scan_ran=False`. Fixing the precondition here (scannable ROWS,
+    not row objects) is what stops the leak recurring through any route
+    that produces such a row, not only through the admin add form that
+    happened to produce them this time.
+    """
+    blank = Taxonomy.objects.create(vocabulary_id="HCV-21", version="blank")
+    HCV.objects.create(taxonomy=blank, hcv_id="", name="", definition="", order=0)
+    experiment.taxonomy = blank
+
+    with pytest.raises(ValidationError, match="content-free"):
+        experiment.full_clean()
+
+
+@pytest.mark.django_db
+def test_one_content_free_row_among_good_ones_is_refused(experiment):
+    """EVERY row must be scannable, not merely one of them: 20 blanked rows
+    out of 21 would otherwise pass while the guard silently covered 1/21 of
+    the taxonomy and still certified itself. `import_taxonomy` refuses a
+    row missing `hcv_id` or `name`, and the admin no longer offers an add
+    form, so nothing legitimate produces one."""
+    partly = Taxonomy.objects.create(vocabulary_id="HCV-21", version="partly")
+    HCV.objects.create(taxonomy=partly, hcv_id="HCV-07", name="Malicious Insiders", order=7)
+    HCV.objects.create(taxonomy=partly, hcv_id="   ", name="", definition="  ", order=99)
+    experiment.taxonomy = partly
+
+    with pytest.raises(ValidationError, match="1 of 2"):
+        experiment.full_clean()
+
+
+@pytest.mark.django_db
+def test_a_fully_populated_taxonomy_still_validates(experiment, taxonomy):
+    """The contrast case, so the two tests above cannot be passing against
+    a rule that simply refuses every taxonomy."""
+    experiment.taxonomy = taxonomy
+
+    experiment.full_clean()
+
+
+@pytest.mark.django_db
 def test_a_repeated_variant_is_rejected(experiment):
     """M2: ["A", "A"] used to pass, producing a repetition with two A arms."""
     experiment.variants = ["A", "A"]
@@ -589,3 +638,68 @@ def test_experiment_progress_is_a_single_query(
         progress = experiment.progress
 
     assert progress == {"done": 9, "total": 9, "failed": 3, "percent": 100}
+
+
+@pytest.mark.django_db
+def test_the_shared_checker_reads_an_object_config_as_well_as_a_mapping():
+    """`generation_config_errors` is duck-typed on purpose, and this is the
+    branch none of the three production call sites exercises today.
+
+    All three currently hand it a mapping — `Experiment.generation_config`,
+    `_ADHOC_GENERATION_CONFIG`, and the live dict `_adhoc_generation_config`
+    builds — so a checker that quietly only worked for mappings would look
+    fine until the first caller with an attribute-shaped config, and then
+    fail OPEN: `getattr(cfg, "seed_systems", None)` returning `None` reads
+    as "no seeds", which is a clean config. That is precisely the
+    permissive-reader failure mode `pipeline.execution_config`'s own module
+    docstring records as its worst defect, so the other branch is pinned
+    here rather than left as an untested claim in a docstring.
+    """
+    from types import SimpleNamespace
+
+    from pipeline.models import generation_config_errors
+
+    generated = SystemDescription.objects.create(
+        title="Made by a run", body="x", origin=Origin.GENERATED
+    )
+    as_object = SimpleNamespace(
+        seed_systems=[generated],
+        fewshots=[],
+        target_system=None,
+        target_system_id=None,
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=3,
+        n_scenarios_per_system=5,
+    )
+    as_mapping = dict(vars(as_object))
+
+    assert "seed_systems" in generation_config_errors(as_object)
+    assert generation_config_errors(as_object) == generation_config_errors(as_mapping)
+
+
+@pytest.mark.django_db
+def test_the_shared_checker_reads_a_related_manager_as_rows():
+    """The other half of the same claim: `seed_systems` may arrive as a
+    related MANAGER rather than a list (that is what an `Experiment` field
+    is), and iterating a manager raises rather than yielding its rows — so
+    "it has an `.all()`" has to be handled, not assumed away."""
+    from pipeline.models import generation_config_errors
+
+    experiment_like = Experiment.objects.create(
+        name="manager-shaped",
+        taxonomy=Taxonomy.objects.create(vocabulary_id="HCV-DUCK", version="1.0"),
+        phase2_model="m2",
+        phase2_prompt=PromptTemplate.objects.create_version(phase=2, name="g2", user_prompt="g"),
+        phase3_model="m3",
+        phase3_prompt=PromptTemplate.objects.create_version(phase=3, name="l2", user_prompt="l"),
+    )
+    experiment_like.seed_systems.add(
+        SystemDescription.objects.create(title="Made by a run", body="x", origin=Origin.GENERATED)
+    )
+
+    errors = generation_config_errors(
+        {**experiment_like.generation_config, "seed_systems": experiment_like.seed_systems}
+    )
+
+    assert "seed_systems" in errors

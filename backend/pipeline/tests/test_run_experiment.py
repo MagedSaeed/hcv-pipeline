@@ -332,3 +332,45 @@ def test_a_broker_error_reverts_that_run_to_pending_and_raises_clearly(_client, 
     assert runs[1].status == PipelineRun.Status.PENDING
     assert {p.status for p in runs[1].phase_runs.all()} == {PhaseRun.Status.PENDING}
     assert runs[2].status == PipelineRun.Status.PENDING
+
+
+def test_repetitions_help_text_explains_why_the_number_exists_and_stays_defaulted_to_one():
+    """Task 2: nothing about `n_repetitions`/`--repetitions` is broken — the
+    default is 1 in every place it is set and must STAY 1 (a researcher opts
+    into more, deliberately) — the only gap was that a researcher had no
+    explanation of why the field exists at all. `--repetitions --help` must
+    now say, in plain language: repeated runs are what turn a single noisy
+    A-vs-B difference into a trustworthy finding, and name the real cost
+    anchor measured on this project so a researcher can decide how many they
+    can afford.
+
+    Coordinator review round 2: the FIRST version of this text claimed
+    repetitions "run one after another, not in parallel" — false for the
+    default (queued) path this command uses unless `--inline` is passed.
+    `queue_runs` hands ALL N repetitions to django-q immediately, and
+    `Q_CLUSTER["workers"]` defaults to 2, so two repetitions genuinely run
+    CONCURRENTLY; only `--inline` is actually serial. Cost is still a
+    straight multiply (N x $1.61); wall-clock on the default path is not.
+
+    Coordinator review round 3 caught a SECOND bug in the fix for the
+    first one: "N x 23 minutes divided by 2" reads as 11.5 minutes at
+    N=1 — wrong, a single repetition takes the full 23 minutes regardless
+    of how many workers are free. The text must read correctly at N=1.
+    """
+    from pipeline.management.commands.run_experiment import Command
+
+    parser = Command().create_parser("manage.py", "run_experiment")
+    action = next(a for a in parser._actions if "--repetitions" in a.option_strings)
+
+    assert action.default == 1
+    help_text = action.help.lower()
+    assert "1.61" in action.help
+    assert "23 minutes" in action.help
+    assert "queued together" in help_text
+    assert "workers" in help_text
+    assert "inline" in help_text
+    assert "one after another" not in help_text
+    assert "not in parallel" not in help_text
+    assert "1 repetition still takes about 23 minutes" in help_text
+    assert "divided by 2" not in help_text
+    assert "noise" in help_text or "stochastic" in help_text

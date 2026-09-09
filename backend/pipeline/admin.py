@@ -25,7 +25,14 @@ class ExperimentAdmin(admin.ModelAdmin):
         it would cascade through, including the ones directly selected), so
         one override covers both.
         """
-        if obj is not None and obj.runs.exists():
+        if obj is not None and (obj.runs.exists() or obj.adhoc_phase_runs.exists()):
+            # `adhoc_phase_runs` (`PhaseRun.experiment`, `on_delete=PROTECT`
+            # — see that field's own comment) mirrors `ExperimentViewSet
+            # .perform_destroy`'s identical guard: an ad-hoc run borrowing
+            # this experiment reads its live fields at execution time, so
+            # deleting the experiment out from under a still-live one would
+            # either crash mid-render or (with a laxer on_delete) silently
+            # switch it to bare defaults.
             return False
         return super().has_delete_permission(request, obj)
 
@@ -55,8 +62,60 @@ class PhaseRunAdmin(admin.ModelAdmin):
         "completed_children",
         "failed_children",
         "progress",
+        # The ad-hoc "borrow an experiment's live inputs" link (see
+        # `PhaseRun.experiment`'s own comment) — null on every orchestrated
+        # row, an experiment on a borrowing ad-hoc one. Coordinator review
+        # round, finding 3: with no column or filter here, the ONLY way to
+        # find the ad-hoc runs blocking `ExperimentViewSet.perform_destroy`'s
+        # 409 (before that message named their ids directly) was to guess —
+        # the admin had no navigable path to them at all.
+        "experiment",
     )
-    list_filter = ("phase", "variant", "status")
+    list_filter = (
+        "phase",
+        "variant",
+        "status",
+        # `RelatedOnlyFieldListFilter`: the plain form would dropdown EVERY
+        # `Experiment` ever created, most of which no ad-hoc run has ever
+        # borrowed — this narrows the choices to experiments actually
+        # referenced by at least one `PhaseRun`.
+        ("experiment", admin.RelatedOnlyFieldListFilter),
+    )
+    # Round 4, leak 3: the ORCHESTRATED path was left WEAKER than the ad-hoc
+    # one. `launch()` pins these five fields onto every `PhaseRun` it creates
+    # precisely so they are the experiment's own — `taxonomy` most of all,
+    # since it IS the guard variant A's leak backstop scans against — and
+    # unlike the ad-hoc path (whose `_check_adhoc_taxonomy_binding` re-checks
+    # the binding live at execution time) nothing re-verifies an orchestrated
+    # run's pinned fields at all: `PhaseRun.taxonomy` is not part of the
+    # `PipelineRun.config` snapshot, so `validate_snapshot`'s exact-shape
+    # check never sees it either. With this admin a bare `ModelAdmin`, a
+    # PENDING variant-A run's `taxonomy` could simply be repointed at a
+    # 1-row decoy through the change form, and the run would then complete
+    # with `leak_scan_ran=True, guarded_by=<decoy>` over a prompt carrying
+    # real HCV text — the identical false-evidence signature the ad-hoc
+    # decoy probe produced a round earlier. Read-only removes the write
+    # path, the same reasoning `PipelineRunAdmin.config` and
+    # `LLMCallAdmin.leak_scan_ran` are already read-only for.
+    #
+    # `has_add_permission` below is not decoration: leak 1 of this same
+    # round was CAUSED by read-only fields on an ADD form — Django excludes
+    # a read-only field from the ModelForm entirely, taking its
+    # `blank=False` validation with it, so `readonly_fields` alone would
+    # have turned "add a PhaseRun" into "create a row with no phase, no
+    # model, no template and no taxonomy". The two must be applied
+    # together.
+    readonly_fields = ("phase", "variant", "model", "prompt_template", "taxonomy")
+
+    def has_add_permission(self, request):
+        """A `PhaseRun` is created by `launch()` (orchestrated) or by
+        `POST /api/phase-runs/` (ad-hoc) — both of which pin or validate the
+        five fields above. Hand-creating one here was never a real workflow,
+        and with those fields read-only it would produce a blank row rather
+        than a usable one (see `readonly_fields`' comment: read-only must
+        not mean creatable-blank, which is exactly how this round's leak 1
+        was introduced)."""
+        return False
 
 
 @admin.register(LLMCall)

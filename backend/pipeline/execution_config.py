@@ -84,6 +84,12 @@ import copy
 from types import SimpleNamespace
 
 from corpus.models import ResourceKind, SystemDescription
+from pipeline.models import (
+    Experiment,
+    generated_target_system_error,
+    generation_config_errors,
+    unbound_guard_taxonomy_error,
+)
 
 
 class MalformedSnapshot(RuntimeError):
@@ -105,8 +111,121 @@ class ReferencedRowMissing(RuntimeError):
     """
 
 
-# Matches build_phase2_context's own defaults for an ad-hoc run with no
-# Experiment at all (see generation.py, pre-existing behaviour, unchanged).
+class BorrowedExperimentContaminated(RuntimeError):
+    """An ad-hoc run's borrowed `Experiment` (`PhaseRun.experiment` — see
+    that field's own comment) currently has a GENERATED-origin system in its
+    LIVE `seed_systems` — refused for the identical reason
+    `Experiment.clean()`/`ExperimentSerializer._refuse_generated_seeds`
+    refuse it for an orchestrated experiment: seeding a run with a prior
+    run's own output contaminates the comparison.
+
+    `Experiment.clean()` only runs when the EXPERIMENT ITSELF is validated
+    (`full_clean()`, or the API's create/PATCH path) — an ad-hoc run reading
+    that experiment's LIVE `seed_systems` at EXECUTION time never goes
+    through either of those, and the experiment's own contents can change
+    between when the ad-hoc run was created and when a worker actually
+    executes it (that lag is the whole point of "live", not snapshotted —
+    see `_adhoc_generation_config`'s own docstring). So this is checked
+    again here, at the one place that actually reads the live list, rather
+    than trusted from whatever `PhaseRunCreateSerializer.validate()` saw at
+    creation time.
+    """
+
+
+class BorrowedExperimentMisconfigured(RuntimeError):
+    """An ad-hoc run's borrowed `Experiment` currently fails one of
+    `Experiment.clean()`'s two generation-toggle rules
+    (`generation_toggles_off_error`/`missing_target_for_no_generation_error`,
+    `pipeline.models`) — distinct from `BorrowedExperimentContaminated`
+    above: this is a misconfiguration (nothing enabled to generate, or a
+    targeting run with no target), not a GENERATED-origin leak route.
+    `launch()` refuses both with `experiment.full_clean()`, before a single
+    row exists; coordinator review round, finding 2 found the ad-hoc borrow
+    path checked neither, so a probe against either PAID for one real
+    provider call before failing on response validation — see those two
+    functions' own docstrings.
+    """
+
+
+class UnboundGuardTaxonomy(RuntimeError):
+    """The pinned `PhaseRun.taxonomy` is no longer the ONE this run is
+    structurally entitled to. See `pipeline.models.unbound_guard_taxonomy_error`'s
+    own docstring for the full reasoning (the decoy-taxonomy probe this
+    closes) — this is its execution-time enforcement, re-checking the LIVE
+    state rather than trusting whatever `PhaseRunCreateSerializer.validate()`
+    derived/verified at creation time, for the identical reason
+    `BorrowedExperimentContaminated` re-checks seeding/targeting live: both
+    halves of the invariant can drift after creation (`Experiment.taxonomy`
+    stays freely editable; which `Taxonomy` is "active" can change
+    independently of any one run).
+    """
+
+
+def _check_adhoc_taxonomy_binding(phase_run, experiment):
+    """Raise `UnboundGuardTaxonomy` if `phase_run`'s PINNED taxonomy has
+    drifted from the one it is structurally entitled to. Called by BOTH
+    `_adhoc_generation_config` (phase 2) and `_adhoc_labelling_fewshots`
+    (phase 3) — taxonomy is not a phase-2-only concern the way
+    `seed_systems`/`target_system`/the generation toggles are (coordinator
+    review round, finding 5): phase 3 always renders it too
+    (`build_phase3_context`), so it must be structurally tied to the
+    borrowed experiment on that side exactly the same way.
+
+    `experiment` is the caller's ALREADY freshly-fetched `Experiment` (or
+    `None`) — not re-fetched here, to avoid a second query for what
+    `_adhoc_generation_config`/`_adhoc_labelling_fewshots` already hold.
+
+    `phase_run.taxonomy_id`, checked before touching `.taxonomy`: `taxonomy`
+    is a required FK in real usage (every row `PhaseRunCreateSerializer`
+    creates has one, derived or validated), but Django's FK descriptor
+    raises `RelatedObjectDoesNotExist` — not a graceful `None` — for an
+    UNSAVED instance with no id set at all, which only a synthetic test
+    double builds (`PhaseRun()` with no `taxonomy=` at all). Reading the
+    `_id` attname first avoids that unrelated crash and still reaches
+    `unbound_guard_taxonomy_error`'s own "taxonomy is None" handling, which
+    already fails closed on it correctly.
+    """
+    taxonomy = phase_run.taxonomy if phase_run.taxonomy_id else None
+    error = unbound_guard_taxonomy_error(taxonomy, experiment)
+    if error:
+        raise UnboundGuardTaxonomy(error)
+
+
+def _raise_config_errors(config):
+    """Run `pipeline.models.generation_config_errors` over a resolved ad-hoc
+    generation config and raise the matching exception for whatever it
+    finds — nothing, and the config is clean.
+
+    THE point of round 4's shared-checker seam, on the execution-time side:
+    this function knows nothing about WHICH rules exist. Adding a rule to
+    `generation_config_errors` (the one place `Experiment.clean()` reads
+    them from too) reaches the ad-hoc path here automatically, instead of
+    waiting for somebody to remember to hand-port it — which is what failed
+    in each of the three preceding review rounds. `pipeline/tests/
+    test_adhoc_rule_parity.py` fails the build if a future `*_error` helper
+    reaches neither this seam nor the serializer's.
+
+    The two exception TYPES stay distinct, because they mean genuinely
+    different things to an operator and both are already asserted on by
+    name: `BorrowedExperimentContaminated` for a GENERATED-origin seed or
+    target (a leak route), `BorrowedExperimentMisconfigured` for a config
+    that could never have produced anything (nothing enabled to generate, a
+    targeting run with no target). Keyed off `generation_config_errors`'
+    own stable field names.
+    """
+    for key, message in generation_config_errors(config).items():
+        contaminated = key == "seed_systems" or (
+            key == "target_system" and generated_target_system_error(config["target_system"])
+        )
+        if contaminated:
+            raise BorrowedExperimentContaminated(message)
+        raise BorrowedExperimentMisconfigured(message)
+
+
+# Matches build_phase2_context's own defaults for an ad-hoc run that borrows
+# NO Experiment at all (`PhaseRun.experiment_id` is null — see generation.py,
+# pre-existing behaviour, unchanged). An ad-hoc run that DOES borrow one gets
+# `_adhoc_generation_config`'s live-read branch below instead.
 # `copy.deepcopy`d wherever this is handed out (never the module global
 # itself) — `seed_systems`/`fewshots` are mutable lists, and every ad-hoc
 # run sharing the SAME list objects is the identical footgun `launch()`
@@ -121,6 +240,134 @@ _ADHOC_GENERATION_CONFIG = {
     "target_system": None,
     "target_system_id": None,
 }
+
+
+def _adhoc_generation_config(phase_run):
+    """The ad-hoc (iterate-mode) generation config for `phase_run`: the bare
+    built-in defaults above if it borrows no `Experiment`, or that
+    experiment's CURRENT, LIVE fields — plus this run's own
+    `n_systems`/`n_scenarios_per_system` overrides, if set — if it does.
+
+    Deliberately NOT pinned or snapshotted, the opposite of the orchestrated
+    path's whole rule (`config_snapshot`/`validate_snapshot`: "never
+    re-derive from the live Experiment, only from what was pinned at
+    launch"). That rule exists to keep an ARCHIVED run's record truthful
+    against an experiment that stays freely editable after it has run — but
+    an ad-hoc run is never archived at all (`pipeline.export._phase_run_ids`
+    scopes on `pipeline_run__experiment`, which a null `pipeline_run_id`
+    never matches), so there is no record for a live read to contradict. The
+    researcher's own framing is the point: "if I am in phase 2, I can rerun
+    manually until I am satisfied" — rerunning against the experiment AS IT
+    CURRENTLY STANDS, including an edit made five minutes ago, is what
+    iterating actually means here.
+
+    `Experiment.objects.get(...)`, not `phase_run.experiment` — the latter
+    would cache onto `phase_run` the first time it is accessed and silently
+    stay stale across a re-entrant call within the same process; a fresh
+    query is what "live" actually requires. Safe to assume the row still
+    exists: `PhaseRun.experiment` is `on_delete=PROTECT`, so a non-null
+    `experiment_id` can never dangle (see that field's own comment).
+
+    Every isolation layer downstream of this still applies unconditionally:
+    `seed_systems`/`fewshots` are real `SystemDescription`/`FewShotExample`
+    QuerySets, not snapshot-adapted stand-ins, so `prompts.rendering
+    ._fewshot_rows`' variant-A taxonomy-resource guard reads their real
+    `input_file`/`output_file` `.kind` exactly as it would for any other
+    call — no adapter needed, unlike `system_from_snapshot`/
+    `fewshot_from_snapshot` on the orchestrated path. The two guards the
+    orchestrated path gets for free from `Experiment.clean()` (never
+    reachable here, since nothing calls `full_clean()` on a borrowed,
+    already-saved experiment, and `corpus.admin.SystemDescriptionAdmin` lets
+    `origin` be hand-flipped afterwards) and this function cannot skip are
+    contamination from a GENERATED `seed_system` OR `target_system` —
+    checked explicitly below via the SAME `generated_seed_systems_error`/
+    `generated_target_system_error` `Experiment.clean()` itself uses.
+    `target_system` is the more dangerous of the two to miss: its `.body` is
+    written into the variant-A prompt unconditionally (`build_phase2_context`
+    doesn't gate it on `generate_systems`), and the render-time/final-request
+    leak backstops CANNOT catch it — a generated system's prose is
+    taxonomy-DERIVED, not a literal quote (see `generated_target_system_error`'s
+    own docstring for the full reasoning; this was CVE-shaped enough that a
+    coordinator review round caught a real version of this function missing
+    it entirely, checking only seeds).
+
+    Coordinator review round 3 found two more gaps in the same family:
+    `phase_run.taxonomy` re-verified against the LIVE structural invariant
+    (`_check_adhoc_taxonomy_binding` — the guard taxonomy must not be a
+    free, driftable choice, the critical finding of that round), and
+    `Experiment.clean()`'s two generation-toggle rules
+    (`generation_toggles_off_error`/`missing_target_for_no_generation_error`)
+    ported here for the identical "launch() refuses this with zero calls"
+    reason `generated_seed_systems_error`/`generated_target_system_error`
+    already were.
+    """
+    if phase_run.experiment_id is None:
+        _check_adhoc_taxonomy_binding(phase_run, None)
+        config = copy.deepcopy(_ADHOC_GENERATION_CONFIG)
+        # The bare defaults are checked too, not waved through — see
+        # `_raise_config_errors`. Cheap (they contain no rows), and it means
+        # the ONE configuration in this codebase nobody validates because
+        # "it is obviously fine" is validated like every other.
+        _raise_config_errors(config)
+        return config
+
+    experiment = Experiment.objects.get(pk=phase_run.experiment_id)
+    _check_adhoc_taxonomy_binding(phase_run, experiment)
+
+    config = {
+        "seed_systems": list(experiment.seed_systems.all()),
+        "fewshots": list(
+            experiment.fewshots.filter(phase=2, is_active=True).order_by("phase", "order", "name")
+        ),
+        "generate_systems": experiment.generate_systems,
+        "generate_scenarios": experiment.generate_scenarios,
+        "n_systems": phase_run.n_systems or experiment.n_systems,
+        "n_scenarios_per_system": (
+            phase_run.n_scenarios_per_system or experiment.n_scenarios_per_system
+        ),
+        "target_system": experiment.target_system,
+        "target_system_id": experiment.target_system_id,
+    }
+    # Checked as a CONFIG, not as an experiment: the dict above is what this
+    # run will actually render against (this run's own count overrides
+    # included), so validating it is validating the real thing rather than
+    # something adjacent to it.
+    _raise_config_errors(config)
+    return config
+
+
+def _adhoc_labelling_fewshots(phase_run):
+    """The ad-hoc (iterate-mode) phase-3 few-shots for `phase_run`: empty if
+    it borrows no `Experiment`, or that experiment's CURRENT, active phase-3
+    few-shots if it does — the phase-3 half of `_adhoc_generation_config`'s
+    own "live, not snapshotted" reasoning; see that function's docstring for
+    why re-reading live is correct here specifically.
+
+    NO seed/target-system contamination check, and NO generation-toggle
+    check, on this side — coordinator review round, finding 5 (deliberate
+    OVER-enforcement fix): labelling never reads `seed_systems`/
+    `target_system`/the generation toggles at all
+    (`build_phase3_context` takes only `scenario`, `system_description`,
+    `taxonomy`, `fewshots`), so checking them here would refuse a phase-3
+    run for a reason its own render path can never actually reach — the
+    same asymmetry `PhaseRunCreateSerializer.validate()` now also respects
+    (those checks are scoped to `phase == 2` there too).
+
+    `_check_adhoc_taxonomy_binding` IS still called, on both branches —
+    unlike seed/target/toggles, taxonomy is not a phase-2-only concern:
+    phase 3 always renders it too, so it must be structurally tied to the
+    borrowed experiment here exactly the same way (see that function's own
+    docstring).
+    """
+    if phase_run.experiment_id is None:
+        _check_adhoc_taxonomy_binding(phase_run, None)
+        return []
+    experiment = Experiment.objects.get(pk=phase_run.experiment_id)
+    _check_adhoc_taxonomy_binding(phase_run, experiment)
+    return list(
+        experiment.fewshots.filter(phase=3, is_active=True).order_by("phase", "order", "name")
+    )
+
 
 # The exact key sets `config_snapshot` (below) produces at every nesting
 # level. `validate_snapshot` checks a live `PipelineRun.config` against
@@ -568,8 +815,10 @@ def _snapshot_fewshots(config, phase):
 def resolve_generation_config(phase_run):
     """The configuration Phase 2 renders ITS PROMPT against, and validates
     and persists the model's RESPONSE against, for `phase_run` — the run's
-    pinned snapshot when one exists, the ad-hoc defaults when it does not.
-    Deliberately the ONE place both concerns read from (`generation
+    pinned snapshot when one exists, `_adhoc_generation_config`'s bare
+    defaults-or-borrowed-experiment resolution when it does not (see that
+    function's own docstring for what "ad-hoc" now covers). Deliberately the
+    ONE place both concerns read from (`generation
     ._build_context` for the prompt, `generation._persist_error`/`_persist`
     for the response), so a prompt and the validation of its own response
     can never disagree with each other — nor with what a re-read of this
@@ -596,7 +845,7 @@ def resolve_generation_config(phase_run):
     not hand the row across the provider call, just confirms it exists now.
     """
     if not phase_run.pipeline_run_id:
-        return copy.deepcopy(_ADHOC_GENERATION_CONFIG)
+        return _adhoc_generation_config(phase_run)
     snapshot = phase_run.pipeline_run.config
     validate_snapshot(snapshot)
     target = snapshot["target_system"]
@@ -624,13 +873,14 @@ def resolve_generation_config(phase_run):
 
 def resolve_labelling_fewshots(phase_run):
     """Phase 3's active few-shots for `phase_run`, from its pinned
-    snapshot — an ad-hoc run (no `pipeline_run`) has none, matching the
-    live path's existing behaviour. Raises `MalformedSnapshot` the same way
+    snapshot — or `_adhoc_labelling_fewshots`' bare-or-borrowed-experiment
+    resolution for an ad-hoc run (no `pipeline_run`; see that function's own
+    docstring). Raises `MalformedSnapshot` the same way
     `resolve_generation_config` does for an orchestrated run whose config
     does not validate.
     """
     if not phase_run.pipeline_run_id:
-        return []
+        return _adhoc_labelling_fewshots(phase_run)
     snapshot = phase_run.pipeline_run.config
     validate_snapshot(snapshot)
     return _snapshot_fewshots(snapshot, phase=3)

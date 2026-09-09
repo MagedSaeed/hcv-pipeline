@@ -23,6 +23,15 @@ from pipeline.models import LLMCall, PhaseRun, PipelineRun
 # `test_run_experiment.py` both assert on this exact literal.
 RUN_TASK = "pipeline.tasks.run_pipeline_task"
 
+# The django-q task path an ad-hoc (iterate-mode) PhaseRun is handed to,
+# keyed by phase — mirrors RUN_TASK's own "plain string, asserted on
+# exactly" reasoning above; a typo here would ship just as silently.
+# `pipeline/tests/test_orchestration.py` asserts on these exact literals.
+PHASE_RUN_TASKS = {
+    2: "pipeline.tasks.run_phase2_task",
+    3: "pipeline.tasks.run_phase3_task",
+}
+
 
 @transaction.atomic
 def launch(experiment, n_repetitions=1, inline=False):
@@ -104,6 +113,30 @@ class QueueingError(RuntimeError):
         )
 
 
+def _hand_to_broker(task_name, pk, *, revert, wrap):
+    """Attempt `async_task(task_name, pk)`; on failure, call `revert()` (put
+    whatever this was tracking back to PENDING) and raise `wrap(error)`.
+
+    The ONE place both `queue_runs` (a batch of `PipelineRun`s, each cascading
+    to its own phase runs) and `queue_phase_run` (a single ad-hoc `PhaseRun`,
+    iterate mode) share the "mark QUEUED, hand off, revert to PENDING and
+    raise a clear error on a broker failure" mechanics — not a third
+    hand-written `async_task` try/except repeating it, exactly the defect
+    pattern this codebase has already been bitten by (see `queue_runs`'
+    module-level constants and this module's own history: `queue_runs`'
+    missing broker guard was one of three near-identical stranding bugs a
+    single review round found). The two callers differ only in WHAT they
+    revert (a `PipelineRun` cascades to its phase runs; a bare `PhaseRun` has
+    none of its own) and WHICH exception they raise — both are supplied as
+    callables so this stays the one copy of the mechanism itself.
+    """
+    try:
+        async_task(task_name, pk)
+    except Exception as error:  # noqa: BLE001 — broker errors vary by backend
+        revert()
+        raise wrap(error) from error
+
+
 def queue_runs(runs):
     """Mark each run QUEUED and hand it to django-q, reverting the one that fails.
 
@@ -121,13 +154,70 @@ def queue_runs(runs):
         run.status = PipelineRun.Status.QUEUED
         run.save(update_fields=["status"])
         run.phase_runs.update(status=PhaseRun.Status.QUEUED)
-        try:
-            async_task(RUN_TASK, run.pk)
-        except Exception as error:  # noqa: BLE001 — broker errors vary by backend
+
+        # `run=run` binds THIS iteration's run as each closure's own default,
+        # not a shared reference to the loop variable — each is built and
+        # consumed synchronously within this same iteration, before `run` is
+        # reassigned, so nothing here could actually observe the difference,
+        # but it is what a loop-variable-capturing closure is meant to look
+        # like regardless (and what ruff's B023 checks for).
+        def _revert(run=run):
             run.status = PipelineRun.Status.PENDING
             run.save(update_fields=["status"])
             run.phase_runs.update(status=PhaseRun.Status.PENDING)
-            raise QueueingError(run, error) from error
+
+        _hand_to_broker(
+            RUN_TASK,
+            run.pk,
+            revert=_revert,
+            wrap=lambda error, run=run: QueueingError(run, error),
+        )
+
+
+class PhaseRunQueueingError(RuntimeError):
+    """An ad-hoc `PhaseRun` (iterate mode — no `pipeline_run`) could not be
+    handed to django-q. That phase run has been reverted to PENDING.
+
+    Distinct from `QueueingError`, not a reuse of it under a new name: that
+    class's message names a `PipelineRun`'s `repetition_index` and
+    `experiment.name`, neither of which an ad-hoc run has — see
+    `PhaseRunViewSet.create`, the one caller.
+    """
+
+    def __init__(self, phase_run, error):
+        self.phase_run = phase_run
+        self.error = error
+        super().__init__(
+            f"Could not queue {phase_run} (id={phase_run.pk}) onto django-q: "
+            f"{type(error).__name__}: {error}. It has been reverted to pending."
+        )
+
+
+def queue_phase_run(phase_run):
+    """Hand one ad-hoc `PhaseRun` (no `pipeline_run` — iterate mode) to django-q.
+
+    Mirrors `queue_runs`'s QUEUED -> hand-off -> revert-to-PENDING-on-failure
+    shape for a single `PhaseRun` instead of a `PipelineRun` and its cascade
+    of phase runs — built on the SAME `_hand_to_broker` primitive rather than
+    a third, hand-written `async_task` try/except block (see that function's
+    own docstring for why that matters here specifically). Dispatches to
+    `run_phase2_task`/`run_phase3_task` by `phase_run.phase`, via
+    `PHASE_RUN_TASKS`, the same "plain string, looked up by import path"
+    contract `RUN_TASK` already uses for `run_pipeline_task`.
+    """
+    phase_run.status = PhaseRun.Status.QUEUED
+    phase_run.save(update_fields=["status"])
+
+    def _revert():
+        phase_run.status = PhaseRun.Status.PENDING
+        phase_run.save(update_fields=["status"])
+
+    _hand_to_broker(
+        PHASE_RUN_TASKS[phase_run.phase],
+        phase_run.pk,
+        revert=_revert,
+        wrap=lambda error: PhaseRunQueueingError(phase_run, error),
+    )
 
 
 def execute_pipeline_run(pipeline_run, on_progress=None):

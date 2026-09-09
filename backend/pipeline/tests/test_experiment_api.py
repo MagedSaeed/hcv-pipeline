@@ -412,3 +412,40 @@ def test_the_list_endpoints_progress_and_run_count_match_the_live_property(
     row = api_client.get("/api/experiments/").json()["results"][0]
     assert row["progress"] == experiment.progress
     assert row["run_count"] == experiment.runs.count() == 2
+
+
+def test_n_repetitions_help_text_explains_why_the_number_exists_and_stays_defaulted_to_one():
+    """Task 2's other half — `RunRequestSerializer.n_repetitions`, the field
+    `POST /api/experiments/{id}/run/` reads (see `run`, above). Same bar as
+    the CLI's `--repetitions --help`
+    (`test_run_experiment.test_repetitions_help_text_...`): plain language,
+    the real $1.61/23-minute cost anchor, and the default must stay 1.
+
+    Coordinator review round 2: the FIRST version of this text said
+    repetitions "run one after another, not in parallel" — false on the
+    path this field actually governs. `queue_runs` hands ALL N repetitions
+    to django-q immediately, and `Q_CLUSTER["workers"]` defaults to 2, so
+    two repetitions genuinely run CONCURRENTLY. Cost is still a straight
+    multiply (N x $1.61); wall-clock is not.
+
+    Coordinator review round 3 caught a SECOND bug in the fix for the
+    first one: "N x 23 minutes divided by 2" reads as 11.5 minutes at
+    N=1 — wrong, a single repetition takes the full 23 minutes regardless
+    of how many workers are free. The text must read correctly at N=1, not
+    just be non-committal about the general case.
+    """
+    from pipeline.serializers import RunRequestSerializer
+
+    field = RunRequestSerializer().fields["n_repetitions"]
+
+    assert field.default == 1
+    help_text = field.help_text.lower()
+    assert "1.61" in field.help_text
+    assert "23 minutes" in field.help_text
+    assert "queued together" in help_text
+    assert "workers" in help_text
+    assert "one after another" not in help_text
+    assert "not in parallel" not in help_text
+    assert "1 repetition still takes about 23 minutes" in help_text
+    assert "divided by 2" not in help_text
+    assert "noise" in help_text or "stochastic" in help_text

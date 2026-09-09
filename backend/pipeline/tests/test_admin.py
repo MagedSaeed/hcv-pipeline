@@ -24,6 +24,51 @@ def test_phase_run_admin_lists_the_progress_counters():
     assert "progress" in PhaseRunAdmin.list_display
 
 
+def test_phase_run_admin_has_an_experiment_column_and_filter():
+    """Coordinator review round, finding 3: with no column or filter here,
+    the admin had NO navigable path at all to the ad-hoc (iterate-mode)
+    phase runs borrowing an experiment's live inputs (`PhaseRun.experiment`
+    — see that field's own comment) — exactly the runs an operator needs to
+    find and delete before `ExperimentViewSet.perform_destroy`'s
+    `experiment_has_adhoc_runs` 409 will let them remove the experiment."""
+    assert "experiment" in PhaseRunAdmin.list_display
+    filter_fields = {f if isinstance(f, str) else f[0] for f in PhaseRunAdmin.list_filter}
+    assert "experiment" in filter_fields
+
+
+def test_phase_run_admin_pins_the_fields_launch_pins():
+    """Round 4, leak 3: the ORCHESTRATED path was left weaker than the
+    ad-hoc one. `launch()` pins `phase`/`variant`/`model`/`prompt_template`/
+    `taxonomy` onto every `PhaseRun` precisely so they are the experiment's
+    own — `taxonomy` above all, since it IS the list variant A's leak
+    backstop scans a prompt against. The ad-hoc path gained a live binding
+    re-check a round earlier (`_check_adhoc_taxonomy_binding`); the
+    orchestrated path never had one, and `PhaseRun.taxonomy` is not in the
+    `PipelineRun.config` snapshot either, so `validate_snapshot` never saw
+    it. A bare `ModelAdmin` therefore let a PENDING variant-A run's guard
+    taxonomy be repointed at a 1-row decoy through the change form, with
+    the run then completing and archiving `leak_scan_ran=True,
+    guarded_by=<decoy>` over a leaked prompt.
+
+    The HTTP-level proof (the form ignores the submitted value, and the
+    un-repointed run then fails closed with zero calls) is in
+    `pipeline/tests/test_guard_evidence.py`."""
+    for field in ("phase", "variant", "model", "prompt_template", "taxonomy"):
+        assert field in PhaseRunAdmin.readonly_fields
+
+
+def test_phase_run_admin_has_no_add_form():
+    """Leak 1's lesson, applied to leak 3's fix. Read-only fields are
+    EXCLUDED from a ModelForm, not merely disabled in it — which is exactly
+    how the previous round's HCV admin fix turned a validating add form
+    into one that created blank rows. With five required fields read-only,
+    an add form here would create a `PhaseRun` with no phase, model,
+    template or taxonomy at all. A `PhaseRun` comes from `launch()` or
+    `POST /api/phase-runs/`; there is no admin workflow that needs to make
+    one by hand."""
+    assert PhaseRunAdmin.has_add_permission(PhaseRunAdmin, request=None) is False
+
+
 def test_pipeline_run_admin_config_is_read_only():
     """Round 6 review, finding 1: `PipelineRunAdmin` was a bare `ModelAdmin`,
     so its JSONField `config` — the pinned snapshot both execution and

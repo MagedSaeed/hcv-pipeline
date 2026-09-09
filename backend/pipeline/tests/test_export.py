@@ -11,7 +11,7 @@ from rest_framework.test import force_authenticate
 
 from corpus.models import FewShotExample, Origin, Scenario, SystemDescription
 from llm.fake import FakeLLMClient
-from pipeline.clients import set_llm_client
+from pipeline.clients import get_llm_client, set_llm_client
 from pipeline.export import build_bundle, build_run_bundle, write_csv_zip
 from pipeline.models import Experiment, LLMCall, PipelineRun
 from pipeline.orchestration import execute_pipeline_run, launch
@@ -1534,3 +1534,78 @@ def test_the_tied_sections_order_by_an_explicit_id_tiebreaker(experiment):
     )
     assert '"corpus_systemdescription"."id" ASC' in systems_sql.split("ORDER BY")[-1]
     assert '"corpus_scenario"."id" ASC' in scenarios_sql.split("ORDER BY")[-1]
+
+
+@pytest.mark.django_db
+def test_adhoc_runs_are_excluded_from_the_experiment_export(experiment):
+    """USER DECISION (iterate-mode task): ad-hoc runs are scratch work and
+    must NEVER appear in any export bundle — the export's whole point is to
+    be "a real experiment's record", and an ad-hoc `PhaseRun` (no
+    `pipeline_run`) was never launched against this, or any, `Experiment`.
+
+    `_phase_run_ids(experiment)` filters `PhaseRun.objects.filter(
+    pipeline_run__experiment=experiment)` — a `pipeline_run__` lookup, which
+    SQL renders as a JOIN condition an ad-hoc run's NULL `pipeline_run_id`
+    can never satisfy. This proves that holds end to end, not just at the
+    query level: a real ad-hoc phase-2 run (using the SAME model/prompt-phase/
+    taxonomy shape as the real experiment) that actually generated a system,
+    a scenario, an archived call, AND — via an ad-hoc phase-3 run labelling
+    it — a label, must be completely invisible in `build_bundle(experiment)`,
+    even though every one of those rows would show up if this scoping were
+    ever loosened.
+    """
+    from pipeline.generation import run_phase2
+    from pipeline.models import Label, PhaseRun
+    from pipeline.orchestration import run_labelling
+
+    adhoc_generation_template = PromptTemplate.objects.create_version(
+        phase=2, name="adhoc-gen", user_prompt="g"
+    )
+    adhoc_labelling_template = PromptTemplate.objects.create_version(
+        phase=3, name="adhoc-lab", user_prompt="{{ scenario.scenario_id }}"
+    )
+    adhoc_generation = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=adhoc_generation_template,
+        taxonomy=experiment.taxonomy,
+    )
+    get_llm_client().queue(GENERATED)
+    run_phase2(adhoc_generation)
+    assert adhoc_generation.status == PhaseRun.Status.COMPLETED  # sanity: real work happened
+
+    adhoc_labelling = PhaseRun.objects.create(
+        phase=3,
+        model="m3",
+        prompt_template=adhoc_labelling_template,
+        taxonomy=experiment.taxonomy,
+        source_phase_run=adhoc_generation,
+    )
+    get_llm_client().queue(LABELLED)
+    adhoc_labelling = run_labelling(adhoc_labelling)
+    assert adhoc_labelling.status == PhaseRun.Status.COMPLETED  # sanity: real work happened
+
+    # Sanity: this ad-hoc work really did produce rows that WOULD leak into
+    # the export if `_phase_run_ids`' scoping were ever loosened — proving
+    # the assertions below are about scoping, not about there being nothing
+    # to scope out in the first place.
+    assert SystemDescription.objects.filter(generation_run=adhoc_generation).exists()
+    assert Scenario.objects.filter(generation_run=adhoc_generation).exists()
+    assert LLMCall.objects.filter(phase_run=adhoc_generation).exists()
+    assert LLMCall.objects.filter(phase_run=adhoc_labelling).exists()
+    assert Label.objects.filter(phase_run=adhoc_labelling).exists()
+
+    bundle = build_bundle(experiment)
+
+    scoped_phase_run_ids = {row["phase_run"] for row in bundle["runs"]}
+    assert adhoc_generation.pk not in scoped_phase_run_ids
+    assert adhoc_labelling.pk not in scoped_phase_run_ids
+    # The real experiment's own single repetition still produced exactly one
+    # system/scenario/label and its two calls — unaffected by the ad-hoc
+    # run's existence alongside it, not merely "no ad-hoc row visible by
+    # name" but a precise count that could not hold if scoping leaked.
+    assert len(bundle["systems"]) == 1
+    assert len(bundle["scenarios"]) == 1
+    assert len(bundle["labels"]) == 1
+    assert len(bundle["calls"]) == 2

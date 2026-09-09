@@ -14,10 +14,12 @@ from pipeline.labelling import finish_labelling_run
 from pipeline.labelling import label_scenario as real_label_scenario
 from pipeline.models import Experiment, Label, LLMCall, PhaseRun, PipelineRun
 from pipeline.orchestration import (
+    PhaseRunQueueingError,
     RunCancelled,
     RunInFlight,
     execute_pipeline_run,
     launch,
+    queue_phase_run,
     retry_failed,
     roll_up,
     run_labelling,
@@ -1523,3 +1525,68 @@ def test_run_labelling_does_not_re_execute_a_failed_run(_client, experiment):
 
     assert again.status == PhaseRun.Status.FAILED
     assert LLMCall.objects.count() == calls_before
+
+
+@pytest.mark.django_db
+def test_queue_phase_run_marks_it_queued_and_dispatches_to_the_right_task(experiment):
+    """`queue_phase_run` is the ad-hoc (iterate-mode) counterpart of
+    `queue_runs` — task 1's new enqueue seam, built on the same
+    `_hand_to_broker` primitive rather than a third, hand-written
+    `async_task` call. A phase-2 ad-hoc run dispatches to `run_phase2_task`;
+    a phase-3 one to `run_phase3_task` — `PHASE_RUN_TASKS` keyed by
+    `phase_run.phase`, mirroring `RUN_TASK`'s own "exact string, asserted
+    on" contract for `run_pipeline_task`.
+    """
+    generation = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=experiment.phase2_prompt,
+        taxonomy=experiment.taxonomy,
+    )
+    labelling = PhaseRun.objects.create(
+        phase=3,
+        model="m3",
+        prompt_template=experiment.phase3_prompt,
+        taxonomy=experiment.taxonomy,
+        source_phase_run=generation,
+    )
+
+    with patch("pipeline.orchestration.async_task") as enqueued:
+        queue_phase_run(generation)
+        queue_phase_run(labelling)
+
+    generation.refresh_from_db()
+    labelling.refresh_from_db()
+    assert generation.status == PhaseRun.Status.QUEUED
+    assert labelling.status == PhaseRun.Status.QUEUED
+    assert enqueued.call_args_list[0].args == ("pipeline.tasks.run_phase2_task", generation.pk)
+    assert enqueued.call_args_list[1].args == ("pipeline.tasks.run_phase3_task", labelling.pk)
+
+
+@pytest.mark.django_db
+def test_queue_phase_run_reverts_to_pending_and_raises_clearly_on_a_broker_failure(experiment):
+    """The same guarantee `queue_runs`' own broker-failure test proves for a
+    `PipelineRun`, one level down for a bare ad-hoc `PhaseRun`: QUEUED
+    claiming "handed to django-q" with nothing actually enqueued is worse
+    than useless, so a broker error reverts this phase run to PENDING and
+    raises a clear, specific error — never leaves it silently stuck at
+    QUEUED forever.
+    """
+    generation = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=experiment.phase2_prompt,
+        taxonomy=experiment.taxonomy,
+    )
+
+    with (
+        patch("pipeline.orchestration.async_task", side_effect=RuntimeError("no broker")),
+        pytest.raises(PhaseRunQueueingError, match="reverted to pending") as caught,
+    ):
+        queue_phase_run(generation)
+
+    assert caught.value.phase_run == generation
+    generation.refresh_from_db()
+    assert generation.status == PhaseRun.Status.PENDING

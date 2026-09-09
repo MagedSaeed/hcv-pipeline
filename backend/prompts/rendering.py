@@ -139,6 +139,32 @@ def format_hcv_table(taxonomy):
     )
 
 
+def unscannable_hcv_rows(rows):
+    """Which of `rows` carry NO content this module could ever scan for —
+    `hcv_id`, `name` and `definition` all blank (whitespace included).
+
+    The ONE definition of "scannable", deliberately shared rather than
+    restated: `assert_no_taxonomy_leak` below refuses to certify a scan
+    against such rows, and `pipeline.models.taxonomy_missing_rows_error`
+    imports this same function to refuse a run pinned to them before it is
+    ever created. Round 4, leak 1 was exactly the two levels DISAGREEING —
+    the create-time guard asked `taxonomy.hcvs.exists()` (row objects) while
+    the scan needs row CONTENT — so a taxonomy of blank rows passed the
+    first and then scanned for nothing at the second, returning True.
+    One predicate means they cannot drift apart into two answers again.
+
+    Whitespace is stripped: an `hcv_id` of `"   "` is content-free in every
+    sense that matters, and scanning for it as a literal substring would
+    match almost any prompt — a guard that fails on everything, not one
+    that guards.
+    """
+    return [
+        row
+        for row in rows
+        if not (row.hcv_id.strip() or row.name.strip() or row.definition.strip())
+    ]
+
+
 def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
     """Backstop for Run A: no taxonomy content may arrive by ANY route.
 
@@ -161,7 +187,22 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
 
     A taxonomy with zero HCV rows can't be scanned against at all — that's a
     broken import, not a leak, so it warns (same as an entirely missing guard
-    taxonomy) and returns rather than raising.
+    taxonomy) and returns rather than raising. A taxonomy whose rows carry no
+    `hcv_id`/`name`/`definition` (see `unscannable_hcv_rows` above) is the
+    SAME condition wearing a disguise, and gets the same answer: round 4,
+    leak 1 turned on those rows passing `.exists()` while contributing
+    nothing to any of the three comparisons below, so the scan ran, matched
+    nothing, and returned True — `leak_scan_ran=True` archived as proof over
+    a prompt with real HCV text in it. Returning False instead is what makes
+    `_assert_request_has_no_taxonomy`'s final checkpoint refuse to send it at
+    all, with zero provider calls.
+
+    ANY content-free row is enough to refuse, not merely all of them: 20
+    blanked rows out of 21 would otherwise leave a scan quietly covering
+    1/21 of the taxonomy while still certifying itself, which is the same
+    silent narrowing in smaller print. Nothing legitimate produces such a
+    row — `import_taxonomy` refuses one, and `taxonomy.admin` offers no add
+    form — so this refuses only genuinely broken data.
 
     Returns True if a scan actually happened, False if it could not run, so the
     caller can record that distinction instead of assuming a clean pass.
@@ -173,6 +214,16 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
         warnings.warn(
             f"Guard taxonomy {taxonomy} has no HCV rows: the Run A leak backstop "
             "cannot run. Check that the taxonomy was imported correctly.",
+            stacklevel=2,
+        )
+        return False
+    unscannable = unscannable_hcv_rows(rows)
+    if unscannable:
+        warnings.warn(
+            f"Guard taxonomy {taxonomy} has {len(unscannable)} of {len(rows)} HCV "
+            "rows with no hcv_id, name or definition: the Run A leak backstop "
+            "would scan for nothing and still report success. Check that the "
+            "taxonomy was imported correctly.",
             stacklevel=2,
         )
         return False
@@ -341,10 +392,11 @@ def assert_request_not_leaking_taxonomy(*, variant, guard_taxonomy, request):
     )
     if not scanned:
         raise TaxonomyLeak(
-            f"Guard taxonomy {guard_taxonomy} has no HCV rows: the final "
-            "request scan cannot run, and this is the last checkpoint before "
-            "the provider call. Refusing to send an unscanned variant-A "
-            "request."
+            f"Guard taxonomy {guard_taxonomy} has no HCV rows the scan can use "
+            "(none at all, or none carrying an hcv_id/name/definition — see "
+            "`unscannable_hcv_rows`): the final request scan cannot run, and "
+            "this is the last checkpoint before the provider call. Refusing to "
+            "send an unscanned variant-A request."
         )
     return True
 

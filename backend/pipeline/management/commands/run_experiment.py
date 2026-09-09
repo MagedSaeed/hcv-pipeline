@@ -26,7 +26,31 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("name")
-        parser.add_argument("--repetitions", type=int, default=1)
+        parser.add_argument(
+            "--repetitions",
+            type=int,
+            default=1,
+            help=(
+                "How many times to repeat this exact configuration (default: 1). "
+                "LLM output is stochastic, so a single repetition's difference "
+                "between variant A (taxonomy withheld) and variant B (taxonomy "
+                "supplied) could just be sampling noise — repeating the same "
+                "configuration several times is what turns a one-off difference "
+                "into a finding you can trust. Each repetition costs roughly "
+                "$1.61 and takes about 23 minutes at the default configuration "
+                "(3 systems x 5 scenarios, both variants, 32 provider calls), so "
+                "the total cost is straightforwardly this number times $1.61. "
+                "Time is a bit different on the default (queued) path: all "
+                "repetitions are queued together and run as workers become free "
+                "(2 at a time by default), so they overlap rather than running "
+                "strictly in sequence — 1 repetition still takes about 23 "
+                "minutes, 2 finish together in about the same 23 minutes, and "
+                "each further pair adds roughly another 23 minutes while it "
+                "waits for a free worker. --inline is the exception — it runs "
+                "repetitions one at a time in this process, so its wall-clock "
+                "really is this number times 23 minutes."
+            ),
+        )
         parser.add_argument(
             "--inline",
             action="store_true",

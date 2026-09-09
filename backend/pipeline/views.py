@@ -2,7 +2,7 @@ import json
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
@@ -11,15 +11,17 @@ from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from core.keys import MissingAPIKey
+from core.keys import MissingAPIKey, resolve_openrouter_key
 from core.permissions import StaffWrites as BaseStaffWrites
 from pipeline.export import build_bundle, build_run_bundle, safe_filename_stem, write_csv_zip
 from pipeline.models import Experiment, Label, PhaseRun, PipelineRun
 from pipeline.orchestration import (
+    PhaseRunQueueingError,
     QueueingError,
     RunCancelled,
     RunInFlight,
     launch,
+    queue_phase_run,
     queue_runs,
     retry_failed,
 )
@@ -27,6 +29,7 @@ from pipeline.serializers import (
     ExperimentSerializer,
     LabelSerializer,
     LLMCallSerializer,
+    PhaseRunCreateSerializer,
     PhaseRunSerializer,
     PipelineRunSerializer,
     RunRequestSerializer,
@@ -212,6 +215,18 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         that record, and would do so with a 204 even while a worker still
         holds a RUNNING PipelineRun. An experiment nobody has ever launched
         carries no such record and stays deletable.
+
+        `adhoc_phase_runs` (`PhaseRun.experiment`, `on_delete=PROTECT` — see
+        that field's own comment) is checked too, for the identical reason
+        `runs` is: an ad-hoc run borrowing this experiment reads its live
+        fields at EXECUTION time, so a still-QUEUED/RUNNING one deleted out
+        from under its own borrowed experiment would either crash mid-render
+        or, if `on_delete` were SET_NULL instead of PROTECT, silently fall
+        back to bare defaults — exactly the silent failure this whole field
+        exists to prevent. `instance.delete()` would otherwise raise a bare
+        `ProtectedError` here (DRF has no handler for it — a 500), so this is
+        checked explicitly, with the same actionable 409 shape as `runs`
+        rather than left to that crash.
         """
         if instance.runs.exists():
             raise Conflict(
@@ -219,6 +234,21 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
                 "deleted. Delete each of its runs via DELETE /api/pipeline-runs/"
                 "{id}/ first if you really want to remove it.",
                 code="experiment_has_runs",
+            )
+        adhoc_ids = list(instance.adhoc_phase_runs.order_by("id").values_list("id", flat=True))
+        if adhoc_ids:
+            # Coordinator review round, finding 3: the first version of this
+            # message named the route (`DELETE /api/phase-runs/{id}/`) but
+            # not which `{id}`s, and `?experiment=` (below) used to be no
+            # help either — an operator had a 409 and no way to act on it.
+            # Naming the ids here makes the message actually actionable on
+            # its own, without a second lookup.
+            raise Conflict(
+                f"{instance.name!r} has ad-hoc (iterate-mode) phase runs "
+                f"{adhoc_ids} borrowing its inputs and cannot be deleted. "
+                "Delete each of them via DELETE /api/phase-runs/{id}/ first "
+                "if you really want to remove it.",
+                code="experiment_has_adhoc_runs",
             )
         instance.delete()
 
@@ -256,14 +286,14 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         try:
             runs = launch(experiment, n_repetitions=options.validated_data["n_repetitions"])
         except MissingAPIKey as error:
-            return self._service_unavailable(MissingAPIKeyError, error)
+            return _service_unavailable(MissingAPIKeyError, error)
         except DjangoValidationError as error:
             raise ValidationError(getattr(error, "message_dict", {"detail": str(error)})) from error
 
         try:
             queue_runs(runs)
         except QueueingError as error:
-            return self._service_unavailable(BrokerUnavailableError, error)
+            return _service_unavailable(BrokerUnavailableError, error)
 
         return Response(
             {
@@ -297,24 +327,25 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         stem = f"{safe_filename_stem(experiment.name)}-export"
         return _export_response(wanted, bundle, stem)
 
-    @staticmethod
-    def _service_unavailable(error_class, error):
-        """Build a 503 body carrying both the live message and a stable `code`.
 
-        `run` catches plain, non-DRF exceptions (`MissingAPIKey`,
-        `QueueingError`) rather than letting DRF's own exception handler
-        render them, since each needs the ORIGINAL exception's dynamic
-        message as `detail` — not `error_class`'s generic `default_detail`.
-        Constructing the DRF exception anyway (`error_class(str(error))`)
-        and reading its `.detail`/`.detail.code` back out means the `code`
-        for each case still comes from exactly one place — the exception
-        class's `default_code` — rather than a bare string literal repeated
-        wherever a 503 of that kind gets built.
-        """
-        exc = error_class(str(error))
-        return Response(
-            {"detail": str(exc.detail), "code": exc.detail.code}, status=exc.status_code
-        )
+def _service_unavailable(error_class, error):
+    """Build a 503 body carrying both the live message and a stable `code`.
+
+    Shared by `ExperimentViewSet.run` and `PhaseRunViewSet.create` — both
+    catch a plain, non-DRF exception (`MissingAPIKey`, `QueueingError`,
+    `PhaseRunQueueingError`) rather than letting DRF's own exception handler
+    render it, since each needs the ORIGINAL exception's dynamic message as
+    `detail` — not `error_class`'s generic `default_detail`. Constructing the
+    DRF exception anyway (`error_class(str(error))`) and reading its
+    `.detail`/`.detail.code` back out means the `code` for each case still
+    comes from exactly one place — the exception class's `default_code` —
+    rather than a bare string literal repeated wherever a 503 of that kind
+    gets built. Module-level, not a method on either viewset: it belongs to
+    neither one more than the other, and a method on `ExperimentViewSet`
+    would make `PhaseRunViewSet` reach into a sibling class for it.
+    """
+    exc = error_class(str(error))
+    return Response({"detail": str(exc.detail), "code": exc.detail.code}, status=exc.status_code)
 
 
 def _export_format(request, format):
@@ -546,9 +577,37 @@ class PipelineRunViewSet(
         return queryset
 
 
-class PhaseRunViewSet(ConflictCodeMixin, viewsets.ReadOnlyModelViewSet):
+class PhaseRunViewSet(
+    ConflictCodeMixin,
+    mixins.CreateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.ReadOnlyModelViewSet,
+):
+    """Read-only, plus two deliberate exceptions.
+
+    `create` is iterate mode (spec §5.4/§9, "POST /api/phase-runs/ ad-hoc
+    single phase"): run one phase on its own, outside any `Experiment`/
+    `PipelineRun`, so a prompt can be tuned without paying for a whole batch.
+    `destroy` is how an ad-hoc run's generated material is removed — spec:
+    "Generated material is only removed by deleting the run that produced
+    it, via DELETE /api/phase-runs/{id}/, which cascades" — the ONLY route
+    for an ad-hoc run, which has no `PipelineRun` to delete instead (see
+    `PipelineRunViewSet` for that route on an orchestrated run).
+    `StaffWrites` (below) reserves BOTH of those — every unsafe method — for
+    staff; only `list`/`retrieve` and the two GET `@action`s stay open to any
+    authenticated user.
+    """
+
     serializer_class = PhaseRunSerializer
     permission_classes = [IsAuthenticated, StaffWrites]
+
+    def get_serializer_class(self):
+        # `create` writes a narrower, validated shape than `PhaseRunSerializer`
+        # exposes for reads (see `PhaseRunCreateSerializer`'s own docstring for
+        # why that is a separate class rather than the read serializer reused).
+        if self.action == "create":
+            return PhaseRunCreateSerializer
+        return super().get_serializer_class()
 
     def get_queryset(self):
         queryset = PhaseRun.objects.prefetch_related("calls")
@@ -563,8 +622,21 @@ class PhaseRunViewSet(ConflictCodeMixin, viewsets.ReadOnlyModelViewSet):
         # __experiment_id` reaches through the FK the same way `?pipeline_run=`
         # already reaches PhaseRun's own FK, one filter added, no query cost
         # for callers that don't use it.
+        #
+        # `Q(...) | Q(...)`, not `pipeline_run__experiment_id` alone —
+        # coordinator review round, finding 3: an ad-hoc run's OWN borrowed
+        # `experiment` (`PhaseRun.experiment`, see that field's own comment)
+        # never satisfies `pipeline_run__experiment_id` at all (a null
+        # `pipeline_run` never matches), so this used to return 0 for the
+        # exact ad-hoc runs an operator most needs to find — including the
+        # ones blocking `ExperimentViewSet.perform_destroy`'s 409, which
+        # named this filter as how to locate them. Matching EITHER FK is
+        # what makes "every phase run of experiment X" true regardless of
+        # whether a given row got there via `launch()` or via borrowing.
         if (experiment := integer_param(params, "experiment")) is not None:
-            queryset = queryset.filter(pipeline_run__experiment_id=experiment)
+            queryset = queryset.filter(
+                Q(pipeline_run__experiment_id=experiment) | Q(experiment_id=experiment)
+            )
         if (phase := integer_param(params, "phase")) is not None:
             queryset = queryset.filter(phase=phase)
         if variant := params.get("variant"):
@@ -572,6 +644,100 @@ class PhaseRunViewSet(ConflictCodeMixin, viewsets.ReadOnlyModelViewSet):
         if state := params.get("status"):
             queryset = queryset.filter(status=state)
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        """Iterate mode: one phase, ad-hoc, `pipeline_run` left null.
+
+        Mirrors `ExperimentViewSet.run` at every step that also applies here,
+        deliberately — the two are the same shape of "validate, then hand off
+        to django-q" action, just for a single phase instead of a whole
+        batch:
+
+        1. **The API key is resolved FIRST**, exactly as `launch()` does it,
+           and for the identical reason (spec §12): a missing key must fail
+           before a single row exists, not strand a `PhaseRun` that will
+           never be picked up. Done here rather than inside `queue_phase_run`
+           because `queue_phase_run` only runs AFTER the row is created —
+           too late for "before any row exists".
+        2. **Validated the same way the model does.** `PhaseRunCreateSerializer`
+           reuses `Experiment.clean()`'s own reasoning (see its docstring) —
+           a template pinned to the wrong phase, a taxonomy with no rows, a
+           phase-3 run with no `source_phase_run` (or one that is not itself
+           a phase-2 run) are all refused before anything is created, the
+           same as an orchestrated run would be at `launch()` time.
+        3. **Enqueued through `queue_phase_run`** — the ad-hoc counterpart of
+           `queue_runs`, built on the SAME broker-failure-revert primitive
+           (`pipeline.orchestration._hand_to_broker`) rather than a third,
+           hand-written `async_task` call: three independently-maintained
+           copies of "mark QUEUED, hand off, revert on failure" is exactly
+           the defect shape this codebase has already been bitten by more
+           than once (see that module's own docstrings). A broker failure
+           here reverts this phase run to PENDING and reports 503 — the row
+           still exists (unlike step 1's key check, which runs before any
+           row does), so the operator can inspect or re-queue it, matching
+           `queue_runs`' own "reverted, not deleted" contract.
+
+        **Isolation is the point of this whole action, not a side detail**:
+        an ad-hoc variant-A phase-2 run has no `pipeline_run`, and therefore
+        no `PipelineRun.config` snapshot — `pipeline.execution_config
+        .resolve_generation_config`'s ad-hoc branch (`_ADHOC_GENERATION_CONFIG`)
+        is what it renders against instead. Every isolation layer still
+        applies regardless: the context builder still withholds the taxonomy
+        from variant A (`pipeline.generation._build_context`), taxonomy-kind
+        resources/few-shots are still refused (`prompts.rendering`), the
+        render-time backstop still scans the rendered strings
+        (`assert_no_taxonomy_leak`), and the final choke point still scans
+        the outgoing request immediately before the HTTP call
+        (`pipeline.generation._preflight` ->
+        `assert_request_not_leaking_taxonomy`) — none of those four guards
+        reads `pipeline_run` or the snapshot at all; they are wired onto
+        EVERY phase-2 call, ad-hoc or orchestrated alike. See
+        `pipeline/tests/test_iterate_mode.py` for this proven end to end.
+
+        Returns 202, not 201: like `run`, this both creates a row AND hands
+        it to django-q in the same request — 202 ("accepted, not yet acted
+        on") is the honest description of what actually happened, matching
+        `run`'s own choice for the identical reason.
+        """
+        try:
+            resolve_openrouter_key()
+        except MissingAPIKey as error:
+            return _service_unavailable(MissingAPIKeyError, error)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phase_run = serializer.save(created_by=request.user)
+
+        try:
+            queue_phase_run(phase_run)
+        except PhaseRunQueueingError as error:
+            return _service_unavailable(BrokerUnavailableError, error)
+
+        return Response(PhaseRunSerializer(phase_run).data, status=status.HTTP_202_ACCEPTED)
+
+    def perform_destroy(self, instance):
+        """Refuse while a worker may still hold this phase run.
+
+        Mirrors `PipelineRunViewSet.perform_destroy` one level down: a QUEUED
+        or RUNNING phase run is either waiting for a worker or being driven
+        by one right now, and deleting its rows mid-flight turns an orderly
+        run into a crash inside the task. This is the ONLY deletion route an
+        ad-hoc run has (it has no `PipelineRun` to delete instead), and its
+        generated `SystemDescription`/`Scenario` rows cascade with it
+        (`generation_run`, `on_delete=CASCADE` — see `corpus.models`), the
+        same "delete the run, not individual generated rows" policy
+        `corpus.permissions.ReadOnlyIfGenerated` already documents. Works
+        the same way for an orchestrated phase run too — nothing here is
+        ad-hoc-specific — though the ordinary route for THOSE stays deleting
+        the `PipelineRun` itself, which cascades to every phase run under it.
+        """
+        if instance.status in (PhaseRun.Status.QUEUED, PhaseRun.Status.RUNNING):
+            raise Conflict(
+                f"{instance} is {instance.status} and cannot be deleted while "
+                "a worker may still hold it. Wait for it to finish.",
+                code="run_in_flight",
+            )
+        instance.delete()
 
     @action(detail=True, methods=["get"])
     def calls(self, request, pk=None, format=None):
