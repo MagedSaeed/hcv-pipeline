@@ -48,6 +48,12 @@ import zipfile
 from django.db.models import Sum
 
 from corpus.models import Scenario, SystemDescription
+from pipeline.execution_config import (
+    _FEWSHOT_KEY_ORDER,
+    _SCENARIO_KEY_ORDER,
+    _SYSTEM_KEY_ORDER,
+    _TOP_LEVEL_KEY_ORDER,
+)
 from pipeline.models import Label, LLMCall, PhaseRun, PipelineRun
 from prompts.models import PromptTemplate
 from taxonomy.models import Taxonomy
@@ -417,6 +423,84 @@ def _calls(phase_run_ids):
     ]
 
 
+def _ordered(mapping, key_order):
+    """Rebuild `mapping` with `key_order`'s keys first, in that order, then
+    any OTHER key `mapping` happens to carry (sorted, so even an
+    unanticipated key's position is at least deterministic rather than
+    whatever the database handed back) — never dropped, never raised on: if
+    `execution_config`'s declared shape and `PipelineRun.config`'s actual
+    shape ever drift, that is `validate_snapshot`'s job to catch at
+    execution time, not this function's job to hide by silently discarding
+    data from an archival export.
+    """
+    ordered = {key: mapping[key] for key in key_order if key in mapping}
+    for key in sorted(k for k in mapping if k not in key_order):
+        ordered[key] = mapping[key]
+    return ordered
+
+
+def _canonical_system(system):
+    """One seed/target system from a snapshot (`execution_config
+    ._snapshot_system`'s own shape), with its own keys AND every one of its
+    `scenarios`' keys canonicalised — a system dict nested inside
+    `run_configs` hits the exact same `jsonb`-reordering problem the top
+    level does, one level down.
+    """
+    ordered = _ordered(system, _SYSTEM_KEY_ORDER)
+    ordered["scenarios"] = [_ordered(s, _SCENARIO_KEY_ORDER) for s in ordered["scenarios"]]
+    return ordered
+
+
+def _canonical_run_config(config):
+    """Rebuild a `PipelineRun.config` snapshot with a fixed, canonical key
+    order at EVERY nesting level it has, instead of trusting whatever order
+    the database handed back.
+
+    Why this is needed at all: `PipelineRun.config` is a Django `JSONField`,
+    which maps to `jsonb` on PostgreSQL. `jsonb` does not preserve an
+    object's key insertion order — it reorders keys on write — while
+    SQLite's JSON1 storage happens to preserve it. `execution_config
+    .config_snapshot` writes this dict's keys, and every nested system's and
+    scenario's and few-shot's keys, in one fixed, deliberate order every
+    time (see that function and `_snapshot_system`/`_snapshot_scenario`) —
+    but by the time a row comes back OUT of a `jsonb` column, that order is
+    gone; PostgreSQL hands back its own internal ordering instead, and two
+    exports of the identical experiment produce different bytes the moment
+    one export is read from SQLite (dev) and the other from PostgreSQL
+    (production, see `docker-compose.yml`) — even though every VALUE is
+    identical.
+
+    The order restored here is `config_snapshot`'s OWN construction order —
+    `execution_config._TOP_LEVEL_KEY_ORDER`/`_SYSTEM_KEY_ORDER`/
+    `_SCENARIO_KEY_ORDER`/`_FEWSHOT_KEY_ORDER`, the exact tuples
+    `validate_snapshot`'s exact-key-set checks are themselves built from —
+    deliberately, not an arbitrary alternative such as alphabetical: it is
+    the order SQLite's insertion-preserving JSON1 already returns today, so
+    it is also the order this module's own CSV-header test already pins
+    (`test_the_csv_zip_pins_the_exact_header_row_of_every_member`). Reusing
+    it means PostgreSQL is brought INTO agreement with the one backend this
+    was already correct on, rather than redefining "correct" for either.
+
+    Every nesting level the snapshot has gets this treatment, not just the
+    top: a seed/target system's own keys AND its `scenarios`' keys
+    (`_canonical_system`), and every few-shot's keys. `jsonb` reorders an
+    object's keys at every level of a nested document it stores, not only
+    the outermost one — canonicalising only `config`'s own top-level keys
+    would still leave a backend-dependent order inside every system,
+    scenario, and few-shot nested underneath it, in both the JSON bundle
+    and the JSON blob `_run_configs_csv_rows`/`_as_rows` write into a single
+    CSV cell (where key order changes the cell's bytes just as much as it
+    changes the JSON body's).
+    """
+    ordered = _ordered(config, _TOP_LEVEL_KEY_ORDER)
+    ordered["seed_systems"] = [_canonical_system(s) for s in ordered["seed_systems"]]
+    ordered["target_system"] = (
+        _canonical_system(ordered["target_system"]) if ordered["target_system"] else None
+    )
+    ordered["fewshots"] = [_ordered(f, _FEWSHOT_KEY_ORDER) for f in ordered["fewshots"]]
+    return ordered
+
+
 def _run_config_or_none(config):
     """`None`, explicitly, for a run with no snapshot at all — never a bare
     `{}` a reader could mistake for "this run's config was genuinely empty".
@@ -428,8 +512,14 @@ def _run_config_or_none(config):
     thing: this row predates the migration that added the field, or was
     created some other way that bypassed `launch()` — "never snapshotted",
     not "snapshotted with nothing in it".
+
+    A non-empty config is run through `_canonical_run_config` before it goes
+    anywhere near `json.dumps`/`csv.DictWriter` — see that function's own
+    docstring for why a bare, un-reordered `PipelineRun.config` read back
+    from PostgreSQL cannot be trusted to match what SQLite would have
+    produced for the identical snapshot.
     """
-    return config if config else None
+    return _canonical_run_config(config) if config else None
 
 
 def build_bundle(experiment):

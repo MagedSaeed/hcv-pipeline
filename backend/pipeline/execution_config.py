@@ -369,51 +369,67 @@ def _adhoc_labelling_fewshots(phase_run):
     )
 
 
-# The exact key sets `config_snapshot` (below) produces at every nesting
-# level. `validate_snapshot` checks a live `PipelineRun.config` against
-# these — an EXACT match, not "at least these" — so a field silently
-# dropped from `config_snapshot`, a stale snapshot from a since-changed
-# shape, or a hand-edited row all fail closed the same way.
-_TOP_LEVEL_KEYS = frozenset(
-    {
-        "seed_systems",
-        "fewshots",
-        "target_system",
-        "generate_systems",
-        "generate_scenarios",
-        "n_systems",
-        "n_scenarios_per_system",
-    }
+# The exact keys `config_snapshot` (below) produces at every nesting level,
+# in the same order `config_snapshot`'s own dict/comprehension literals
+# construct them (compare each tuple below against the matching return
+# statement in `config_snapshot`/`_snapshot_system`/`_snapshot_scenario`).
+# `validate_snapshot` needs only the SET of each (an EXACT match, not "at
+# least these" — a field silently dropped from `config_snapshot`, a stale
+# snapshot from a since-changed shape, or a hand-edited row all fail closed
+# the same way), which is why these used to be plain `frozenset` literals.
+# They are ORDERED tuples instead — with the frozenset each validation check
+# actually needs derived from the tuple, not hand-duplicated alongside it —
+# because `pipeline.export` also needs a canonical key order for this exact
+# shape: `PipelineRun.config` is a `JSONField`, which Django maps to `jsonb`
+# on PostgreSQL, and `jsonb` does not preserve object key insertion order on
+# write (SQLite's JSON1 does). Reading `run.config` back and handing the
+# dict straight to `json.dumps`/`csv.DictWriter` therefore produces a
+# different key order — and different bytes — depending on which database
+# produced the row, even for byte-for-byte the same snapshot. `pipeline
+# .export._canonical_run_config` rebuilds the snapshot with every nesting
+# level's keys in the order declared here instead of trusting whatever order
+# the database handed back, so the archive's key order is a property of this
+# declared shape, never of the backend. One set of tuples, used both ways,
+# so the two can never silently drift apart the way two independently
+# maintained lists could.
+_TOP_LEVEL_KEY_ORDER = (
+    "seed_systems",
+    "fewshots",
+    "target_system",
+    "generate_systems",
+    "generate_scenarios",
+    "n_systems",
+    "n_scenarios_per_system",
 )
-_SYSTEM_KEYS = frozenset({"id", "title", "slug", "body", "scenarios"})
-_SCENARIO_KEYS = frozenset(
-    {
-        "scenario_id",
-        "actor",
-        "trigger",
-        "standing_state",
-        "asset",
-        "threat",
-        "outcome",
-        "narrative",
-        "intended_hcvs",
-        "abox",
-    }
+_SYSTEM_KEY_ORDER = ("id", "title", "slug", "body", "scenarios")
+_SCENARIO_KEY_ORDER = (
+    "scenario_id",
+    "actor",
+    "trigger",
+    "standing_state",
+    "asset",
+    "threat",
+    "outcome",
+    "narrative",
+    "intended_hcvs",
+    "abox",
 )
-_FEWSHOT_KEYS = frozenset(
-    {
-        "id",
-        "name",
-        "phase",
-        "is_active",
-        "input",
-        "output",
-        "input_file_id",
-        "output_file_id",
-        "input_resource_kind",
-        "output_resource_kind",
-    }
+_FEWSHOT_KEY_ORDER = (
+    "id",
+    "name",
+    "phase",
+    "is_active",
+    "input",
+    "output",
+    "input_file_id",
+    "output_file_id",
+    "input_resource_kind",
+    "output_resource_kind",
 )
+_TOP_LEVEL_KEYS = frozenset(_TOP_LEVEL_KEY_ORDER)
+_SYSTEM_KEYS = frozenset(_SYSTEM_KEY_ORDER)
+_SCENARIO_KEYS = frozenset(_SCENARIO_KEY_ORDER)
+_FEWSHOT_KEYS = frozenset(_FEWSHOT_KEY_ORDER)
 
 
 def _snapshot_scenario(scenario):
