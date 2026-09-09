@@ -331,6 +331,97 @@ def test_a_bare_scenarios_list_with_no_target_fails_the_run(
     assert Scenario.objects.filter(scenario_id="sc_01").count() == 0
 
 
+STRAY_CARD = {**CARD, "scenario_id": "sc_stray"}
+
+
+@pytest.mark.django_db
+def test_a_redundant_top_level_scenarios_list_does_not_discard_a_valid_generation(
+    _client, experiment, taxonomy, template
+):
+    """Defect 1: a live run against a real provider returned a well-formed
+    `system_descriptions` (with its own nested scenarios) AND a redundant
+    top-level `scenarios` list the schema never should have offered a place
+    for. The old behaviour discarded the ENTIRE response — a complete,
+    paid-for generation — because a bare scenarios list with no target_system
+    was (rightly, in every OTHER case) treated as material with nowhere to
+    go. The nested material is authoritative and must survive; the stray
+    list must not silently vanish either — it lands on the call, not in the
+    run's outcome.
+    """
+    payload = json.dumps(
+        {
+            "system_descriptions": [
+                {"title": "Riverbend", "body": "A plant.", "scenarios": [CARD]}
+            ],
+            "scenarios": [STRAY_CARD],
+        }
+    )
+    _client.queue(payload)
+    run = run_phase2(make_run(experiment, taxonomy, template))
+
+    assert run.status == PhaseRun.Status.COMPLETED
+    system = SystemDescription.objects.get(title="Riverbend")
+    assert Scenario.objects.filter(system_description=system, scenario_id="sc_01").exists()
+    # The stray top-level scenario is never persisted — there is no target to
+    # attach it to, and it duplicates nothing the nested material doesn't
+    # already carry.
+    assert not Scenario.objects.filter(scenario_id="sc_stray").exists()
+
+    call = run.calls.get()
+    assert call.stray_scenarios == [STRAY_CARD]
+    # The redundant list is a research signal about the RESPONSE SHAPE, not a
+    # parse failure — parsed_ok/parse_error must stay exactly what they would
+    # have been for a clean response with no stray list at all.
+    assert call.parsed_ok is True
+    assert call.parse_error == ""
+
+
+@pytest.mark.django_db
+def test_a_redundant_scenarios_list_with_no_system_descriptions_still_fails(
+    _client, experiment, taxonomy, template
+):
+    """The safety net is narrow: if system_descriptions is EMPTY, a bare
+    scenarios list with no target is still the genuine "nowhere to go"
+    error — there is no authoritative nested material to fall back on."""
+    payload = json.dumps({"system_descriptions": [], "scenarios": [CARD]})
+    _client.queue(payload)
+    run = run_phase2(make_run(experiment, taxonomy, template))
+
+    assert run.status == PhaseRun.Status.FAILED
+    assert "target" in run.error
+    assert Scenario.objects.filter(scenario_id="sc_01").count() == 0
+
+
+@pytest.mark.django_db
+def test_a_redundant_scenarios_list_is_still_an_error_when_generate_systems_is_false(
+    _client, experiment, taxonomy, template
+):
+    """When generate_systems is False, the response's bare `scenarios` field
+    IS the field the run actually asked for — a `system_descriptions` list
+    alongside it (however populated) does not make an otherwise-legitimate
+    target-mode response "redundant"; `generate_systems is False` fails it on
+    its own, unaffected by the new safety net."""
+    target = SystemDescription.objects.create(title="Oldsmar", body="x", origin=Origin.SEED)
+    experiment.generate_systems = False
+    experiment.target_system = target
+    experiment.save()
+
+    payload = json.dumps(
+        {
+            "system_descriptions": [
+                {"title": "Riverbend", "body": "A plant.", "scenarios": [CARD]}
+            ],
+            "scenarios": [STRAY_CARD],
+        }
+    )
+    _client.queue(payload)
+    run = run_phase2(make_run(experiment, taxonomy, template))
+
+    assert run.status == PhaseRun.Status.FAILED
+    assert "generate_systems" in run.error
+    assert SystemDescription.objects.filter(origin=Origin.GENERATED).count() == 0
+
+
 @pytest.mark.django_db
 def test_a_bare_scenarios_list_fails_even_for_an_ad_hoc_run(_client, taxonomy, template):
     """Same rule for a PhaseRun with no pipeline_run (no Experiment behind it),
@@ -416,6 +507,36 @@ def test_the_output_schema_is_pinned_into_the_request(_client, experiment, taxon
     _client.queue(PAYLOAD)
     run_phase2(make_run(experiment, taxonomy, template))
     assert _client.calls[0]["json_schema"]["properties"]["system_descriptions"]
+
+
+@pytest.mark.django_db
+def test_the_pinned_schema_is_mode_specific(_client, experiment, taxonomy, template):
+    """Defect 1's root-cause fix: the schema shown to the model must not
+    offer the field the run's mode does not use, so a well-behaved model
+    cannot fill in both. `experiment` here defaults to generate_systems=True
+    with no target_system — the schema must not carry a top-level
+    `scenarios` field at all in that mode."""
+    _client.queue(PAYLOAD)
+    run_phase2(make_run(experiment, taxonomy, template))
+    schema = _client.calls[0]["json_schema"]
+    assert "system_descriptions" in schema["properties"]
+    assert "scenarios" not in schema["properties"]
+
+
+@pytest.mark.django_db
+def test_the_pinned_schema_omits_system_descriptions_in_target_mode(
+    _client, experiment, taxonomy, template
+):
+    target = SystemDescription.objects.create(title="Oldsmar", body="x", origin=Origin.SEED)
+    experiment.generate_systems = False
+    experiment.target_system = target
+    experiment.save()
+
+    _client.queue(json.dumps({"scenarios": [CARD]}))
+    run_phase2(make_run(experiment, taxonomy, template))
+    schema = _client.calls[0]["json_schema"]
+    assert "scenarios" in schema["properties"]
+    assert "system_descriptions" not in schema["properties"]
 
 
 @pytest.mark.django_db

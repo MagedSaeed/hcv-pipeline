@@ -7,6 +7,7 @@ from llm.schemas import (
     json_schema,
     parse_phase2,
     parse_phase3,
+    phase2_json_schema,
     split_known_labels,
 )
 
@@ -93,3 +94,20 @@ def test_json_schema_is_shaped_for_response_format():
 
     schema3 = json_schema(Phase3Response)
     assert "labels" in schema3["properties"]
+
+
+def test_phase2_json_schema_for_generate_systems_omits_bare_scenarios():
+    """This is the defect-1 root-cause fix: the schema pinned into the
+    request for a `generate_systems` run must not even offer the model a
+    top-level `scenarios` field to (redundantly) fill in — see
+    `pipeline.generation._call_and_persist` and the live run that lost a
+    complete, paid-for generation to exactly this ambiguity."""
+    schema = phase2_json_schema(generate_systems=True)
+    assert "system_descriptions" in schema["properties"]
+    assert "scenarios" not in schema["properties"]
+
+
+def test_phase2_json_schema_for_target_mode_omits_system_descriptions():
+    schema = phase2_json_schema(generate_systems=False)
+    assert "scenarios" in schema["properties"]
+    assert "system_descriptions" not in schema["properties"]

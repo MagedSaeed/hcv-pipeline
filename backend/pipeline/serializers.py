@@ -234,6 +234,7 @@ class LLMCallSerializer(serializers.ModelSerializer):
             "parsed_ok",
             "parse_error",
             "unknown_hcv_ids",
+            "stray_scenarios",
             "http_status",
             "transport_error",
             "model",

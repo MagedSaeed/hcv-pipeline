@@ -13,7 +13,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from corpus.models import Origin, Scenario, SystemDescription
-from llm.schemas import Phase2Response, SchemaError, json_schema, parse_phase2
+from llm.schemas import SchemaError, parse_phase2, phase2_json_schema
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_generation_config
 from pipeline.models import LLMCall, PhaseRun
@@ -74,6 +74,37 @@ def _narrative(card):
     return "\n".join(card.narrative_steps)
 
 
+def _redundant_top_level_scenarios(parsed, config):
+    """Is `parsed.scenarios` the exact "model filled in both places" shape
+    the schema is now built to discourage (see `llm.schemas.phase2_json_schema`)
+    but cannot forbid outright (`strict` is not pinned — see
+    `llm.client.build_request`)?
+
+    True only for the precise shape a live run actually produced: this is a
+    `generate_systems` run (so the bare `scenarios` field was never the one
+    the prompt asked to be filled), the response's `system_descriptions` is
+    genuinely populated (so there IS authoritative material — this is not
+    the "neither field carries anything real" case), and there is no
+    `target_system` for the top-level list to legitimately belong to instead.
+
+    When all three hold, `parsed.scenarios` is redundant noise duplicating
+    what the nested `system_descriptions[*].scenarios` already carry, not a
+    second, differently-scoped batch of material — so it must not be
+    persisted (there is nowhere honest to attach it) and must not fail the
+    run either (see `_persist_error`). Deliberately narrow: a
+    `generate_systems=False` run's bare `scenarios` list, or a
+    `generate_systems=True` run's `scenarios` list with NO system_descriptions
+    alongside it, are both still the genuine "nowhere to attach this" error
+    `_persist_error` continues to raise.
+    """
+    return bool(
+        config["generate_systems"]
+        and parsed.system_descriptions
+        and parsed.scenarios
+        and config["target_system_id"] is None
+    )
+
+
 def _persist_error(parsed, config):
     """Why this response cannot be honoured, or None if it can be.
 
@@ -85,14 +116,26 @@ def _persist_error(parsed, config):
       and honouring one of them silently hides that;
     - the response carries a bare scenarios list but there is no
       target_system to attach it to — generated material with nowhere to go
-      must not simply vanish;
+      must not simply vanish. EXCEPT the one shape
+      `_redundant_top_level_scenarios` recognises: a `generate_systems` run
+      whose `system_descriptions` is already populated with the real,
+      nested material. There the top-level list is redundant noise, not a
+      second batch with nowhere to go — discarding the whole response over
+      it is what threw away a complete, valid (and paid-for) generation on
+      the first live run against a real provider. The nested scenarios are
+      persisted as authoritative; the stray list is recorded on the call
+      (see `_call_and_persist`) rather than either silently dropped or
+      allowed to fail a good response;
     - the response carries neither — an empty body that would otherwise end
       the run COMPLETED having persisted nothing, with no record that
       anything was wrong;
     - the config asked for scenarios but the response carries none, only
       systems with empty scenario lists — the run would end COMPLETED with
       nothing for phase 3 to label, reporting a repetition that contributes
-      zero labels to the measurement as a success.
+      zero labels to the measurement as a success. A redundant top-level
+      list (see above) never counts towards this — it is never persisted,
+      so counting it here would let a run COMPLETE on the strength of
+      material that was actually discarded.
 
     Reads `config` — the SAME pinned/ad-hoc resolution `_build_context` used
     to build the prompt this response is answering — never the experiment's
@@ -106,6 +149,7 @@ def _persist_error(parsed, config):
     generate_systems = config["generate_systems"]
     generate_scenarios = config["generate_scenarios"]
     target_system_id = config["target_system_id"]
+    redundant = _redundant_top_level_scenarios(parsed, config)
 
     if not generate_systems and parsed.system_descriptions:
         return (
@@ -113,16 +157,16 @@ def _persist_error(parsed, config):
             "included system_descriptions. The prompt and the configuration "
             "disagree."
         )
-    if parsed.scenarios and target_system_id is None:
+    if parsed.scenarios and target_system_id is None and not redundant:
         return (
             "The response included a bare scenarios list, but there is no "
             "target_system to attach them to."
         )
     if not parsed.system_descriptions and not parsed.scenarios:
         return "The response contained no material to persist."
-    scenario_count = len(parsed.scenarios) + sum(
-        len(system.scenarios) for system in parsed.system_descriptions
-    )
+    scenario_count = sum(len(system.scenarios) for system in parsed.system_descriptions)
+    if not redundant:
+        scenario_count += len(parsed.scenarios)
     if generate_scenarios and not scenario_count:
         return (
             "generate_scenarios is True for this experiment, but the response "
@@ -133,12 +177,23 @@ def _persist_error(parsed, config):
 
 
 @transaction.atomic
-def _persist(phase_run, parsed, config):
+def _persist(phase_run, parsed, config, *, redundant_scenarios=False):
     """Write the generated material. Everything lands as origin=generated.
 
     Wrapped in one atomic block so a mid-write failure (a duplicate
     scenario_id, an over-length field) leaves nothing half-persisted — the
     caller catches the DatabaseError and rolls this transaction back with it.
+
+    `redundant_scenarios` is `_redundant_top_level_scenarios(parsed, config)`,
+    computed once by the caller (`_call_and_persist`, which also records it
+    on the archived call) and passed in rather than recomputed here, so the
+    decision "is this list redundant" is made in exactly one place. When
+    True, `parsed.scenarios` is the stray top-level list `_persist_error` let
+    through specifically because `system_descriptions` already carries the
+    authoritative material — persisting it too would either duplicate that
+    material under an invented target, or crash outright on
+    `config["target_system_id"]` being `None` (the very case that makes it
+    redundant in the first place).
     """
     order = 0
     for index, system in enumerate(parsed.system_descriptions, start=1):
@@ -174,7 +229,7 @@ def _persist(phase_run, parsed, config):
     # here, lazily, and only once — rendering needed just the pinned
     # title/body/slug (already in `config["target_system"]`), but persisting
     # a Scenario needs an actual FK-able SystemDescription.
-    if parsed.scenarios:
+    if parsed.scenarios and not redundant_scenarios:
         target = SystemDescription.objects.get(pk=config["target_system_id"])
         for card in parsed.scenarios:
             order += 1
@@ -288,7 +343,10 @@ def _call_and_persist(phase_run, rendered, config):
         system_prompt=rendered.system,
         user_prompt=rendered.user,
         temperature=phase_run.temperature,
-        json_schema=phase_run.prompt_template.output_schema or json_schema(Phase2Response),
+        json_schema=(
+            phase_run.prompt_template.output_schema
+            or phase2_json_schema(generate_systems=config["generate_systems"])
+        ),
     )
 
     call = LLMCall(
@@ -323,6 +381,14 @@ def _call_and_persist(phase_run, rendered, config):
         return _fail(phase_run, f"Could not parse the response: {error}")
 
     call.parsed_ok = True
+    # `parsed_ok`/`parse_error` measure ONE thing: how often the model's
+    # output failed to fit the schema at all. Whether a syntactically valid
+    # response ALSO carried a redundant top-level `scenarios` list is a
+    # separate question — recorded on `stray_scenarios` instead of bending
+    # either of those two research metrics to double as a second signal.
+    redundant = _redundant_top_level_scenarios(parsed, config)
+    if redundant:
+        call.stray_scenarios = [card.model_dump() for card in parsed.scenarios]
     call.save()
 
     reason = _persist_error(parsed, config)
@@ -330,7 +396,7 @@ def _call_and_persist(phase_run, rendered, config):
         return _fail(phase_run, reason)
 
     try:
-        _persist(phase_run, parsed, config)
+        _persist(phase_run, parsed, config, redundant_scenarios=redundant)
     except DatabaseError as error:
         return _fail(phase_run, f"Could not persist the generated material: {error}")
     except Exception as error:  # noqa: BLE001 — a half-written run must still be terminal

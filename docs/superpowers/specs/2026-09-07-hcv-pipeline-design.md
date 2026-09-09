@@ -211,6 +211,25 @@ The Run A template is authored without any taxonomy reference, and the renderer
 refuses to bind `taxonomy` for a variant-A run. Variant isolation is enforced
 at the context-construction layer, not left to prompt discipline.
 
+**One `PromptTemplate` renders both variants** (`Experiment.phase2_prompt` is a
+single FK, not one per variant — see §5.4), so a phase-2 template that wants to
+behave differently per variant has to branch on `taxonomy` itself, not on which
+variant it thinks it is. Because rendering uses `StrictUndefined` (above), and
+`taxonomy` is *absent from the context entirely* under Run A — not `None`, not
+an empty list, genuinely not a key in the context dict — the natural-looking
+guard `{% if taxonomy %}` **raises** `PromptRenderError: 'taxonomy' is
+undefined` and fails the run, the instant a Run A repetition reaches it. Run B
+renders the same template fine, which is the most confusing way to fail: one
+variant of a repetition works, its sibling doesn't, and the traceback names a
+variable the template author can see right there in the taxonomy-guarded
+`{% if %}` block. This is correct, deliberate, fail-closed behaviour — a
+template must not be able to silently treat a missing taxonomy as "empty" and
+carry on — but it is a trap every prompt author hits at least once. **The fix
+is `{% if taxonomy is defined %}`**, not `{% if taxonomy %}`, wherever a
+phase-2 template needs to behave differently depending on whether the taxonomy
+was supplied. See `prompts/rendering.py`'s module docstring for the same note
+next to the isolation guarantee it documents.
+
 ### 5.4 `pipeline`
 
 ```

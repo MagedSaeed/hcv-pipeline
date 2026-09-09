@@ -349,6 +349,18 @@ class LLMCall(models.Model):
     parsed_ok = models.BooleanField(default=False)
     parse_error = models.TextField(blank=True, default="")
     unknown_hcv_ids = models.JSONField(default=list, blank=True)
+    # A phase-2 response that parsed cleanly (parsed_ok stays True, parse_error
+    # stays "") but ALSO carried a redundant top-level `scenarios` list
+    # alongside populated `system_descriptions` — see
+    # `pipeline.generation._redundant_top_level_scenarios`. The nested
+    # scenarios are persisted as authoritative and this list is not; it is
+    # recorded here, verbatim, purely as a visible research signal ("the model
+    # filled in both places even though the schema no longer offers both") —
+    # never folded into `parsed_ok`/`parse_error`, which measure something
+    # else entirely (see this field's own naming next to `unknown_hcv_ids`,
+    # the same kind of "anomaly, not a parse failure" signal on the phase-3
+    # side).
+    stray_scenarios = models.JSONField(default=list, blank=True)
 
     http_status = models.IntegerField(null=True, blank=True)
     transport_error = models.TextField(blank=True, default="")

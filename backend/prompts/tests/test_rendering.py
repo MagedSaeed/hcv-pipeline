@@ -136,6 +136,79 @@ def test_an_undefined_variable_fails_loudly(system):
 
 
 @pytest.mark.django_db
+def test_the_naive_taxonomy_guard_fails_variant_a_but_not_b(system, taxonomy):
+    """The trap this module's docstring documents: `taxonomy` is absent from
+    the Run A context (by design — that IS the isolation guarantee), not
+    merely `None`, so referencing it at all under StrictUndefined raises.
+    `{% if taxonomy %}` looks safe but is the wrong idiom — it fails Run A
+    while the identical template renders Run B fine, which is exactly the
+    confusing "one variant works, its sibling doesn't" symptom this trips
+    every prompt author into eventually."""
+    template = make("{% if taxonomy %}guided{% else %}unbiased{% endif %}")
+
+    b_context = build_phase2_context(
+        variant="B",
+        seed_systems=[],
+        fewshots=[],
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=1,
+        n_scenarios_per_system=1,
+        taxonomy=taxonomy,
+    )
+    assert render(template, b_context).user == "guided"
+
+    a_context = build_phase2_context(
+        variant="A",
+        seed_systems=[],
+        fewshots=[],
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=1,
+        n_scenarios_per_system=1,
+        guard_taxonomy=taxonomy,
+    )
+    with pytest.raises(PromptRenderError, match="taxonomy"):
+        render(template, a_context)
+
+
+@pytest.mark.django_db
+def test_if_taxonomy_is_defined_renders_correctly_for_both_variants(system, taxonomy):
+    """The documented fix for the trap above: `is defined` checks presence
+    without touching the (absent, under Run A) value, so it is the one
+    spelling of this guard that renders under both variants — empty for A,
+    populated for B — making the idiom a checked guarantee rather than
+    advice a template author has to remember."""
+    template = make(
+        "{% if taxonomy is defined %}{{ taxonomy|length }} rows{% else %}withheld{% endif %}"
+    )
+
+    a_context = build_phase2_context(
+        variant="A",
+        seed_systems=[],
+        fewshots=[],
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=1,
+        n_scenarios_per_system=1,
+        guard_taxonomy=taxonomy,
+    )
+    assert render(template, a_context).user == "withheld"
+
+    b_context = build_phase2_context(
+        variant="B",
+        seed_systems=[],
+        fewshots=[],
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=1,
+        n_scenarios_per_system=1,
+        taxonomy=taxonomy,
+    )
+    assert render(template, b_context).user == "2 rows"
+
+
+@pytest.mark.django_db
 def test_the_sandbox_blocks_attribute_escapes(system):
     context = build_phase2_context(
         variant="A",

@@ -102,6 +102,50 @@ def test_run_pipeline_task_runs_the_whole_repetition_by_id(_client, experiment):
 
 
 @pytest.mark.django_db
+def test_run_phase2_task_on_a_deleted_run_is_a_clean_no_op(_client, experiment):
+    """Defect 2: cancelling then deleting a run leaves its task in the
+    broker; a worker firing it later must get a legible no-op result, not a
+    PhaseRun.DoesNotExist traceback."""
+    run = launch(experiment, n_repetitions=1)[0]
+    generation = run.phase_runs.get(phase=2, variant="A")
+    pk = generation.pk
+    generation.delete()
+
+    status = run_phase2_task(pk)
+
+    assert isinstance(status, str)
+    assert str(pk) in status
+    assert "no longer exists" in status
+
+
+@pytest.mark.django_db
+def test_run_phase3_task_on_a_deleted_run_is_a_clean_no_op(_client, experiment):
+    run = launch(experiment, n_repetitions=1)[0]
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    pk = labelling.pk
+    labelling.delete()
+
+    status = run_phase3_task(pk)
+
+    assert isinstance(status, str)
+    assert str(pk) in status
+    assert "no longer exists" in status
+
+
+@pytest.mark.django_db
+def test_run_pipeline_task_on_a_deleted_run_is_a_clean_no_op(_client, experiment):
+    run = launch(experiment, n_repetitions=1)[0]
+    pk = run.pk
+    run.delete()
+
+    status = run_pipeline_task(pk)
+
+    assert isinstance(status, str)
+    assert str(pk) in status
+    assert "no longer exists" in status
+
+
+@pytest.mark.django_db
 def test_run_pipeline_task_runs_a_run_the_cli_marked_queued(_client, experiment):
     """This is the real production shape: `run_experiment` (without --inline)
     marks the run and its phase runs QUEUED before handing them to Django-Q,

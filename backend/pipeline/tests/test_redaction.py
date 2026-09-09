@@ -110,6 +110,27 @@ def test_parse_error_and_unknown_hcv_ids_are_scrubbed_too(phase_run):
 
 
 @pytest.mark.django_db
+def test_stray_scenarios_is_scrubbed_too(phase_run):
+    """`stray_scenarios` (the redundant top-level `scenarios` list recorded
+    when `pipeline.generation._redundant_top_level_scenarios` fires) is a
+    verbatim slice of provider output, the same shape of risk as
+    `unknown_hcv_ids` — a scenario card is free-text, so nothing stops a
+    provider from putting a key-shaped string in one of its fields.
+    """
+    call = LLMCall.objects.create(
+        phase_run=phase_run,
+        sequence=1,
+        stray_scenarios=[{"scenario_id": "sc_01", "threat": f"leaked {SENTINEL}"}],
+    )
+    call.refresh_from_db()
+
+    blob = str(call.stray_scenarios)
+    assert SENTINEL not in blob
+    assert REDACTED in blob
+    assert call.stray_scenarios[0]["scenario_id"] == "sc_01"
+
+
+@pytest.mark.django_db
 def test_model_and_finish_reason_are_scrubbed_too(phase_run):
     """Both are read straight off provider response JSON before this
     function ever sees them — the same class of risk as `parse_error`.

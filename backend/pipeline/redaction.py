@@ -3,10 +3,10 @@
 The client already refuses to BUILD a request containing a key. This is the
 second line: it scrubs on the way into the database, and it covers every
 column the client cannot vouch for — `response_json`, `transport_error`,
-`parse_error`, `unknown_hcv_ids`, `model` and `finish_reason` are all built
-from provider output (some derived from it well after the client returns), and
-a provider that echoes a key back into any of them would otherwise put it in
-an export that gets shared with a collaborator.
+`parse_error`, `unknown_hcv_ids`, `stray_scenarios`, `model` and
+`finish_reason` are all built from provider output (some derived from it well
+after the client returns), and a provider that echoes a key back into any of
+them would otherwise put it in an export that gets shared with a collaborator.
 """
 
 from django.conf import settings
@@ -101,6 +101,9 @@ def redact_call(call):
     are also provider-controlled text, read off the response body BEFORE this
     function ever sees it, so they get the same treatment for the same
     reason: nothing this function does not scrub is safe to assume clean.
+    `stray_scenarios` is the same provider-controlled shape as
+    `unknown_hcv_ids` — a verbatim slice of the parsed response — so it gets
+    scrubbed for the identical reason.
     """
     # No early return on an empty `secrets`: scrub() still has a key SHAPE to
     # match, which is the whole point of the pattern pass.
@@ -113,5 +116,6 @@ def redact_call(call):
     call.rendered_user_prompt = scrub(call.rendered_user_prompt, secrets)
     call.parse_error = scrub(call.parse_error, secrets)
     call.unknown_hcv_ids = scrub(call.unknown_hcv_ids, secrets)
+    call.stray_scenarios = scrub(call.stray_scenarios, secrets)
     call.model = scrub(call.model, secrets)
     call.finish_reason = scrub(call.finish_reason, secrets)

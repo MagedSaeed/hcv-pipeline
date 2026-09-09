@@ -50,6 +50,34 @@ def json_schema(model):
     return model.model_json_schema()
 
 
+def phase2_json_schema(*, generate_systems):
+    """`Phase2Response`'s schema, restricted to the ONE top-level field the
+    run's actual mode uses.
+
+    `Phase2Response` carries two top-level fields for two mutually exclusive
+    modes: `system_descriptions` (generating fresh systems, `generate_systems`
+    True) and `scenarios` (generating against a pre-existing `target_system`,
+    `generate_systems` False — see the model's own comment). Pinning the FULL
+    schema unconditionally, as `json_schema(Phase2Response)` does, shows the
+    model both places to put its output regardless of which mode this run
+    actually is — and a live run proved a model will do the obvious thing and
+    fill in both, which `pipeline.generation._persist_error` then had no
+    choice but to reject wholesale, discarding a perfectly good generation
+    (see that function's docstring). The fix is upstream of parsing: don't
+    hand the model a schema that offers a place its response must never use.
+
+    `strict` is deliberately not pinned (see `llm.client.build_request`'s own
+    long comment), so this alone cannot make a redundant field structurally
+    impossible — `pipeline.generation` still carries a safety net for exactly
+    that. This function's job is only to stop the well-behaved case from
+    happening in the first place.
+    """
+    schema = json_schema(Phase2Response)
+    field_to_drop = "scenarios" if generate_systems else "system_descriptions"
+    schema["properties"].pop(field_to_drop, None)
+    return schema
+
+
 def _parse(model, payload):
     if not isinstance(payload, dict):
         raise SchemaError(f"Expected a JSON object, got {type(payload).__name__}.")

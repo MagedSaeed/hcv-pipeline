@@ -400,6 +400,7 @@ def _calls(phase_run_ids):
             "parsed_ok": call.parsed_ok,
             "parse_error": call.parse_error,
             "unknown_hcv_ids": call.unknown_hcv_ids,
+            "stray_scenarios": call.stray_scenarios,
             "http_status": call.http_status,
             "transport_error": call.transport_error,
             "model": call.model,

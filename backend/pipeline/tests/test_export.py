@@ -276,6 +276,7 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
         "parsed_ok",
         "parse_error",
         "unknown_hcv_ids",
+        "stray_scenarios",
         "http_status",
         "transport_error",
         "model",
@@ -669,11 +670,13 @@ def test_the_bundle_contains_no_api_key_even_when_one_was_actually_written(exper
         # A provider that returns something key-shaped where a string was
         # expected puts that value into pydantic's validation message
         # (`input_value=...`) — landing in `parse_error`, not `raw_response`.
-        # `unknown_hcv_ids`, `model` and `finish_reason` are all read off
-        # provider output too, after the client returns — every column this
-        # export touches must be exercised here, not just the first six.
+        # `unknown_hcv_ids`, `stray_scenarios`, `model` and `finish_reason`
+        # are all read off provider output too, after the client returns —
+        # every column this export touches must be exercised here, not just
+        # the first six.
         parse_error=f"1 validation error: input_value='{SENTINEL}'",
         unknown_hcv_ids=[SENTINEL],
+        stray_scenarios=[{"scenario_id": SENTINEL}],
         model=f"echo: {SENTINEL}",
         finish_reason=f"stop ({SENTINEL})",
     )
@@ -860,6 +863,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "parsed_ok",
         "parse_error",
         "unknown_hcv_ids",
+        "stray_scenarios",
         "http_status",
         "transport_error",
         "model",
