@@ -1,0 +1,13 @@
+services:
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: hcv
+      POSTGRES_PASSWORD: hcv
+      POSTGRES_DB: hcv
+    ports:
+      - "5432:5432"

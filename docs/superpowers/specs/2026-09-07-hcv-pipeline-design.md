@@ -234,7 +234,7 @@ PhaseRun(
     prompt_template→,            # pinned version
     taxonomy→,                   # pinned always; injected into the prompt only for B
     source_phase_run→ (null),    # phase 3 records which phase-2 run it labels
-    status: pending | running | completed | failed | cancelled,
+    status: pending | queued | running | completed | failed | cancelled,
     error, started_at, finished_at, created_by→)
 
 LLMCall(

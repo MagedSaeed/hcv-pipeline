@@ -27,8 +27,10 @@
   `uv run ruff format . && uv run ruff check --fix .`; the commit steps below
   include it. Migrations are excluded from linting.
 - When a step says *append to* a module, put any new imports at the **top** of
-  that file beside the existing ones. Ruff's E402 flags imports after code, and
-  `--fix` will not move them for you.
+  that file beside the existing ones, merging them into an existing `from X
+  import …` line for the same module rather than adding a second one. Ruff's
+  E402 flags imports after code and F811 flags redefinitions; `--fix` will not
+  restructure them for you.
 - Tests are pytest-django, written before implementation (TDD). Run from `backend/`.
 - Commit after every task.
 
@@ -748,7 +750,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 `backend/core/views.py`:
 
 ```python
-from django.contrib.auth import login, logout
+from django.contrib.auth import login, logout, update_session_auth_hash
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
 from rest_framework import status
@@ -801,6 +803,9 @@ class ChangePasswordView(APIView):
         user.set_password(serializer.validated_data["new_password"])
         user.must_change_password = False
         user.save(update_fields=["password", "must_change_password"])
+        # Django ties the session to the password hash; without this the user is
+        # silently logged out by the very change they just made.
+        update_session_auth_hash(request, user)
         return Response(UserSerializer(user).data)
 ```
 
@@ -1012,7 +1017,8 @@ def test_mask_key_of_blank_is_blank():
 
 
 def test_mask_key_never_reveals_a_short_key():
-    assert mask_key("sk-or-tiny") == "********"
+    # At most MASK_VISIBLE*2 characters: showing both ends would show all of it.
+    assert mask_key("sk-or123") == "********"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1288,15 +1294,30 @@ Add to `backend/core/urls.py`'s `urlpatterns`:
     path("settings/", views.AppSettingsView.as_view(), name="app-settings"),
 ```
 
-Append to `backend/core/admin.py`:
+Append to `backend/core/admin.py` (merging `AppSettings` into the existing
+`from core.models import User` line and adding `from core.keys import mask_key`
+at the top):
 
 ```python
+from core.keys import mask_key
 from core.models import AppSettings
 
 
 @admin.register(AppSettings)
 class AppSettingsAdmin(admin.ModelAdmin):
+    """Audit surface only. The key is set through the API, never shown here.
+
+    A staff account granted view-only access for auditing must be able to see
+    who changed the key and when, without being handed the secret itself.
+    """
+
     list_display = ("__str__", "updated_by", "updated_at")
+    fields = ("masked_key", "updated_by", "updated_at")
+    readonly_fields = ("masked_key", "updated_by", "updated_at")
+
+    @admin.display(description="OpenRouter key")
+    def masked_key(self, obj):
+        return mask_key(obj.openrouter_key)
 
     def has_add_permission(self, request):
         # Singleton: the row is created on first load().
@@ -2047,6 +2068,9 @@ from rest_framework import serializers
 
 from corpus.models import ResourceFile
 
+# The largest real research resource is about 30 KB; 2 MB is generous headroom.
+MAX_RESOURCE_BYTES = 2 * 1024 * 1024
+
 
 class ResourceFileSerializer(serializers.ModelSerializer):
     class Meta:
@@ -2067,6 +2091,13 @@ class ResourceFileSerializer(serializers.ModelSerializer):
         """Read an uploaded file into `text`; the app never re-reads from disk."""
         upload = attrs.get("file")
         if upload is not None:
+            # A resource is injected verbatim into LLM prompts, so an oversized
+            # one is a context and cost problem long before it is a memory one.
+            # Django's DATA_UPLOAD_MAX_MEMORY_SIZE does not bound file uploads.
+            if upload.size > MAX_RESOURCE_BYTES:
+                raise serializers.ValidationError(
+                    {"file": f"File exceeds the {MAX_RESOURCE_BYTES // 1024} KB limit."}
+                )
             upload.seek(0)
             try:
                 attrs["text"] = upload.read().decode("utf-8")
@@ -2650,14 +2681,26 @@ class FewShotExampleSerializer(serializers.ModelSerializer):
         return attrs
 
     def _existing(self):
+        """Current values, keyed exactly as incoming attrs are, so a PATCH merges.
+
+        The foreign-key entries must use the field names (`input_file`), not the
+        attnames (`input_file_id`). DRF hands validate() the related object under
+        the field name, and a dict merge only overrides a key that matches — key
+        these by attname and a PATCH validates stale state while the raw payload
+        is saved unchecked.
+        """
         if self.instance is None:
             return {}
         return {
             field: getattr(self.instance, field)
-            for field in ("phase", "name", "input_text", "output_text")
-        } | {
-            "input_file_id": self.instance.input_file_id,
-            "output_file_id": self.instance.output_file_id,
+            for field in (
+                "phase",
+                "name",
+                "input_text",
+                "input_file",
+                "output_text",
+                "output_file",
+            )
         }
 ```
 

@@ -1,0 +1,45 @@
+[project]
+name = "hcv-pipeline-backend"
+version = "0.1.0"
+description = "Backend for the human-centric vulnerability pipeline"
+requires-python = ">=3.13"
+dependencies = [
+    "django==5.2.17",
+    "djangorestframework==3.18.0",
+    "django-cors-headers==4.9.0",
+    "django-q2==1.11.1",
+    "redis==8.1.0",
+    "django-redis==7.0.0",
+    "openai==3.8.0",
+    "jinja2==3.1.6",
+    "pydantic==2.13.5",
+    "psycopg[binary]==3.3.5",
+    "gunicorn==26.2.0",
+    "whitenoise==6.12.0",
+    "python-decouple==3.8",
+    "dj-database-url==3.1.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-django==4.14.0",
+    "ruff==0.16.6",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Migrations are generated; linting them fights the generator.
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "DJ"]
+
+[tool.ruff.format]
+quote-style = "double"
