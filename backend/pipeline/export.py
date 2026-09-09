@@ -100,11 +100,12 @@ def _taxonomy(phase_run_ids):
 
     Driven from `PhaseRun.taxonomy_id` — the REAL pin — not
     `experiment.taxonomy`, which is a plain, editable FK. An operator can
-    `PATCH` an experiment's `taxonomy` (or `phase2_prompt`/`phase3_prompt`,
-    see `_prompts`) after it has already run; the archive must still say what
-    a run actually used, not what the experiment currently points at, or a
-    re-pinned experiment ships a bundle whose `labels` cite HCV ids from a
-    taxonomy the bundle never lists. Always a list: an experiment edited
+    `PATCH` an experiment's `taxonomy` (or `phase2_prompt_a`/
+    `phase2_prompt_b`/`phase3_prompt`, see `_prompts`) after it has already
+    run; the archive must still say what a run actually used, not what the
+    experiment currently points at, or a re-pinned experiment ships a bundle
+    whose `labels` cite HCV ids from a taxonomy the bundle never lists.
+    Always a list: an experiment edited
     mid-flight can pin more than one taxonomy across its runs, and every one
     must resolve for every run's `taxonomy` id in `_runs`.
     """
@@ -145,13 +146,17 @@ def _prompts(phase_run_ids):
     phase runs, verbatim at the version used.
 
     Driven from `PhaseRun.prompt_template_id` — the REAL pin — not
-    `experiment.phase2_prompt`/`phase3_prompt`. Those are plain, editable
-    FKs: `PATCH {"phase2_prompt": <new>}` on an experiment that has already
-    run succeeds (nothing freezes them), and reading them here would then
-    ship the WRONG wording — the text that produced the archived results
-    would be absent from the very record meant to preserve it. See
-    `_taxonomy` for the identical reasoning. Always covers every distinct
-    template id pinned across every phase run, not just two.
+    `experiment.phase2_prompt_a`/`phase2_prompt_b`/`phase3_prompt`. Those
+    are plain, editable FKs: `PATCH {"phase2_prompt_a": <new>}` on an
+    experiment that has already run succeeds (nothing freezes them), and
+    reading them here would then ship the WRONG wording — the text that
+    produced the archived results would be absent from the very record
+    meant to preserve it. See `_taxonomy` for the identical reasoning.
+    Always covers every distinct template id pinned across every phase
+    run, not just three (`phase2_prompt_a`'s pin on variant A's generation
+    run, `phase2_prompt_b`'s on variant B's, `phase3_prompt`'s on both
+    labelling runs) — a run edited mid-flight can pin more across its own
+    history the same way `_taxonomy` can pin more than one taxonomy.
     """
     template_ids = (
         PhaseRun.objects.filter(pk__in=phase_run_ids)

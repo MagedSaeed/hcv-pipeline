@@ -43,27 +43,30 @@ Whether that backstop actually ran is recorded on the `RenderedPrompt` itself
 stderr: for a tool whose central claim is "Run A never saw the taxonomy", the
 evidence belongs in the archive next to the material it vouches for.
 
-**A trap for template authors: `{% if taxonomy %}` is wrong. Use
-`{% if taxonomy is defined %}`.** One `PromptTemplate` renders both variants
-of a phase-2 repetition (`Experiment.phase2_prompt` is a single FK), and
-rendering below runs under `StrictUndefined`. Under Run A, `taxonomy` is not
-merely falsy or `None` — it is genuinely ABSENT from the context (that IS the
-isolation guarantee above, doing its job), so referencing it at all raises
-`jinja2.exceptions.UndefinedError`, caught here and re-raised as
-`PromptRenderError: 'taxonomy' is undefined`. `is defined` is the one Jinja2
-idiom that checks presence without touching the (absent) value, so it is the
-only spelling of this guard that renders under both variants — every other
-natural-looking form (`{% if taxonomy %}`, `{% if taxonomy != None %}`,
-`{{ taxonomy or ... }}`) fails Run A outright. This is correct, deliberate,
-fail-closed behaviour: a template must never be able to treat a missing
-taxonomy as merely "empty" and carry on as if guided — but the symptom is the
-most confusing one in this codebase, because Run B renders the exact same
-template fine while Run A fails on a variable the author can see sitting
-right there in an `{% if %}` block. See the spec
+**Phase 2 gives each variant its own, fully independent `PromptTemplate`** —
+`Experiment.phase2_prompt_a` and `Experiment.phase2_prompt_b` (user decision,
+2026-09-08: no shared core, no drift warning, no diff between the two — the
+researcher's call). A phase-2 template therefore never has to behave
+differently depending on which variant it is rendering: variant A's template
+is authored WITHOUT any `taxonomy` reference at all, and variant B's is
+authored assuming `taxonomy` is always present. There is no idiom a phase-2
+template author needs to remember for this any more.
+
+`StrictUndefined` still matters, even so. Rendering below always runs under
+it, and under Run A, `taxonomy` is not merely falsy or `None` — it is
+genuinely ABSENT from the context (that IS the isolation guarantee above,
+doing its job). So a stray `{{ taxonomy }}` (or `{% if taxonomy %}`) left in
+a variant-A template by a copy/paste mistake does not silently render empty —
+it raises `jinja2.exceptions.UndefinedError`, caught here and re-raised as
+`PromptRenderError: 'taxonomy' is undefined`, failing the run loudly instead
+of shipping a Run A prompt that merely LOOKS unbiased. This is correct,
+deliberate, fail-closed behaviour: a template must never be able to treat a
+missing taxonomy as merely "empty" and carry on as if guided. See the spec
 (`docs/superpowers/specs/2026-09-07-hcv-pipeline-design.md`, §5.3) for the
 same note next to the template context table, and
-`prompts/tests/test_rendering.py` for a test that pins this idiom as a
-checked guarantee rather than advice someone has to remember.
+`prompts/tests/test_rendering.py::test_the_naive_taxonomy_guard_fails_variant_a_but_not_b`
+for the test pinning this fail-closed behaviour as a checked guarantee
+rather than advice someone has to remember.
 """
 
 import json

@@ -117,7 +117,8 @@ def experiment(db):
         name="baseline",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=gen,
+        phase2_prompt_a=gen,
+        phase2_prompt_b=gen,
         phase3_model="m3",
         phase3_prompt=lab,
     )

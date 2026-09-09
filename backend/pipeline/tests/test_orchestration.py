@@ -67,7 +67,8 @@ def experiment(db):
         name="e",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=gen,
+        phase2_prompt_a=gen,
+        phase2_prompt_b=gen,
         phase3_model="m3",
         phase3_prompt=lab,
         n_systems=1,
@@ -108,7 +109,9 @@ def test_the_pinned_snapshot_is_authoritative_not_the_live_experiment_at_executi
         name="snapshot-authority",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=echo_template,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=echo_template,
         phase3_model="m3",
         phase3_prompt=labelling_template,
         n_systems=1,
@@ -203,7 +206,9 @@ def test_an_inactive_fewshot_is_snapshotted_but_never_rendered():
         name="active-filter",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=echo_template,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=echo_template,
         phase3_model="m3",
         phase3_prompt=labelling_template,
         n_systems=1,
@@ -259,7 +264,9 @@ def test_phase_3_fewshots_are_read_from_the_snapshot_and_actually_rendered():
         name="p3-fewshots",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation_template,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=generation_template,
         phase3_model="m3",
         phase3_prompt=echo_labelling_template,
         n_systems=1,
@@ -319,8 +326,110 @@ def test_phase_runs_pin_the_experiment_configuration(experiment):
     run = launch(experiment, n_repetitions=1)[0]
     generation = run.phase_runs.get(phase=2, variant="A")
     assert generation.model == "m2"
-    assert generation.prompt_template == experiment.phase2_prompt
+    assert generation.prompt_template == experiment.phase2_prompt_a
     assert generation.taxonomy == experiment.taxonomy
+
+
+@pytest.mark.django_db
+def test_launch_pins_a_different_template_onto_each_variants_generation_run():
+    """The core guarantee this task adds: variant A and variant B of the
+    SAME repetition pin two DIFFERENT `PromptTemplate` rows — never the
+    same one, unlike the old single shared `phase2_prompt` FK. User
+    decision, 2026-09-08: full independence between the two templates, no
+    coupling. Proven here with genuinely distinct templates (not merely two
+    FKs that happen to point at the same row, which `experiment`'s own
+    default fixture would not distinguish from the old behaviour), and via
+    a REAL `launch()`, not a hand-built `PhaseRun`, so this exercises the
+    exact code path `Experiment.phase2_prompt_for` backs.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-AB-SPLIT", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="x", order=1)
+    template_a = PromptTemplate.objects.create_version(
+        phase=2, name="variant-a-template", user_prompt="A only, no taxonomy reference"
+    )
+    template_b = PromptTemplate.objects.create_version(
+        phase=2, name="variant-b-template", user_prompt="B only: {{ taxonomy|length }} rows"
+    )
+    labelling_template = PromptTemplate.objects.create_version(
+        phase=3, name="lab-ab", user_prompt="l"
+    )
+    split_experiment = Experiment.objects.create(
+        name="a-b-split",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt_a=template_a,
+        phase2_prompt_b=template_b,
+        phase3_model="m3",
+        phase3_prompt=labelling_template,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+
+    run = launch(split_experiment, n_repetitions=1)[0]
+    generation_a = run.phase_runs.get(phase=2, variant="A")
+    generation_b = run.phase_runs.get(phase=2, variant="B")
+
+    assert generation_a.prompt_template == template_a
+    assert generation_b.prompt_template == template_b
+    assert generation_a.prompt_template_id != generation_b.prompt_template_id
+
+
+@pytest.mark.django_db
+def test_a_variant_a_run_whose_own_template_references_taxonomy_still_fails_closed(_client):
+    """Isolation is unchanged by this task and must stay intact. Even though
+    each variant now pins its OWN, fully independent template
+    (`phase2_prompt_a`/`phase2_prompt_b`, no coupling between them), a
+    genuine authoring mistake — a stray `{{ taxonomy }}` left in variant
+    A's template, say by copying variant B's and forgetting to strip it —
+    must still fail loudly rather than silently rendering empty.
+    `taxonomy` is genuinely ABSENT from variant A's render context (not
+    merely falsy), so under `StrictUndefined` this raises
+    `PromptRenderError`, caught by `run_phase2` and archived as a FAILED
+    run with ZERO provider calls made — see `prompts/rendering.py`'s module
+    docstring for the full explanation of why `StrictUndefined` still
+    matters even though each variant is authored independently now.
+
+    Proven here through a REAL `launch()`d run wired via the NEW per-variant
+    field, not just `prompts.rendering.render()` directly — that lower-level
+    proof already exists at `prompts/tests/test_rendering.py
+    ::test_the_naive_taxonomy_guard_fails_variant_a_but_not_b`. Variant B's
+    own template is left clean and is not exercised here — the point is
+    that variant A's independent template still fails on its own mistake.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-FAILS-CLOSED", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="x", order=1)
+    leaky_a_template = PromptTemplate.objects.create_version(
+        phase=2,
+        name="leaky-a",
+        user_prompt="{% if taxonomy %}guided{% else %}unbiased{% endif %}",
+    )
+    clean_b_template = PromptTemplate.objects.create_version(
+        phase=2, name="clean-b", user_prompt="{{ taxonomy|length }} rows"
+    )
+    labelling_template = PromptTemplate.objects.create_version(
+        phase=3, name="lab-fails-closed", user_prompt="l"
+    )
+    leaky_experiment = Experiment.objects.create(
+        name="fails-closed",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt_a=leaky_a_template,
+        phase2_prompt_b=clean_b_template,
+        phase3_model="m3",
+        phase3_prompt=labelling_template,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+
+    run = launch(leaky_experiment, n_repetitions=1)[0]
+    generation_a = run.phase_runs.get(phase=2, variant="A")
+    assert generation_a.prompt_template_id == leaky_a_template.pk
+
+    result = run_phase2(generation_a)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "taxonomy" in result.error
+    assert _client.calls == []  # no provider call was ever made
 
 
 @pytest.mark.django_db
@@ -1541,7 +1650,7 @@ def test_queue_phase_run_marks_it_queued_and_dispatches_to_the_right_task(experi
         phase=2,
         variant="A",
         model="m2",
-        prompt_template=experiment.phase2_prompt,
+        prompt_template=experiment.phase2_prompt_a,
         taxonomy=experiment.taxonomy,
     )
     labelling = PhaseRun.objects.create(
@@ -1577,7 +1686,7 @@ def test_queue_phase_run_reverts_to_pending_and_raises_clearly_on_a_broker_failu
         phase=2,
         variant="A",
         model="m2",
-        prompt_template=experiment.phase2_prompt,
+        prompt_template=experiment.phase2_prompt_a,
         taxonomy=experiment.taxonomy,
     )
 

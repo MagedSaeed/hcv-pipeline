@@ -196,7 +196,8 @@ def test_scenarios_for_returns_nothing_when_an_orchestrated_runs_source_was_dele
         name="e",
         taxonomy=taxonomy,
         phase2_model="m2",
-        phase2_prompt=phase2_template,
+        phase2_prompt_a=phase2_template,
+        phase2_prompt_b=phase2_template,
         phase3_model="m3",
         phase3_prompt=template,
     )
@@ -239,7 +240,8 @@ def test_finishing_a_run_whose_source_was_deleted_fails_rather_than_completes(
         name="e2",
         taxonomy=taxonomy,
         phase2_model="m2",
-        phase2_prompt=phase2_template,
+        phase2_prompt_a=phase2_template,
+        phase2_prompt_b=phase2_template,
         phase3_model="m3",
         phase3_prompt=template,
     )

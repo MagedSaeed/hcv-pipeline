@@ -211,31 +211,36 @@ The Run A template is authored without any taxonomy reference, and the renderer
 refuses to bind `taxonomy` for a variant-A run. Variant isolation is enforced
 at the context-construction layer, not left to prompt discipline.
 
-**One `PromptTemplate` renders both variants** (`Experiment.phase2_prompt` is a
-single FK, not one per variant — see §5.4), so a phase-2 template that wants to
-behave differently per variant has to branch on `taxonomy` itself, not on which
-variant it thinks it is. Because rendering uses `StrictUndefined` (above), and
-`taxonomy` is *absent from the context entirely* under Run A — not `None`, not
-an empty list, genuinely not a key in the context dict — the natural-looking
-guard `{% if taxonomy %}` **raises** `PromptRenderError: 'taxonomy' is
-undefined` and fails the run, the instant a Run A repetition reaches it. Run B
-renders the same template fine, which is the most confusing way to fail: one
-variant of a repetition works, its sibling doesn't, and the traceback names a
-variable the template author can see right there in the taxonomy-guarded
-`{% if %}` block. This is correct, deliberate, fail-closed behaviour — a
-template must not be able to silently treat a missing taxonomy as "empty" and
-carry on — but it is a trap every prompt author hits at least once. **The fix
-is `{% if taxonomy is defined %}`**, not `{% if taxonomy %}`, wherever a
-phase-2 template needs to behave differently depending on whether the taxonomy
-was supplied. See `prompts/rendering.py`'s module docstring for the same note
-next to the isolation guarantee it documents.
+**Each variant gets its own, fully independent `PromptTemplate`**
+(`Experiment.phase2_prompt_a` and `Experiment.phase2_prompt_b`, two separate
+FKs — see §5.4; user decision, 2026-09-08, choosing full independence over a
+shared-core or drift-warning alternative). A phase-2 template therefore never
+needs to branch on which variant it is rendering: variant A's template is
+authored WITHOUT any `taxonomy` reference at all, and variant B's is authored
+assuming `taxonomy` is always present. Phase 3 is unchanged — one
+`phase3_prompt` still serves both variants, because phase 3 always receives
+the taxonomy regardless of which variant it is labelling.
+
+`StrictUndefined` (above) still matters for phase 2, even so. `taxonomy` is
+*absent from the context entirely* under Run A — not `None`, not an empty
+list, genuinely not a key in the context dict — so a stray `{{ taxonomy }}`
+or `{% if taxonomy %}` left in a variant-A template by a copy/paste mistake
+does not silently render empty: it **raises** `PromptRenderError: 'taxonomy'
+is undefined` and fails the run outright, the instant a Run A repetition
+reaches it. This is correct, deliberate, fail-closed behaviour — a template
+must not be able to silently treat a missing taxonomy as "empty" and carry
+on — and it is what keeps a stray reference from shipping a Run A prompt
+that merely *looks* unbiased. See `prompts/rendering.py`'s module docstring
+for the same note next to the isolation guarantee it documents.
 
 ### 5.4 `pipeline`
 
 ```
 Experiment(
     name, description, taxonomy→,
-    phase2_model, phase2_temperature, phase2_prompt→ PromptTemplate,
+    phase2_model, phase2_temperature,
+    phase2_prompt_a→ PromptTemplate (null),  # variant A's own template
+    phase2_prompt_b→ PromptTemplate (null),  # variant B's own template — independent, no coupling
     phase3_model, phase3_temperature, phase3_prompt→ PromptTemplate,
     seed_systems→ SystemDescription (M2M), fewshots→ FewShotExample (M2M),
     generate_systems: bool, generate_scenarios: bool,
@@ -277,6 +282,12 @@ Label(
 `Experiment.generate_systems` and `generate_scenarios` are independent toggles;
 a validator requires at least one to be true, and requires `target_system` when
 `generate_systems` is false.
+
+A validator also requires `phase2_prompt_a`/`phase2_prompt_b` to be set for
+every variant actually listed in `variants` — not both unconditionally, since
+`variants` may be `["A"]`, `["B"]`, or both — and requires whichever of the
+two is set to be phase-2 templates (`phase3_prompt` likewise must be a
+phase-3 template).
 
 `LLMCall` stores **both complete payloads** for every call, successful or not:
 `request_json` is the exact body sent to OpenRouter, `response_json` the entire

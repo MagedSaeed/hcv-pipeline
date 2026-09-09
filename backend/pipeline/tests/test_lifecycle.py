@@ -41,7 +41,9 @@ def experiment(db):
         name="lifecycle",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed — a real single-variant experiment has no use for _b.
+        phase2_prompt_a=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
         n_systems=1,

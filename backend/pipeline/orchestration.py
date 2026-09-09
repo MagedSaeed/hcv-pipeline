@@ -75,7 +75,12 @@ def launch(experiment, n_repetitions=1, inline=False):
                 variant=variant,
                 model=experiment.phase2_model,
                 temperature=experiment.phase2_temperature,
-                prompt_template=experiment.phase2_prompt,
+                # Per-variant, fully independent template — see
+                # `Experiment.phase2_prompt_for`/`phase2_prompt_a`/
+                # `phase2_prompt_b`'s own comments. Variant A and variant B
+                # of the SAME repetition therefore pin two DIFFERENT
+                # `PromptTemplate` rows here, never the same one.
+                prompt_template=experiment.phase2_prompt_for(variant),
                 taxonomy=experiment.taxonomy,
                 # Known the instant this row exists — Phase 2 is always
                 # exactly one call — so a freshly queued run has a real

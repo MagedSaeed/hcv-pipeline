@@ -50,7 +50,9 @@ def experiment(db):
         name="baseline",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=gen,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=gen,
         phase3_model="m3",
         phase3_prompt=lab,
         n_systems=1,

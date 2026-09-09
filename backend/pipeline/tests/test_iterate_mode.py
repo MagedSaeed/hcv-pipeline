@@ -368,7 +368,7 @@ def test_the_prompt_template_must_be_pinned_to_the_requested_phases_shaped_work(
     """A phase-3 (labelling) template pinned to a phase-2 (generation)
     request validated fine and only surfaced later as a baffling render or a
     wasted run — the same rule `Experiment.clean()` enforces for
-    `phase2_prompt`/`phase3_prompt`, reused here via
+    `phase2_prompt_a`/`phase2_prompt_b`/`phase3_prompt`, reused here via
     `template_phase_mismatch_error`."""
     api_client.force_authenticate(user=staff)
     response = api_client.post(
@@ -469,7 +469,7 @@ def test_borrowing_an_experiment_silently_overrides_a_mismatched_submitted_taxon
         response = api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 wrong,
                 experiment=borrowable_experiment.pk,
             ),
@@ -501,7 +501,7 @@ def test_both_generation_toggles_off_is_refused_at_create_time_with_zero_calls(
         response = api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 borrowable_experiment.taxonomy,
                 experiment=borrowable_experiment.pk,
             ),
@@ -530,7 +530,7 @@ def test_missing_target_when_not_generating_is_refused_at_create_time_with_zero_
         response = api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 borrowable_experiment.taxonomy,
                 experiment=borrowable_experiment.pk,
             ),
@@ -568,7 +568,7 @@ def test_a_phase_3_borrow_is_not_refused_for_a_generated_target_system(
         phase=2,
         variant="A",
         model="m2",
-        prompt_template=borrowable_experiment.phase2_prompt,
+        prompt_template=borrowable_experiment.phase2_prompt_a,
         taxonomy=borrowable_experiment.taxonomy,
         status=PhaseRun.Status.COMPLETED,
     )
@@ -877,7 +877,8 @@ def borrowable_experiment(db, taxonomy, phase2_template, phase3_template):
         name="borrowable",
         taxonomy=taxonomy,
         phase2_model="m2",
-        phase2_prompt=phase2_template,
+        phase2_prompt_a=phase2_template,
+        phase2_prompt_b=phase2_template,
         phase3_model="m3",
         phase3_prompt=phase3_template,
         n_systems=7,
@@ -946,7 +947,7 @@ def test_a_zero_override_is_refused_not_silently_treated_as_no_override(
     response = api_client.post(
         "/api/phase-runs/",
         _create_body(
-            borrowable_experiment.phase2_prompt,
+            borrowable_experiment.phase2_prompt_a,
             taxonomy,
             experiment=borrowable_experiment.pk,
             n_systems=0,
@@ -982,7 +983,7 @@ def test_a_wildly_large_override_is_refused_by_the_deliberate_tuning_cap(
     response = api_client.post(
         "/api/phase-runs/",
         _create_body(
-            borrowable_experiment.phase2_prompt,
+            borrowable_experiment.phase2_prompt_a,
             taxonomy,
             experiment=borrowable_experiment.pk,
             n_systems=wild_value,
@@ -1012,7 +1013,7 @@ def test_borrowing_a_contaminated_experiment_is_refused_at_create_time(
     response = api_client.post(
         "/api/phase-runs/",
         _create_body(
-            borrowable_experiment.phase2_prompt, taxonomy, experiment=borrowable_experiment.pk
+            borrowable_experiment.phase2_prompt_a, taxonomy, experiment=borrowable_experiment.pk
         ),
         format="json",
     )
@@ -1039,7 +1040,7 @@ def test_a_generated_seed_system_added_after_creation_still_fails_closed_at_exec
         response = api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 taxonomy,
                 experiment=borrowable_experiment.pk,
             ),
@@ -1086,7 +1087,7 @@ def test_borrowing_a_contaminated_target_system_is_refused_at_create_time(
     response = api_client.post(
         "/api/phase-runs/",
         _create_body(
-            borrowable_experiment.phase2_prompt, taxonomy, experiment=borrowable_experiment.pk
+            borrowable_experiment.phase2_prompt_a, taxonomy, experiment=borrowable_experiment.pk
         ),
         format="json",
     )
@@ -1276,7 +1277,7 @@ def test_borrowing_an_experiment_with_a_taxonomy_kind_fewshot_fails_with_zero_ca
         response = api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 taxonomy,
                 experiment=borrowable_experiment.pk,
             ),
@@ -1315,7 +1316,7 @@ def test_an_adhoc_run_borrowing_an_experiment_is_still_excluded_from_its_export(
         api_client.post(
             "/api/phase-runs/",
             _create_body(
-                borrowable_experiment.phase2_prompt,
+                borrowable_experiment.phase2_prompt_a,
                 taxonomy,
                 experiment=borrowable_experiment.pk,
                 n_systems=1,
@@ -1359,7 +1360,7 @@ def test_an_experiment_cannot_be_deleted_while_an_adhoc_run_still_borrows_it(
         phase=2,
         variant="A",
         model="m2",
-        prompt_template=borrowable_experiment.phase2_prompt,
+        prompt_template=borrowable_experiment.phase2_prompt_a,
         taxonomy=taxonomy,
         experiment=borrowable_experiment,
     )
@@ -1390,7 +1391,7 @@ def test_experiment_filter_finds_an_adhoc_run_borrowing_it(
         phase=2,
         variant="A",
         model="m2",
-        prompt_template=borrowable_experiment.phase2_prompt,
+        prompt_template=borrowable_experiment.phase2_prompt_a,
         taxonomy=taxonomy,
         experiment=borrowable_experiment,
     )

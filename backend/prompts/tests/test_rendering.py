@@ -140,13 +140,16 @@ def test_an_undefined_variable_fails_loudly(system):
 
 @pytest.mark.django_db
 def test_the_naive_taxonomy_guard_fails_variant_a_but_not_b(system, taxonomy):
-    """The trap this module's docstring documents: `taxonomy` is absent from
-    the Run A context (by design — that IS the isolation guarantee), not
-    merely `None`, so referencing it at all under StrictUndefined raises.
-    `{% if taxonomy %}` looks safe but is the wrong idiom — it fails Run A
-    while the identical template renders Run B fine, which is exactly the
-    confusing "one variant works, its sibling doesn't" symptom this trips
-    every prompt author into eventually."""
+    """The fail-closed behaviour this module's docstring documents:
+    `taxonomy` is absent from the Run A context (by design — that IS the
+    isolation guarantee), not merely `None`, so referencing it at all under
+    StrictUndefined raises. `{% if taxonomy %}` looks safe but fails Run A
+    while the identical template renders Run B fine — the same shape as a
+    stray `{{ taxonomy }}` a variant-A template author might leave behind
+    by copying variant B's template and forgetting to strip it, now that
+    each variant is authored independently (`phase2_prompt_a`/
+    `phase2_prompt_b`). This is deliberate: a mistake like that must fail
+    loudly, not render a prompt that quietly looks unbiased."""
     template = make("{% if taxonomy %}guided{% else %}unbiased{% endif %}")
 
     b_context = build_phase2_context(
@@ -176,12 +179,22 @@ def test_the_naive_taxonomy_guard_fails_variant_a_but_not_b(system, taxonomy):
 
 
 @pytest.mark.django_db
-def test_if_taxonomy_is_defined_renders_correctly_for_both_variants(system, taxonomy):
-    """The documented fix for the trap above: `is defined` checks presence
-    without touching the (absent, under Run A) value, so it is the one
-    spelling of this guard that renders under both variants — empty for A,
-    populated for B — making the idiom a checked guarantee rather than
-    advice a template author has to remember."""
+def test_if_taxonomy_is_defined_still_checks_presence_without_touching_the_value(system, taxonomy):
+    """Phase 2 no longer documents `{% if taxonomy is defined %}` as ITS
+    idiom — each variant gets its own, fully independent template now (see
+    this module's own docstring), so a real phase-2 template never needs to
+    branch on whether `taxonomy` was supplied: variant A's template simply
+    never references it, and variant B's always can. This test is no longer
+    pinning "the recommended pattern" — it pins the underlying JINJA
+    mechanism `render()` itself still relies on and still needs to be
+    correct: `is defined` checks presence without touching the (absent,
+    under Run A) value, so a template that legitimately wants to detect
+    whether a variable was supplied — for ANY variable, not just
+    `taxonomy` — still gets the right answer under `StrictUndefined`
+    rather than an `UndefinedError`. The SAME template rendered against
+    both an A and a B context here is a deliberate stress test of that
+    mechanism, not a claim that one template ought to serve both variants
+    in practice any more."""
     template = make(
         "{% if taxonomy is defined %}{{ taxonomy|length }} rows{% else %}withheld{% endif %}"
     )

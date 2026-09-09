@@ -53,7 +53,9 @@ def executed(db, settings):
         name="e",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
         n_systems=1,
@@ -94,7 +96,9 @@ def noise(db, settings):
         name="noise-experiment",
         taxonomy=tax,
         phase2_model="nm2",
-        phase2_prompt=generation,
+        # variants is restricted to ["B"] below, so only phase2_prompt_b is
+        # needed for this fixture.
+        phase2_prompt_b=generation,
         phase3_model="nm3",
         phase3_prompt=labelling,
         n_systems=1,

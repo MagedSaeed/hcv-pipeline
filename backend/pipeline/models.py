@@ -34,8 +34,9 @@ def template_phase_mismatch_error(template, expected_phase, field_label):
     """A `PromptTemplate` pinned to the wrong phase — or `None`, when there is
     nothing to check.
 
-    Shared by `Experiment.clean()` (checking `phase2_prompt`/`phase3_prompt`
-    against 2/3) and `pipeline.serializers.PhaseRunCreateSerializer` (an
+    Shared by `Experiment.clean()` (checking `phase2_prompt_a`/
+    `phase2_prompt_b`/`phase3_prompt` against 2/2/3) and
+    `pipeline.serializers.PhaseRunCreateSerializer` (an
     ad-hoc iterate-mode run's own `prompt_template` against its `phase`) —
     the same mistake, "a phase-3 labelling template pinned as the generation
     prompt (or the reverse)", validated fine on both paths and only surfaced
@@ -284,11 +285,14 @@ def generation_config_errors(cfg):
 
     Rules genuinely specific to an `Experiment` stay in `Experiment.clean()`
     — the `variants` list (an ad-hoc run has a single `variant` field, not a
-    list, and its own serializer rule for it) and the
-    `phase2_prompt`/`phase3_prompt` phase pairing (an ad-hoc run has ONE
-    `prompt_template`, checked against its own `phase` by
-    `template_phase_mismatch_error` directly). Nothing is duplicated here
-    that those already cover.
+    list, and its own serializer rule for it), the
+    `phase2_prompt_a`/`phase2_prompt_b`/`phase3_prompt` phase pairing (an
+    ad-hoc run has ONE `prompt_template`, checked against its own `phase` by
+    `template_phase_mismatch_error` directly), and "a template is set for
+    every variant this experiment actually runs" (an ad-hoc run's
+    `prompt_template` is never derived from `phase2_prompt_a`/`_b` at all,
+    so there is nothing on that path for this rule to reach). Nothing is
+    duplicated here that those already cover.
 
     Keys are `Experiment`'s own field names so `clean()` can raise them
     against the right form fields unchanged; callers with no such fields
@@ -408,9 +412,34 @@ class Experiment(models.Model):
 
     phase2_model = models.CharField(max_length=200)
     phase2_temperature = models.FloatField(default=1.0)
-    phase2_prompt = models.ForeignKey(
+    # Two fully independent templates, one per variant — NOT one shared FK
+    # branching on `{% if taxonomy is defined %}` (the old shape; see
+    # `prompts/rendering.py`'s module docstring for why that idiom existed
+    # and why it is no longer the documented pattern for phase 2). User
+    # decision, 2026-09-08: the researcher was offered a drift-warning
+    # variant and a shared-core variant and explicitly chose full
+    # independence — no coupling, no diff, no "these two templates should
+    # resemble each other" validation. Variant A's template simply never
+    # references `taxonomy`; variant B's always does. `null=True` (like
+    # `target_system` below): which of the two is actually REQUIRED depends
+    # on `variants` — an experiment that only ever runs "B" has no need of
+    # `phase2_prompt_a` — so DB-level nullability is correct and `clean()`
+    # enforces "a template for every variant this experiment actually runs"
+    # instead (see `clean()`'s own comment). Phase 3 is UNCHANGED — one
+    # `phase3_prompt` still serves both variants, because phase 3 always
+    # receives the taxonomy regardless of which variant it is labelling.
+    phase2_prompt_a = models.ForeignKey(
         "prompts.PromptTemplate",
-        related_name="phase2_experiments",
+        null=True,
+        blank=True,
+        related_name="phase2_experiments_a",
+        on_delete=models.PROTECT,
+    )
+    phase2_prompt_b = models.ForeignKey(
+        "prompts.PromptTemplate",
+        null=True,
+        blank=True,
+        related_name="phase2_experiments_b",
         on_delete=models.PROTECT,
     )
     phase3_model = models.CharField(max_length=200)
@@ -450,6 +479,20 @@ class Experiment(models.Model):
         if not self.variants:
             self.variants = list(VARIANTS)
         super().save(*args, **kwargs)
+
+    def phase2_prompt_for(self, variant):
+        """Which per-variant phase-2 template `launch()` pins onto `variant`'s
+        generation `PhaseRun` — `phase2_prompt_a` for A, `phase2_prompt_b`
+        for B. The one place that mapping is spelled out, so `launch()`
+        (each variant's real run) and any future caller needing the same
+        lookup (a preview endpoint, say) cannot drift into two different
+        ideas of which field backs which variant.
+        """
+        if variant == VARIANT_UNBIASED:
+            return self.phase2_prompt_a
+        if variant == VARIANT_GUIDED:
+            return self.phase2_prompt_b
+        raise ValueError(f"Unknown variant {variant!r}; expected 'A' or 'B'.")
 
     @property
     def generation_config(self):
@@ -507,17 +550,68 @@ class Experiment(models.Model):
         if variant_errors:
             errors["variants"] = variant_errors
 
+        # Which variants this experiment will ACTUALLY run once saved —
+        # mirroring `save()`'s own "an empty variants list defaults to
+        # both" behaviour, above. This matters because `clean()`/
+        # `full_clean()` is called on an UNSAVED instance too
+        # (`ExperimentSerializer.validate()`, at create time, before
+        # `save()` has ever applied that default): reading bare `variants`
+        # for the per-variant template check below would see `[]` for a
+        # create request that never mentions `variants` at all, make the
+        # check vacuously pass with NEITHER `phase2_prompt_a` nor
+        # `phase2_prompt_b` set, and let the API store a configuration
+        # `launch()` would go on to refuse the moment it re-validates the
+        # NOW-defaulted, saved instance — precisely the "operator learns at
+        # run time what they could have learned at save time" gap
+        # `ExperimentSerializer.validate()`'s own docstring exists to
+        # close. Deliberately only used below, not for the `unknown`/
+        # `duplicated` checks above: a genuinely submitted
+        # `variants=["C"]` must still be reported against the RAW list,
+        # never silently swapped for the default.
+        effective_variants = variants if variants else list(VARIANTS)
+
         # A phase-3 labelling template pinned as the generation prompt (or the
         # reverse) validated fine and only surfaced later as a baffling render
         # or a wasted run. See `template_phase_mismatch_error`'s own
         # docstring — shared with `PhaseRunCreateSerializer`'s identical check
-        # for an ad-hoc run's own `prompt_template`.
-        for field, expected in (("phase2_prompt", 2), ("phase3_prompt", 3)):
+        # for an ad-hoc run's own `prompt_template`. `phase2_prompt_a` and
+        # `phase2_prompt_b` are both checked against phase 2 — the split into
+        # two independent fields did not change which phase either belongs to.
+        for field, expected in (
+            ("phase2_prompt_a", 2),
+            ("phase2_prompt_b", 2),
+            ("phase3_prompt", 3),
+        ):
             if getattr(self, f"{field}_id") is None:
                 continue
             template_error = template_phase_mismatch_error(getattr(self, field), expected, field)
             if template_error:
                 errors[field] = template_error
+
+        # Each variant this experiment actually RUNS needs its own phase-2
+        # template — `variants` may be ["A"], ["B"], or both (see the
+        # `unknown`/`duplicated` checks above), so requiring BOTH
+        # unconditionally would wrongly refuse a real "B only" experiment
+        # that has no use for `phase2_prompt_a` at all. Deliberately inline
+        # here, not a shared `*_error` helper: unlike the config-shaped rules
+        # in `generation_config_errors`, this rule has no ad-hoc-path
+        # equivalent to reach — `PhaseRunCreateSerializer` never derives an
+        # ad-hoc run's `prompt_template` from `Experiment.phase2_prompt_a`/
+        # `_b` at all (an ad-hoc run supplies its own `prompt_template`
+        # directly, validated by `template_phase_mismatch_error` above), so
+        # there is nothing on that path for this rule to be wired into — the
+        # same reasoning that already keeps the `variants` list checks above
+        # (unknown/duplicated) inline rather than factored out.
+        for variant, field in (
+            (VARIANT_UNBIASED, "phase2_prompt_a"),
+            (VARIANT_GUIDED, "phase2_prompt_b"),
+        ):
+            if variant in effective_variants and getattr(self, f"{field}_id") is None:
+                errors[field] = (
+                    f"variant {variant!r} is enabled (in `variants`) but {field} "
+                    f"is not set. Phase 2 needs a template for every variant "
+                    "this experiment actually runs."
+                )
 
         if self.taxonomy_id:
             # See `taxonomy_missing_rows_error`'s own docstring — shared with

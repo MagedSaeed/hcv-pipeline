@@ -70,7 +70,9 @@ def experiment(db, settings):
         name="baseline",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
         n_systems=1,
@@ -320,19 +322,20 @@ def test_the_bundle_carries_the_prompts_at_the_version_used(experiment):
 
 @pytest.mark.django_db
 def test_the_bundle_pins_prompts_and_taxonomy_from_what_actually_ran(experiment):
-    """Editing an experiment's `phase2_prompt`/`taxonomy` AFTER it has
+    """Editing an experiment's `phase2_prompt_a`/`taxonomy` AFTER it has
     already run must not change what the archive says was used.
 
-    `experiment.phase2_prompt`/`.taxonomy` are plain, editable FKs — nothing
-    freezes them once runs exist, and `PATCH {"phase2_prompt": <new>}`
-    returns 200. The archive's job is to record what a run actually used,
-    which is `PhaseRun.prompt_template_id`/`.taxonomy_id` — pinned once, at
-    launch, and never rewritten. Reading the experiment's CURRENT FKs instead
-    used to ship a bundle whose `prompts`/`taxonomy` disagreed with `runs`
-    (whose `prompt_template`/`taxonomy` ids stayed correct throughout) and,
-    worse, whose `taxonomy` didn't even contain the HCV ids `labels` cites.
+    `experiment.phase2_prompt_a`/`.taxonomy` are plain, editable FKs —
+    nothing freezes them once runs exist, and `PATCH {"phase2_prompt_a":
+    <new>}` returns 200. The archive's job is to record what a run actually
+    used, which is `PhaseRun.prompt_template_id`/`.taxonomy_id` — pinned
+    once, at launch, and never rewritten. Reading the experiment's CURRENT
+    FKs instead used to ship a bundle whose `prompts`/`taxonomy` disagreed
+    with `runs` (whose `prompt_template`/`taxonomy` ids stayed correct
+    throughout) and, worse, whose `taxonomy` didn't even contain the HCV
+    ids `labels` cites.
     """
-    original_prompt_id = experiment.phase2_prompt_id
+    original_prompt_id = experiment.phase2_prompt_a_id
     original_taxonomy_id = experiment.taxonomy_id
 
     other_prompt = PromptTemplate.objects.create_version(
@@ -343,7 +346,7 @@ def test_the_bundle_pins_prompts_and_taxonomy_from_what_actually_ran(experiment)
 
     # The exact edit the reviewer probed via `PATCH` — done at the model
     # level here since the point under test is `build_bundle`, not the view.
-    experiment.phase2_prompt = other_prompt
+    experiment.phase2_prompt_a = other_prompt
     experiment.taxonomy = other_taxonomy
     experiment.save()
 
@@ -374,7 +377,7 @@ def test_the_bundle_resolves_every_run_after_being_repinned_between_two_real_lau
     """The highest-value scenario in this task: an experiment that ACTUALLY
     ran under two different pinned configurations, not one that was merely
     edited and never re-run (that's the test above). `PATCH`ing
-    `phase2_prompt`/`phase3_prompt`/`taxonomy` between two real launches is
+    `phase2_prompt_a`/`phase3_prompt`/`taxonomy` between two real launches is
     exactly the sequence that produced a confidently-wrong archive before
     `_prompts`/`_taxonomy` were driven off `PhaseRun`'s own pins instead of
     the experiment's current, editable FKs — every run, from EITHER
@@ -382,7 +385,7 @@ def test_the_bundle_resolves_every_run_after_being_repinned_between_two_real_lau
     sections, and every label's `hcv_id` must resolve against the bundle's
     own taxonomy rows.
     """
-    original_prompt_ids = {experiment.phase2_prompt_id, experiment.phase3_prompt_id}
+    original_prompt_ids = {experiment.phase2_prompt_a_id, experiment.phase3_prompt_id}
     original_taxonomy_id = experiment.taxonomy_id
 
     other_generation = PromptTemplate.objects.create_version(
@@ -396,7 +399,7 @@ def test_the_bundle_resolves_every_run_after_being_repinned_between_two_real_lau
         taxonomy=other_taxonomy, hcv_id="HCV-99", name="Second taxonomy's HCV", order=1
     )
 
-    experiment.phase2_prompt = other_generation
+    experiment.phase2_prompt_a = other_generation
     experiment.phase3_prompt = other_labelling
     experiment.taxonomy = other_taxonomy
     experiment.save()
@@ -548,7 +551,9 @@ def test_editing_a_seed_systems_body_after_launch_keeps_the_snapshots_original_t
         name="body-edit",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
         n_systems=1,
@@ -1245,7 +1250,9 @@ def test_a_run_export_carries_its_own_pinned_inputs_with_every_nested_field_popu
         name="deep",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        # variants is restricted to ["A"] below, so only phase2_prompt_a is
+        # needed for this fixture.
+        phase2_prompt_a=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
         n_systems=1,
@@ -1337,7 +1344,8 @@ def test_export_never_raises_on_an_unsafe_experiment_name(api_client, member, ba
         name=bad_name,
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        phase2_prompt_a=generation,
+        phase2_prompt_b=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
     )
@@ -1373,7 +1381,8 @@ def test_exporting_a_never_run_experiment_ships_empty_pinned_sections_not_an_err
         name="never run",
         taxonomy=tax,
         phase2_model="m2",
-        phase2_prompt=generation,
+        phase2_prompt_a=generation,
+        phase2_prompt_b=generation,
         phase3_model="m3",
         phase3_prompt=labelling,
     )

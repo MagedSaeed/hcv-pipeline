@@ -379,7 +379,8 @@ def test_the_admin_cannot_repoint_a_pending_orchestrated_runs_taxonomy(
         name="orchestrated",
         taxonomy=real,
         phase2_model="m2",
-        phase2_prompt=leaky_template,
+        phase2_prompt_a=leaky_template,
+        phase2_prompt_b=leaky_template,
         phase3_model="m3",
         phase3_prompt=lab,
     )

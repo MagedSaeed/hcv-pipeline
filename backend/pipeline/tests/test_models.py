@@ -35,7 +35,8 @@ def experiment(db, taxonomy, templates, seed):
         name="baseline",
         taxonomy=taxonomy,
         phase2_model="anthropic/claude-sonnet-4",
-        phase2_prompt=gen,
+        phase2_prompt_a=gen,
+        phase2_prompt_b=gen,
         phase3_model="openai/gpt-5",
         phase3_prompt=lab,
         n_systems=2,
@@ -142,7 +143,8 @@ def test_a_repetition_index_may_repeat_across_experiments(experiment, taxonomy, 
         name="second experiment",
         taxonomy=taxonomy,
         phase2_model="m",
-        phase2_prompt=templates[0],
+        phase2_prompt_a=templates[0],
+        phase2_prompt_b=templates[0],
         phase3_model="m",
         phase3_prompt=templates[1],
     )
@@ -427,7 +429,7 @@ def test_a_phase_three_template_may_not_be_the_phase_two_prompt(experiment, temp
     generation prompt (or the reverse) — the mistake only surfaced as a baffling
     render or a wasted run."""
     _, labeller = templates
-    experiment.phase2_prompt = labeller
+    experiment.phase2_prompt_a = labeller
     with pytest.raises(ValidationError, match="phase 2"):
         experiment.full_clean()
 
@@ -437,6 +439,109 @@ def test_a_phase_two_template_may_not_be_the_phase_three_prompt(experiment, temp
     generator, _ = templates
     experiment.phase3_prompt = generator
     with pytest.raises(ValidationError, match="phase 3"):
+        experiment.full_clean()
+
+
+@pytest.mark.django_db
+def test_phase2_prompt_b_may_not_be_a_phase_three_template(experiment, templates):
+    """The phase-match rule applies to BOTH per-variant fields, not just
+    `phase2_prompt_a` — reuses `template_phase_mismatch_error` exactly the
+    same way for each."""
+    _, labeller = templates
+    experiment.phase2_prompt_b = labeller
+    with pytest.raises(ValidationError, match="phase 2"):
+        experiment.full_clean()
+
+
+@pytest.mark.django_db
+def test_a_single_variant_experiment_needs_only_its_own_template(templates):
+    """`variants` may legitimately be `["A"]` or `["B"]`, not just both —
+    requiring BOTH per-variant templates unconditionally would wrongly
+    refuse a real single-variant experiment that has no use for the other
+    one."""
+    gen, lab = templates
+    b_only_taxonomy = Taxonomy.objects.create(vocabulary_id="HCV-B-ONLY", version="1.0")
+    b_only_taxonomy.hcvs.create(hcv_id="HCV-01", name="x", order=1)
+    experiment = Experiment(
+        name="b-only",
+        taxonomy=b_only_taxonomy,
+        phase2_model="m",
+        phase2_prompt_b=gen,
+        phase3_model="m",
+        phase3_prompt=lab,
+        variants=["B"],
+    )
+    experiment.full_clean()  # must not raise: no B-only run needs phase2_prompt_a
+
+
+@pytest.mark.django_db
+def test_a_variant_actually_run_must_have_its_own_phase2_template(taxonomy, templates):
+    """The new per-variant rule this task adds: `variants=["A"]` demands
+    `phase2_prompt_a` specifically, not merely SOME phase-2 template sitting
+    on the experiment (`phase2_prompt_b`, left from a template swap, does
+    not count for variant A)."""
+    gen, lab = templates
+    experiment = Experiment(
+        name="missing-a",
+        taxonomy=taxonomy,
+        phase2_model="m",
+        phase2_prompt_b=gen,
+        phase3_model="m",
+        phase3_prompt=lab,
+        variants=["A"],
+    )
+    with pytest.raises(ValidationError, match="phase2_prompt_a"):
+        experiment.full_clean()
+
+
+@pytest.mark.django_db
+def test_an_unsaved_experiment_with_no_variants_set_needs_both_templates(templates):
+    """`clean()`/`full_clean()` runs on an UNSAVED instance too — that is
+    exactly what `ExperimentSerializer.validate()` does at CREATE time,
+    before `Experiment.save()`'s own "an empty `variants` list defaults to
+    both" logic has ever had a chance to run. A freshly-constructed
+    `Experiment()` carries `variants == []` (the bare Django field default)
+    until `save()` runs, so a create request that never mentions `variants`
+    at all must still be checked against what it will ACTUALLY run once
+    saved — both A and B — not against a momentarily empty list that would
+    let the per-variant template check pass vacuously with NEITHER
+    `phase2_prompt_a` nor `phase2_prompt_b` set."""
+    _, lab = templates
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-UNSAVED", version="1.0")
+    tax.hcvs.create(hcv_id="HCV-01", name="x", order=1)
+    experiment = Experiment(
+        name="unsaved-no-variants",
+        taxonomy=tax,
+        phase2_model="m",
+        phase3_model="m",
+        phase3_prompt=lab,
+        # variants deliberately left unset — Experiment()'s bare default.
+    )
+    assert experiment.variants == []
+
+    with pytest.raises(ValidationError) as caught:
+        experiment.full_clean()
+
+    assert "phase2_prompt_a" in caught.value.message_dict
+    assert "phase2_prompt_b" in caught.value.message_dict
+
+
+@pytest.mark.django_db
+def test_a_variant_missing_its_template_is_refused_even_with_the_other_set(taxonomy, templates):
+    """Symmetric to the A-side check above: `variants=["B"]` with only
+    `phase2_prompt_a` set (and `phase2_prompt_b` left null) is refused too —
+    the rule is per-variant, not "at least one template is set"."""
+    gen, lab = templates
+    experiment = Experiment(
+        name="missing-b",
+        taxonomy=taxonomy,
+        phase2_model="m",
+        phase2_prompt_a=gen,
+        phase3_model="m",
+        phase3_prompt=lab,
+        variants=["B"],
+    )
+    with pytest.raises(ValidationError, match="phase2_prompt_b"):
         experiment.full_clean()
 
 
@@ -690,7 +795,8 @@ def test_the_shared_checker_reads_a_related_manager_as_rows():
         name="manager-shaped",
         taxonomy=Taxonomy.objects.create(vocabulary_id="HCV-DUCK", version="1.0"),
         phase2_model="m2",
-        phase2_prompt=PromptTemplate.objects.create_version(phase=2, name="g2", user_prompt="g"),
+        phase2_prompt_a=PromptTemplate.objects.create_version(phase=2, name="g2", user_prompt="g"),
+        phase2_prompt_b=PromptTemplate.objects.create_version(phase=2, name="g2b", user_prompt="g"),
         phase3_model="m3",
         phase3_prompt=PromptTemplate.objects.create_version(phase=3, name="l2", user_prompt="l"),
     )
