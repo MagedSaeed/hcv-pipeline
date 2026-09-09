@@ -2,8 +2,17 @@ import inspect
 import json
 
 import pytest
+from openai.resources.chat.completions import Completions
 
-from llm.client import DEFAULT_TIMEOUT, LLMClient, LLMResult, OpenRouterClient, SecretLeak
+from llm.client import (
+    DEFAULT_TIMEOUT,
+    LLMClient,
+    LLMResult,
+    OpenRouterClient,
+    SecretLeak,
+    build_request,
+    split_request_for_the_sdk,
+)
 from llm.fake import FakeLLMClient
 
 SENTINEL_KEY = "sk-or-v1-SENTINELSENTINELSENTINEL"
@@ -365,11 +374,22 @@ def test_a_usage_block_with_neither_cost_key_records_no_cost():
 
 def test_the_request_asks_openrouter_to_return_usage_accounting():
     """Cost only comes back when the request asks for it, so the ask is part of
-    every request — otherwise every recorded cost is null on live calls."""
+    every request — otherwise every recorded cost is null on live calls.
+
+    `usage: {"include": True}` is an OpenRouter extension, not a parameter the
+    OpenAI SDK's `Completions.create` declares — sending it as a plain keyword
+    argument is exactly the production bug (`TypeError: Completions.create()
+    got an unexpected keyword argument 'usage'`), so it must arrive on the wire
+    through `extra_body`, not as a top-level kwarg to `create()`. The archived
+    `request_json` still records the full logical body, `usage` included: it's
+    the evidence of what was actually sent, and `extra_body` really does merge
+    back into that same JSON body on the wire.
+    """
     stub = StubCompletions(BODY)
     result = client_with(stub).complete(model="m", system_prompt="", user_prompt="u")
 
-    assert stub.seen["usage"] == {"include": True}
+    assert "usage" not in stub.seen
+    assert stub.seen["extra_body"] == {"usage": {"include": True}}
     assert result.request_json["usage"] == {"include": True}
 
 
@@ -446,3 +466,69 @@ def test_the_fake_defaults_its_timeout_to_the_shared_default():
     assert (
         inspect.signature(FakeLLMClient.complete).parameters["timeout"].default == DEFAULT_TIMEOUT
     )
+
+
+# --- Contract: every key build_request() produces is deliverable to the SDK ---
+#
+# This is the test that would have caught the production bug. `build_request`
+# put `usage: {"include": True}` — an OpenRouter extension the OpenAI SDK has
+# never heard of — into the same dict that used to be splatted wholesale into
+# `Completions.create(**request)`. That failed every real call with `TypeError:
+# Completions.create() got an unexpected keyword argument 'usage'`, and none of
+# the other 757 tests noticed, because none of them ever bound a request
+# against the real SDK's signature — the stub's `create(**kwargs)` accepts
+# anything, and the fake fabricates its own response by hand. These tests
+# freshly introspect `Completions.create` themselves (not by trusting
+# `split_request_for_the_sdk`'s own `_CREATE_PARAMS` blindly) and then bind
+# against it for real, so a bug in the split itself — under-including a
+# required SDK parameter, or over-including something the SDK doesn't
+# recognise — fails here exactly the way a live call would fail, with no
+# network and no API key.
+
+
+def test_every_key_a_bare_request_produces_is_accounted_for_by_the_split():
+    request = build_request("m", "sys", "usr", 0.0)
+    body, extra = split_request_for_the_sdk(request)
+
+    # Nothing from build_request() is silently dropped, and nothing lands in
+    # both buckets.
+    assert set(body) | set(extra) == set(request)
+    assert set(body).isdisjoint(extra)
+
+    # The typed half really does bind against the SDK's own signature — the
+    # same check that raised TypeError on every real call before the fix.
+    inspect.signature(Completions.create).bind(None, **body)
+
+    # `usage` is the OpenRouter extension that broke production: it must be
+    # routed through extra_body, not smuggled in as a typed kwarg, precisely
+    # because the SDK does not declare it as a parameter at all.
+    assert "usage" not in inspect.signature(Completions.create).parameters
+    assert extra == {"usage": {"include": True}}
+
+
+def test_every_key_a_schema_pinned_request_produces_is_accounted_for_by_the_split():
+    """Covers the schema-pinned variant: response_format is SDK-native and
+    must stay on the typed side, not get swept into extra_body next to usage."""
+    schema = {"type": "object", "properties": {"labels": {"type": "array"}}}
+    request = build_request("m", "sys", "usr", 0.0, json_schema=schema)
+    body, extra = split_request_for_the_sdk(request)
+
+    assert set(body) | set(extra) == set(request)
+    assert set(body).isdisjoint(extra)
+
+    inspect.signature(Completions.create).bind(None, **body)
+
+    assert "response_format" in inspect.signature(Completions.create).parameters
+    assert "response_format" in body
+    assert extra == {"usage": {"include": True}}
+
+
+def test_splatting_a_bare_request_unsplit_is_exactly_the_bug_that_broke_production():
+    """Documents the failure this whole contract exists to prevent: the
+    pre-fix call site (`self._create(timeout=timeout, **request)`) handed the
+    *unsplit* request straight to the SDK. Reproducing that here, with no
+    network involved, is the same TypeError a live call raised in production."""
+    request = build_request("m", "sys", "usr", 0.0)
+
+    with pytest.raises(TypeError, match="usage"):
+        inspect.signature(Completions.create).bind(None, **request)

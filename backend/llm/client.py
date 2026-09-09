@@ -6,15 +6,49 @@ than a gap. The only exception it does raise is SecretLeak, because storing an
 API key in a payload that later ships in an export is not a recoverable state.
 """
 
+import inspect
 import json
 import time
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from openai import OpenAI
+from openai.resources.chat.completions import Completions
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TIMEOUT = 120
+
+# The OpenAI SDK's own signature, introspected once at import time — not a
+# hand-maintained key list. `build_request` puts OpenRouter extensions (like
+# `usage: {"include": True}`, needed for per-call cost) straight into the
+# same dict as SDK-native fields (`model`, `messages`, `response_format`...),
+# because that dict is also the archival record of what was logically sent.
+# Splatting it at the call site (`self._create(**request)`) fails immediately
+# with `TypeError: Completions.create() got an unexpected keyword argument
+# 'usage'` — a provider extension is never a typed parameter on the SDK's
+# `create()`, it only exists in the JSON body, so `extra_body` is where it
+# has to go. Deriving the split from the signature itself, rather than a
+# `{"usage"}` literal, is what makes the NEXT extension route correctly
+# without anyone remembering to update a second, separate list — this
+# codebase has already been bitten by exactly that kind of drift more than
+# once (see core.keys.KEY_PATTERN's history, and the fake/protocol timeout
+# mismatch in llm/tests/test_client.py).
+_CREATE_PARAMS = frozenset(inspect.signature(Completions.create).parameters) - {"self"}
+
+
+def split_request_for_the_sdk(request):
+    """Split a logical request into (typed kwargs, extra_body) for `create()`.
+
+    Anything `Completions.create` actually declares as a parameter is passed
+    typed; everything else — a provider extension `build_request` added — is
+    routed through `extra_body`, which the SDK merges into the JSON body
+    verbatim. `request_json` (the archived record) is never split: it keeps
+    the full logical body, extensions included, because that IS what ends up
+    on the wire once `extra_body` is merged in.
+    """
+    body = {key: value for key, value in request.items() if key in _CREATE_PARAMS}
+    extra = {key: value for key, value in request.items() if key not in _CREATE_PARAMS}
+    return body, extra
 
 
 class SecretLeak(RuntimeError):
@@ -151,9 +185,15 @@ class OpenRouterClient:
         # The key lives on the client, never in the recorded body.
         self._guard(request)
 
+        # `request` (and `request_json` below) stays the full logical body,
+        # unsplit — it's the archival record of what was actually sent, and
+        # `extra_body` really does get merged back into that same JSON body
+        # on the wire. Only the arguments handed to the SDK call get split.
+        body, extra = split_request_for_the_sdk(request)
+
         started = time.monotonic()
         try:
-            raw = self._create(timeout=timeout, **request)
+            raw = self._create(timeout=timeout, extra_body=extra, **body)
         except Exception as error:  # noqa: BLE001 — a provider failure is data
             return LLMResult(
                 request_json=request,

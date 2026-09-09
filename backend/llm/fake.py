@@ -1,6 +1,24 @@
 """An LLMClient that never touches the network, for tests and dry runs."""
 
-from llm.client import DEFAULT_TIMEOUT, LLMResult, build_request
+import inspect
+
+from openai.resources.chat.completions import Completions
+
+from llm.client import DEFAULT_TIMEOUT, LLMResult, build_request, split_request_for_the_sdk
+
+# Bound, not just membership-checked against a set: this raises the identical
+# `TypeError` shape a live call would raise (`Completions.create() got an
+# unexpected keyword argument '...'`). Before this check existed, the fake
+# took whatever `build_request()` produced and fabricated a response
+# unconditionally — including the `usage: {"include": True}` OpenRouter
+# extension the real SDK rejects outright as an unexpected keyword argument.
+# That is precisely why 757 passing tests never caught the production bug:
+# nearly every one of them ran a call through a fake that was strictly more
+# permissive than the real API. Validating on every `complete()` call turns
+# each of those existing tests into an incidental check of this same
+# invariant too, not just the one dedicated contract test in
+# llm/tests/test_client.py.
+_CREATE_SIGNATURE = inspect.signature(Completions.create)
 
 
 class FakeLLMClient:
@@ -37,6 +55,12 @@ class FakeLLMClient:
         # on request_json — that a schema was pinned, say — means the same thing
         # against the fake as it does against OpenRouter.
         request = build_request(model, system_prompt, user_prompt, temperature, json_schema)
+        # Same split the real client applies at its call site, then proof
+        # that the typed half is something `Completions.create` would
+        # actually accept — reject here exactly as a live call would reject,
+        # instead of accepting a shape reality never would.
+        body, _extra = split_request_for_the_sdk(request)
+        _CREATE_SIGNATURE.bind(None, **body)
         self.calls.append(
             {
                 "model": model,
