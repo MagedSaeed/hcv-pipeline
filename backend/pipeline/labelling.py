@@ -20,6 +20,7 @@ from llm.schemas import (
     split_known_labels,
 )
 from pipeline.clients import get_llm_client
+from pipeline.execution_config import resolve_labelling_fewshots
 from pipeline.models import Label, LLMCall, PhaseRun
 from prompts.rendering import (
     PromptRenderError,
@@ -50,10 +51,13 @@ def scenarios_for(phase_run):
 
 
 def _fewshots(phase_run):
-    if not phase_run.pipeline_run_id:
-        return []
-    experiment = phase_run.pipeline_run.experiment
-    return list(experiment.fewshots.filter(phase=3, is_active=True))
+    """This run's active phase-3 few-shots, from its PINNED config snapshot
+    — never the experiment's live fields. See `pipeline.execution_config`'s
+    module docstring: reading these live let an operator's edit while a run
+    sat QUEUED silently change what got rendered, contradicting the run's
+    own archived `inputs`/`rendered_user_prompt`.
+    """
+    return resolve_labelling_fewshots(phase_run)
 
 
 @transaction.atomic
@@ -189,7 +193,32 @@ def finish_labelling_run(phase_run):
     live as it goes, but `retry_failed` re-labels a subset of scenarios
     without touching either counter itself, relying entirely on this
     reconciliation to catch a scenario up from failed to completed.
+
+    Re-checks CANCELLED from the database, not the possibly-stale in-memory
+    `phase_run` passed in: this is the function that writes the FINAL
+    status of a fan-out `run_labelling` just finished, and an operator's
+    `POST .../cancel/` can land in the database at any point while that
+    fan-out is still running (the cancel action's own caveat: it does not
+    interrupt a worker already executing, so the worker's remaining writes —
+    individual `LLMCall` rows, `completed_children`/`failed_children` — may
+    still land). What must never happen is the run's FINAL status silently
+    flipping away from CANCELLED to COMPLETED/FAILED here — that would
+    misreport a deliberately-cancelled run as one that ran to completion or
+    failed on its own, a different, wrong fact about what happened. Every
+    other caller of `retry_failed` (the only other place that reaches this
+    function) can never reach it with a CANCELLED `phase_run` in the first
+    place — `retry_failed` refuses a CANCELLED run outright, with its own
+    `RunCancelled`, before it ever gets this far — but this checks directly
+    rather than relying on that being true of every future caller too.
+    Deliberately does NOT use `phase_run.is_terminal` for this (that
+    property now includes CANCELLED, precisely so `run_phase2`/
+    `run_labelling` hard-stop on it) — `retry_failed`'s whole point is to
+    re-derive a NEW terminal status for an already COMPLETED/FAILED run,
+    which a blanket `is_terminal` guard here would block.
     """
+    phase_run.refresh_from_db(fields=["status"])
+    if phase_run.status == PhaseRun.Status.CANCELLED:
+        return phase_run
     if phase_run.pipeline_run_id and not phase_run.source_phase_run_id:
         phase_run.status = PhaseRun.Status.FAILED
         phase_run.error = "Source phase run was deleted; nothing to label."

@@ -15,6 +15,7 @@ from django.utils.text import slugify
 from corpus.models import Origin, Scenario, SystemDescription
 from llm.schemas import Phase2Response, SchemaError, json_schema, parse_phase2
 from pipeline.clients import get_llm_client
+from pipeline.execution_config import resolve_generation_config
 from pipeline.models import LLMCall, PhaseRun
 from prompts.rendering import (
     VARIANT_UNBIASED,
@@ -25,27 +26,24 @@ from prompts.rendering import (
 )
 
 
-def _experiment_for(phase_run):
-    """The configuration behind this run, or None for an ad-hoc run."""
-    if phase_run.pipeline_run_id:
-        return phase_run.pipeline_run.experiment
-    return None
+def _build_context(phase_run, config):
+    """Always via the builder — never a hand-assembled dict (see plan 2).
 
-
-def _build_context(phase_run, experiment):
-    """Always via the builder — never a hand-assembled dict (see plan 2)."""
+    `config` is `resolve_generation_config(phase_run)`'s result — the run's
+    PINNED snapshot for an orchestrated run, the ad-hoc defaults otherwise —
+    never the experiment's LIVE fields. See `pipeline.execution_config`'s
+    module docstring for why that distinction is the whole point.
+    """
     unbiased = phase_run.is_unbiased
-    seeds = experiment.seed_systems.all() if experiment else []
-    fewshots = experiment.fewshots.filter(phase=2, is_active=True) if experiment else []
     return build_phase2_context(
         variant=phase_run.variant or VARIANT_UNBIASED,
-        seed_systems=list(seeds),
-        fewshots=list(fewshots),
-        generate_systems=experiment.generate_systems if experiment else True,
-        generate_scenarios=experiment.generate_scenarios if experiment else True,
-        n_systems=experiment.n_systems if experiment else 3,
-        n_scenarios_per_system=experiment.n_scenarios_per_system if experiment else 5,
-        target_system=experiment.target_system if experiment else None,
+        seed_systems=config["seed_systems"],
+        fewshots=config["fewshots"],
+        generate_systems=config["generate_systems"],
+        generate_scenarios=config["generate_scenarios"],
+        n_systems=config["n_systems"],
+        n_scenarios_per_system=config["n_scenarios_per_system"],
+        target_system=config["target_system"],
         # A never receives the taxonomy; it is passed only so the leak backstop
         # has a reference list to scan the finished prompt against.
         taxonomy=None if unbiased else phase_run.taxonomy,
@@ -76,13 +74,13 @@ def _narrative(card):
     return "\n".join(card.narrative_steps)
 
 
-def _persist_error(parsed, experiment):
+def _persist_error(parsed, config):
     """Why this response cannot be honoured, or None if it can be.
 
     A model's output and the run's configuration can disagree in ways that
     are easy to miss if `_persist` is simply left to do its best:
 
-    - the experiment says not to generate systems, but the response carries
+    - the config says not to generate systems, but the response carries
       system_descriptions anyway — the prompt and the configuration disagree,
       and honouring one of them silently hides that;
     - the response carries a bare scenarios list but there is no
@@ -91,17 +89,23 @@ def _persist_error(parsed, experiment):
     - the response carries neither — an empty body that would otherwise end
       the run COMPLETED having persisted nothing, with no record that
       anything was wrong;
-    - the experiment asked for scenarios but the response carries none, only
+    - the config asked for scenarios but the response carries none, only
       systems with empty scenario lists — the run would end COMPLETED with
       nothing for phase 3 to label, reporting a repetition that contributes
       zero labels to the measurement as a success.
 
+    Reads `config` — the SAME pinned/ad-hoc resolution `_build_context` used
+    to build the prompt this response is answering — never the experiment's
+    live fields: validating against a value that could have changed since
+    the prompt was rendered would reject a response that correctly answered
+    what it was actually asked, or accept one that did not.
+
     Each is reported by name rather than either dropped silently or left to
     surface as a confusing downstream symptom.
     """
-    generate_systems = experiment.generate_systems if experiment else True
-    generate_scenarios = experiment.generate_scenarios if experiment else True
-    target = experiment.target_system if experiment else None
+    generate_systems = config["generate_systems"]
+    generate_scenarios = config["generate_scenarios"]
+    target_system_id = config["target_system_id"]
 
     if not generate_systems and parsed.system_descriptions:
         return (
@@ -109,7 +113,7 @@ def _persist_error(parsed, experiment):
             "included system_descriptions. The prompt and the configuration "
             "disagree."
         )
-    if parsed.scenarios and target is None:
+    if parsed.scenarios and target_system_id is None:
         return (
             "The response included a bare scenarios list, but there is no "
             "target_system to attach them to."
@@ -129,7 +133,7 @@ def _persist_error(parsed, experiment):
 
 
 @transaction.atomic
-def _persist(phase_run, parsed, experiment):
+def _persist(phase_run, parsed, config):
     """Write the generated material. Everything lands as origin=generated.
 
     Wrapped in one atomic block so a mid-write failure (a duplicate
@@ -165,10 +169,13 @@ def _persist(phase_run, parsed, experiment):
             )
 
     # _persist_error has already ruled out a non-empty scenarios list with no
-    # target, so target is guaranteed not None here whenever there is
-    # anything in parsed.scenarios to write.
-    target = experiment.target_system if experiment else None
+    # target, so target_system_id is guaranteed not None here whenever there
+    # is anything in parsed.scenarios to write. Resolved to the REAL row only
+    # here, lazily, and only once — rendering needed just the pinned
+    # title/body/slug (already in `config["target_system"]`), but persisting
+    # a Scenario needs an actual FK-able SystemDescription.
     if parsed.scenarios:
+        target = SystemDescription.objects.get(pk=config["target_system_id"])
         for card in parsed.scenarios:
             order += 1
             Scenario.objects.create(
@@ -186,11 +193,42 @@ def run_phase2(phase_run):
     """Render, call, parse and persist. Always ends in a terminal status.
 
     Re-entrant only in the sense that a run which already reached a terminal
-    status is returned untouched — matching `execute_pipeline_run`'s guard.
-    Actually re-executing one would duplicate every system and scenario it
-    produced and archive a second call against it, double-counting its tokens
-    and cost.
+    status — COMPLETED, FAILED, or CANCELLED — is returned untouched,
+    matching `execute_pipeline_run`'s guard. Actually re-executing a
+    COMPLETED/FAILED one would duplicate every system and scenario it
+    produced and archive a second call against it, double-counting its
+    tokens and cost; re-executing a CANCELLED one is worse — a real,
+    brand-new provider call gets made and archived for a run an operator
+    deliberately stopped, and its status gets overwritten to RUNNING then
+    COMPLETED/FAILED, erasing the fact that it was cancelled at all (see
+    `finish_labelling_run`'s identical reasoning on the phase-3 side).
+
+    Re-fetched from the database rather than trusted from the possibly-stale
+    `phase_run` passed in: `run_phase2` is the ordinary execution path
+    (`execute_pipeline_run`'s loop, `tasks.run_phase2_task`), which can be
+    handed a `phase_run` an operator cancelled moments earlier via `POST
+    .../cancel/` — the caller's own copy can be stale
+    (`execute_pipeline_run`'s `for generation in ...` evaluates its
+    queryset once, up front, so a later iteration's `generation` can be
+    minutes old by the time this runs).
+
+    `resolve_generation_config(phase_run)` is called INSIDE its own
+    try/except, not before it the way an earlier round left it — a review
+    round proved that gap live: a malformed snapshot (`MalformedSnapshot`)
+    or a `target_system` deleted after launch (`ReferencedRowMissing`) is
+    dict indexing and a query over data this function does not control, a
+    much wider failure surface than the old `_experiment_for`'s bare FK
+    lookup it replaced, which could only ever raise `DoesNotExist`. Left
+    uncaught, that exception used to escape `run_phase2` entirely — breaking
+    this docstring's own promise ("Always ends in a terminal status") and,
+    one layer up, `execute_pipeline_run`'s too: the `PipelineRun` stayed
+    RUNNING forever (set before `run_phase2` was ever called), this
+    `PhaseRun` stayed PENDING (never reaching its own RUNNING write, which
+    happens after config resolution), and a re-drive would hit the
+    idempotency guard and merely re-roll it up — stranded exactly the way
+    every OTHER exit from this function is designed not to be.
     """
+    phase_run.refresh_from_db(fields=["status"])
     if phase_run.is_terminal:
         return phase_run
     if phase_run.phase == 2 and not phase_run.variant:
@@ -205,7 +243,11 @@ def run_phase2(phase_run):
             "supplied); there is no unmarked generation.",
         )
 
-    experiment = _experiment_for(phase_run)
+    try:
+        config = resolve_generation_config(phase_run)
+    except Exception as error:  # noqa: BLE001 — see docstring: must not strand the run
+        return _fail(phase_run, f"{type(error).__name__}: {error}")
+
     phase_run.status = PhaseRun.Status.RUNNING
     phase_run.started_at = timezone.now()
     # One call makes the whole run: total_children is always 1 from here, and
@@ -215,13 +257,13 @@ def run_phase2(phase_run):
     phase_run.save(update_fields=["status", "started_at", "total_children"])
 
     try:
-        context = _build_context(phase_run, experiment)
+        context = _build_context(phase_run, config)
         rendered = render(phase_run.prompt_template, context)
     except (TaxonomyLeak, PromptRenderError) as error:
         return _fail(phase_run, f"{type(error).__name__}: {error}")
 
     try:
-        return _call_and_persist(phase_run, rendered, experiment)
+        return _call_and_persist(phase_run, rendered, config)
     except Exception as error:  # noqa: BLE001 — nothing may strand this run
         # Deliberately as broad as run_labelling's guard, and for the same
         # reason. The client call raises MissingAPIKey when no key is
@@ -235,7 +277,7 @@ def run_phase2(phase_run):
         return _fail(phase_run, f"{type(error).__name__}: {error}")
 
 
-def _call_and_persist(phase_run, rendered, experiment):
+def _call_and_persist(phase_run, rendered, config):
     """Call the provider, archive it, and write what came back.
 
     Every failure this can anticipate is recorded and returned as a FAILED run;
@@ -283,12 +325,12 @@ def _call_and_persist(phase_run, rendered, experiment):
     call.parsed_ok = True
     call.save()
 
-    reason = _persist_error(parsed, experiment)
+    reason = _persist_error(parsed, config)
     if reason is not None:
         return _fail(phase_run, reason)
 
     try:
-        _persist(phase_run, parsed, experiment)
+        _persist(phase_run, parsed, config)
     except DatabaseError as error:
         return _fail(phase_run, f"Could not persist the generated material: {error}")
     except Exception as error:  # noqa: BLE001 — a half-written run must still be terminal

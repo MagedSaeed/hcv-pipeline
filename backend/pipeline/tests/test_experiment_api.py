@@ -316,6 +316,7 @@ def test_deleting_an_experiment_with_runs_is_refused(api_client, staff, experime
 
     response = api_client.delete(f"/api/experiments/{experiment.id}/")
     assert response.status_code == 409
+    assert response.json()["code"] == "experiment_has_runs"
     body = str(response.json()).lower()
     assert "run" in body
     assert "/api/pipeline-runs/" in body

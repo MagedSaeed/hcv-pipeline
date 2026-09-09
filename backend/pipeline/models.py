@@ -186,10 +186,26 @@ class PipelineRun(models.Model):
         RUNNING = "running", "Running"
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
+        # Terminal, but distinct from FAILED: nothing failed, an operator (or
+        # the system, on their behalf) called it dead so it could be deleted.
+        # See PipelineRunViewSet.cancel — allowed from PENDING, QUEUED or
+        # RUNNING, the one route out of a run stuck forever with no worker
+        # coming for it.
+        CANCELLED = "cancelled", "Cancelled"
 
     experiment = models.ForeignKey(Experiment, related_name="runs", on_delete=models.CASCADE)
     repetition_index = models.PositiveIntegerField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    # The configuration THIS repetition actually used, snapshotted once by
+    # `launch()` at creation time — never re-derived from `Experiment`'s
+    # live, editable fields afterward. `Experiment` may be (and is meant to
+    # be) edited freely even after it has runs; nothing here freezes that.
+    # This is what keeps an already-launched run's export truthful regardless
+    # of any later edit — "browsing an older run should show its previous
+    # config" (2026-09-09 user decision). See
+    # `pipeline.execution_config.config_snapshot` for its exact shape and why
+    # ids alone are not enough (a seed system's body is editable in place).
+    config = models.JSONField(default=dict)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
@@ -267,13 +283,34 @@ class PhaseRun(models.Model):
 
     @property
     def is_terminal(self):
-        """Has this run already finished, successfully or not?
+        """Has this run already reached an end state — successfully, by
+        failing, or by being cancelled?
 
         Re-executing a finished run duplicates its provider calls, which
-        double-counts its tokens and cost. CANCELLED is deliberately not
-        terminal here: it means "never ran", and re-driving one is legitimate.
+        double-counts its tokens and cost — the same is true of resurrecting
+        a CANCELLED one, which is why CANCELLED joined COMPLETED/FAILED here
+        (task 5 review round; an earlier version of this docstring said
+        CANCELLED meant "never ran" and re-driving one was legitimate — that
+        stopped being true the moment `cancel` could mark a run CANCELLED
+        mid-flight, with real calls already archived, not only the
+        "generation never completed" case this originally covered).
+        `run_phase2`/`run_labelling` both hard-stop on `is_terminal` now
+        including CANCELLED, so NOTHING re-drives a cancelled run through
+        the ordinary execution path any more.
+
+        `retry_failed` is the one caller that still needs its OWN, separate
+        check rather than relying on this: it must refuse a CANCELLED run
+        OUTRIGHT with an accurate reason ("cancelled, launch a new run
+        instead" — see `pipeline.orchestration.RunCancelled` — not "wait for
+        it to finish", which `RunInFlight`'s wording would otherwise imply
+        for a run that will never finish on its own). And
+        `finish_labelling_run` deliberately does NOT use this property at
+        all: `retry_failed`'s legitimate re-drive of an already
+        COMPLETED/FAILED run must still be able to re-derive a NEW terminal
+        status from it, which a blanket `is_terminal` guard there would
+        block — it checks CANCELLED specifically instead.
         """
-        return self.status in (self.Status.COMPLETED, self.Status.FAILED)
+        return self.status in (self.Status.COMPLETED, self.Status.FAILED, self.Status.CANCELLED)
 
     @property
     def progress(self):

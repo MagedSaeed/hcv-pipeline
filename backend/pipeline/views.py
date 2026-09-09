@@ -1,8 +1,10 @@
 import json
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.db.models import Count, Sum
 from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
@@ -11,9 +13,16 @@ from rest_framework.response import Response
 
 from core.keys import MissingAPIKey
 from core.permissions import StaffWrites as BaseStaffWrites
-from pipeline.export import build_bundle, safe_filename_stem, write_csv_zip
+from pipeline.export import build_bundle, build_run_bundle, safe_filename_stem, write_csv_zip
 from pipeline.models import Experiment, Label, PhaseRun, PipelineRun
-from pipeline.orchestration import QueueingError, launch, queue_runs, retry_failed
+from pipeline.orchestration import (
+    QueueingError,
+    RunCancelled,
+    RunInFlight,
+    launch,
+    queue_runs,
+    retry_failed,
+)
 from pipeline.serializers import (
     ExperimentSerializer,
     LabelSerializer,
@@ -21,6 +30,28 @@ from pipeline.serializers import (
     PhaseRunSerializer,
     PipelineRunSerializer,
     RunRequestSerializer,
+)
+
+# Surfaced in the `run` action's 202 body (so an operator learns it the
+# moment they start a batch) and reused, near-verbatim, by `cancel`'s own
+# response — one wording, not two that could drift apart. USER DECISION
+# (2026-09-09): cancel is allowed from any non-terminal state, but it does
+# NOT reach into a worker already executing; it only marks the run (and its
+# still-open phase runs) dead so it becomes deletable.
+CANCEL_CAVEAT = (
+    "Each of these can be cancelled with POST /api/pipeline-runs/{id}/cancel/ "
+    "while it is pending, queued or running. Cancelling marks a run dead so it "
+    "can be deleted; it does NOT interrupt a worker that may already be "
+    "executing it — any write that worker is mid-way through may still land."
+)
+
+# A PipelineRun may be cancelled from any of these — PENDING, QUEUED or
+# RUNNING — per the 2026-09-09 user decision quoted above `CANCEL_CAVEAT`.
+# Anything else (COMPLETED, FAILED, or already CANCELLED) is a 409.
+_CANCELLABLE_RUN_STATUSES = (
+    PipelineRun.Status.PENDING,
+    PipelineRun.Status.QUEUED,
+    PipelineRun.Status.RUNNING,
 )
 
 
@@ -31,7 +62,14 @@ class StaffWrites(BaseStaffWrites):
 
 
 class Conflict(APIException):
-    """The request is well-formed, but the resource's current state refuses it."""
+    """The request is well-formed, but the resource's current state refuses it.
+
+    `default_code` is deliberately generic ("conflict") — every call site
+    below passes its OWN `code=`, distinct per rule, the same way
+    `MissingAPIKeyError`/`BrokerUnavailableError` give the two 503 cases
+    below their own `default_code` rather than sharing one. A frontend can
+    then act on `code` instead of pattern-matching the English `detail`.
+    """
 
     status_code = status.HTTP_409_CONFLICT
     default_detail = "This action conflicts with the resource's current state."
@@ -60,7 +98,66 @@ class BrokerUnavailableError(ServiceUnavailable):
     default_code = "broker_unavailable"
 
 
-class ExperimentViewSet(viewsets.ModelViewSet):
+class ExportContentNegotiationMixin:
+    """Skip DRF's own content negotiation for an `export` action.
+
+    DRF's `DefaultContentNegotiation` treats `?format=` as its
+    `URL_FORMAT_OVERRIDE` too — used to pick a RESPONSE renderer — and
+    raises `Http404` the instant that value doesn't name a configured
+    renderer's `.format`. `export`'s `?format=csv` (a real, deliberately
+    unregistered renderer) and `?format=xml` (its deliberately-invalid case)
+    both did that during `initial()`, before `export`'s own body ever ran: a
+    404 instead of the 200/400 the action was meant to give. `export`
+    always returns a plain `HttpResponse`, never a DRF `Response` —
+    `finalize_response` only reads `request.accepted_renderer` for the
+    latter — so skipping negotiation here changes nothing else about how it
+    behaves. `determine_version` is still called, though: skipping it left
+    `request.version`/`request.versioning_scheme` unset, harmless today
+    since nothing reads them, but an `AttributeError` waiting for the day a
+    versioning class is configured.
+
+    Shared by every viewset with an `export` action (currently
+    `ExperimentViewSet` and `PipelineRunViewSet`) rather than duplicating
+    this override per viewset.
+    """
+
+    def initial(self, request, *args, **kwargs):
+        if self.action == "export":
+            self.format_kwarg = self.get_format_suffix(**kwargs)
+            version, scheme = self.determine_version(request, *args, **kwargs)
+            request.version, request.versioning_scheme = version, scheme
+            self.perform_authentication(request)
+            self.check_permissions(request)
+            self.check_throttles(request)
+            return
+        super().initial(request, *args, **kwargs)
+
+
+class ConflictCodeMixin:
+    """Surface `Conflict`'s `code` in the JSON body, matching the 503 pattern.
+
+    DRF's own exception handler renders a plain `APIException` as
+    `{"detail": <message>}` ONLY — the `code` attached to `exc.detail` (an
+    `ErrorDetail`, a `str` subclass carrying its own `.code`) never reaches
+    the response body on its own; `response.data` from DRF's default
+    handler is `{"detail": exc.detail}` with no sibling `code` key at all.
+    `_service_unavailable` above already builds the `{"detail", "code"}`
+    shape by hand for the two 503 cases, because those are caught and
+    rendered manually rather than raised. Every `Conflict` here IS raised —
+    through `perform_destroy`, or an `@action` body — and goes through DRF's
+    own `handle_exception` -> `settings.EXCEPTION_HANDLER` machinery, so
+    that is the one seam common to all of them where `code` can be added
+    without hand-building a `Response` at every individual raise site.
+    """
+
+    def handle_exception(self, exc):
+        response = super().handle_exception(exc)
+        if isinstance(exc, Conflict) and isinstance(response.data, dict):
+            response.data["code"] = exc.detail.code
+        return response
+
+
+class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewsets.ModelViewSet):
     serializer_class = ExperimentSerializer
     permission_classes = [IsAuthenticated, StaffWrites]
 
@@ -106,34 +203,6 @@ class ExperimentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    def initial(self, request, *args, **kwargs):
-        """Skip DRF's own content negotiation for `export`.
-
-        DRF's `DefaultContentNegotiation` treats `?format=` as its
-        `URL_FORMAT_OVERRIDE` too — used to pick a RESPONSE renderer — and
-        raises `Http404` the instant that value doesn't name a configured
-        renderer's `.format`. `export`'s `?format=csv` (a real, deliberately
-        unregistered renderer) and `?format=xml` (its deliberately-invalid
-        case) both did that during `initial()`, before `export`'s own body
-        ever ran: a 404 instead of the 200/400 the action was meant to give.
-        `export` always returns a plain `HttpResponse`, never a DRF
-        `Response` — `finalize_response` only reads `request.accepted_renderer`
-        for the latter — so skipping negotiation here changes nothing else
-        about how it behaves. `determine_version` is still called, though:
-        skipping it left `request.version`/`request.versioning_scheme` unset,
-        harmless today since nothing reads them, but an `AttributeError`
-        waiting for the day a versioning class is configured.
-        """
-        if self.action == "export":
-            self.format_kwarg = self.get_format_suffix(**kwargs)
-            version, scheme = self.determine_version(request, *args, **kwargs)
-            request.version, request.versioning_scheme = version, scheme
-            self.perform_authentication(request)
-            self.check_permissions(request)
-            self.check_throttles(request)
-            return
-        super().initial(request, *args, **kwargs)
-
     def perform_destroy(self, instance):
         """Refuse to delete an experiment with any runs recorded against it.
 
@@ -148,7 +217,8 @@ class ExperimentViewSet(viewsets.ModelViewSet):
             raise Conflict(
                 f"{instance.name!r} has runs recorded against it and cannot be "
                 "deleted. Delete each of its runs via DELETE /api/pipeline-runs/"
-                "{id}/ first if you really want to remove it."
+                "{id}/ first if you really want to remove it.",
+                code="experiment_has_runs",
             )
         instance.delete()
 
@@ -172,6 +242,12 @@ class ExperimentViewSet(viewsets.ModelViewSet):
         `BrokerUnavailableError`'s own `default_code`) alongside the
         human-readable `detail`, so a frontend can act on the reason rather
         than pattern-matching the English message.
+
+        The 202 body also carries `detail=CANCEL_CAVEAT` — a USER DECISION
+        (2026-09-09): an operator starting a batch must learn right then that
+        cancelling a run later only marks it dead, it does not reach into a
+        worker already executing it, not discover that caveat for the first
+        time when they go looking for a way to stop a stuck run.
         """
         experiment = self.get_object()
         options = RunRequestSerializer(data=request.data)
@@ -190,7 +266,10 @@ class ExperimentViewSet(viewsets.ModelViewSet):
             return self._service_unavailable(BrokerUnavailableError, error)
 
         return Response(
-            {"runs": [{"id": run.pk, "repetition_index": run.repetition_index} for run in runs]},
+            {
+                "runs": [{"id": run.pk, "repetition_index": run.repetition_index} for run in runs],
+                "detail": CANCEL_CAVEAT,
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 
@@ -208,30 +287,15 @@ class ExperimentViewSet(viewsets.ModelViewSet):
         action (e.g. `GET .../export.csv`), which passes `format` as a URL
         kwarg — omitting the parameter raised `TypeError: export() got an
         unexpected keyword argument 'format'` (a 500) the moment that route
-        matched. It is used here only as a fallback when the query param is
-        absent, so `?format=` — what the tests and the frontend actually
-        use — still wins.
+        matched. See `_export_format` for how the query param and this
+        fallback are reconciled, and `_export_response` for how the
+        response itself is built — shared with `PipelineRunViewSet.export`.
         """
         experiment = self.get_object()
-        # `.lower()`: `?format=CSV` used to 400 for no reason a caller could
-        # anticipate from the 400's own message.
-        wanted = (request.query_params.get("format") or format or "json").lower()
-        if wanted not in ("json", "csv"):
-            raise ValidationError({"format": "Use format=json or format=csv."})
-
+        wanted = _export_format(request, format)
         bundle = build_bundle(experiment)
         stem = f"{safe_filename_stem(experiment.name)}-export"
-        if wanted == "csv":
-            response = HttpResponse(write_csv_zip(bundle), content_type="application/zip")
-            response["Content-Disposition"] = f'attachment; filename="{stem}.zip"'
-            return response
-
-        response = HttpResponse(
-            json.dumps(bundle, ensure_ascii=False, indent=2),
-            content_type="application/json",
-        )
-        response["Content-Disposition"] = f'attachment; filename="{stem}.json"'
-        return response
+        return _export_response(wanted, bundle, stem)
 
     @staticmethod
     def _service_unavailable(error_class, error):
@@ -253,6 +317,44 @@ class ExperimentViewSet(viewsets.ModelViewSet):
         )
 
 
+def _export_format(request, format):
+    """Which format an `export` action was asked for — `json` or `csv`.
+
+    `.lower()`: `?format=CSV` used to 400 for no reason a caller could
+    anticipate from the 400's own message. `format` (the URL kwarg a
+    format-SUFFIX route like `.../export.csv` passes in — see
+    `ExportContentNegotiationMixin`) is used only as a fallback when the
+    query param is absent, so `?format=` — what the tests and the frontend
+    actually use — still wins. Shared by `ExperimentViewSet.export` and
+    `PipelineRunViewSet.export` — the only two `export` actions, and this
+    was the first half of what they duplicated.
+    """
+    wanted = (request.query_params.get("format") or format or "json").lower()
+    if wanted not in ("json", "csv"):
+        raise ValidationError({"format": "Use format=json or format=csv."})
+    return wanted
+
+
+def _export_response(wanted, bundle, stem):
+    """Build the download response for one export bundle, in whichever
+    format `_export_format` resolved. The second half of what
+    `ExperimentViewSet.export`/`PipelineRunViewSet.export` duplicated — the
+    only real difference between the two actions is how `bundle`/`stem` get
+    built, not how the response around them is shaped.
+    """
+    if wanted == "csv":
+        response = HttpResponse(write_csv_zip(bundle), content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="{stem}.zip"'
+        return response
+
+    response = HttpResponse(
+        json.dumps(bundle, ensure_ascii=False, indent=2),
+        content_type="application/json",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{stem}.json"'
+    return response
+
+
 def integer_param(params, name):
     """Read an integer query parameter, or 400. Never a 500."""
     raw = params.get(name)
@@ -264,19 +366,26 @@ def integer_param(params, name):
         raise ValidationError({name: f"Must be an integer, got {raw!r}."}) from error
 
 
-class PipelineRunViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
+class PipelineRunViewSet(
+    ConflictCodeMixin,
+    ExportContentNegotiationMixin,
+    mixins.DestroyModelMixin,
+    viewsets.ReadOnlyModelViewSet,
+):
     """Runs are a record of what happened; they are never EDITED over the API.
 
     Deletion is the one exception, and it is deliberate: `corpus.permissions`
     already fixes the policy that generated material is removed by deleting the
     run that produced it, whole, because deleting individual rows would be
     selective reporting. It is also what task 1's 409 on experiment deletion
-    tells the operator to do, so the route has to exist.
+    tells the operator to do, so the route has to exist. `cancel` is the other
+    exception — the one way out of a run stuck QUEUED or RUNNING forever with
+    no worker coming for it (see `cancel`'s own docstring).
     """
 
     serializer_class = PipelineRunSerializer
     # `StaffWrites` allows any authenticated user to read and reserves every
-    # unsafe method — DELETE included — for staff.
+    # unsafe method — DELETE and `cancel`'s POST included — for staff.
     permission_classes = [IsAuthenticated, StaffWrites]
 
     def perform_destroy(self, instance):
@@ -285,6 +394,9 @@ class PipelineRunViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet
         A QUEUED or RUNNING repetition is either waiting for a worker or being
         driven by one right now; deleting its rows mid-flight turns an orderly
         run into a crash inside the task, with half the output already written.
+        CANCELLED is deliberately not refused here: `cancel` exists precisely
+        so a run stuck in one of these two states has a route to become
+        deletable, and the 409 below now names that exact route.
         """
         if instance.status in (
             PipelineRun.Status.QUEUED,
@@ -292,10 +404,97 @@ class PipelineRunViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet
         ):
             raise Conflict(
                 f"Repetition {instance.repetition_index} is {instance.status} and "
-                "cannot be deleted while a worker may still hold it. Wait for it to "
-                "finish, or cancel it first."
+                "cannot be deleted while a worker may still hold it. Wait for it "
+                f"to finish, or POST /api/pipeline-runs/{instance.pk}/cancel/ first.",
+                code="run_in_flight",
             )
         instance.delete()
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None, format=None):
+        """Mark this run — and every non-terminal phase run under it — CANCELLED.
+
+        USER DECISION (2026-09-09): allowed from any non-terminal state —
+        PENDING, QUEUED **and** RUNNING, not only the "stuck QUEUED" case
+        that motivated it. A terminal run (COMPLETED, FAILED, or already
+        CANCELLED) is refused with a 409: there is nothing left to cancel.
+
+        This is the one route out of a run a broker accepted and then died
+        on (`max_attempts=1`, `catch_up=False`): before this existed, such a
+        run had no way out at all across every registered route — DELETE
+        run 409, DELETE experiment 409 (blocked by the run), PATCH/PUT 405,
+        DELETE phase-run 405 — and `Experiment.name` is unique, so an
+        operator could not even recreate it under the same name.
+
+        `format=None`: see `ExperimentViewSet.export` for why every
+        `@action` needs it (a `DefaultRouter` format-suffix route, e.g.
+        `.../cancel.json`, otherwise 500s with `TypeError`).
+
+        The response's `detail` is the SAME honest caveat `run`'s 202 already
+        carries (`CANCEL_CAVEAT`): this does not reach into a worker that may
+        still be executing the run — it only marks the run (and its phase
+        runs) dead so they become deletable. A write that worker is mid-way
+        through (an `LLMCall` save, a status roll-up) may still land after
+        this returns.
+        """
+        run = self.get_object()
+        if run.status not in _CANCELLABLE_RUN_STATUSES:
+            raise Conflict(
+                f"Repetition {run.repetition_index} is already {run.status} and "
+                "cannot be cancelled.",
+                code="run_not_cancellable",
+            )
+        # Two writes (the run itself, then its phase runs) — wrapped so a
+        # failure between them cannot leave the run CANCELLED with its phase
+        # runs still open, or vice versa.
+        with transaction.atomic():
+            run.status = PipelineRun.Status.CANCELLED
+            run.finished_at = timezone.now()
+            run.save(update_fields=["status", "finished_at"])
+            # Only the phase runs still open — never one already COMPLETED,
+            # FAILED, or (e.g. "generation did not complete") already
+            # CANCELLED with its own, more specific `error` already
+            # recorded, which this must not overwrite. A bulk `.update()`,
+            # not a per-row loop with `.save()`: one query regardless of how
+            # many phase runs this run has, not an N+1.
+            run.phase_runs.exclude(
+                status__in=[
+                    PhaseRun.Status.COMPLETED,
+                    PhaseRun.Status.FAILED,
+                    PhaseRun.Status.CANCELLED,
+                ]
+            ).update(
+                status=PhaseRun.Status.CANCELLED,
+                finished_at=timezone.now(),
+                error="Cancelled by operator.",
+            )
+        return Response(
+            {
+                "id": run.pk,
+                "status": run.status,
+                "detail": CANCEL_CAVEAT,
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def export(self, request, pk=None, format=None):
+        """Download this one repetition's archival bundle.
+
+        Same `?format=json|csv` contract as `ExperimentViewSet.export` —
+        see that action's docstring for why `format=None` is required and
+        why content negotiation is skipped for this action (both handled by
+        `ExportContentNegotiationMixin`, shared with that viewset). Reuses
+        `build_run_bundle`, which itself reuses every per-`phase_run_ids`
+        assembly helper `build_bundle` already has — the only thing
+        different about a per-run export is its scope and that it carries
+        this run's own pinned `config` snapshot as `inputs`, never the
+        experiment's current, editable fields (see `PipelineRun.config`).
+        """
+        run = self.get_object()
+        wanted = _export_format(request, format)
+        bundle = build_run_bundle(run)
+        stem = f"{safe_filename_stem(run.experiment.name)}-rep{run.repetition_index}-export"
+        return _export_response(wanted, bundle, stem)
 
     def get_queryset(self):
         """Annotate `progress` the same way `ExperimentViewSet` does.
@@ -347,7 +546,7 @@ class PipelineRunViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet
         return queryset
 
 
-class PhaseRunViewSet(viewsets.ReadOnlyModelViewSet):
+class PhaseRunViewSet(ConflictCodeMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = PhaseRunSerializer
     permission_classes = [IsAuthenticated, StaffWrites]
 
@@ -356,6 +555,16 @@ class PhaseRunViewSet(viewsets.ReadOnlyModelViewSet):
         params = self.request.query_params
         if (pipeline_run := integer_param(params, "pipeline_run")) is not None:
             queryset = queryset.filter(pipeline_run_id=pipeline_run)
+        # `?experiment=` exists on `/api/pipeline-runs/` but used to be
+        # silently absent here: `/api/phase-runs/?experiment=1` returned 200
+        # with every phase run of every experiment, no matter which one was
+        # asked for — the natural isolation query ("all variant-A phase-2
+        # runs of experiment X") could not be expressed at all. `pipeline_run
+        # __experiment_id` reaches through the FK the same way `?pipeline_run=`
+        # already reaches PhaseRun's own FK, one filter added, no query cost
+        # for callers that don't use it.
+        if (experiment := integer_param(params, "experiment")) is not None:
+            queryset = queryset.filter(pipeline_run__experiment_id=experiment)
         if (phase := integer_param(params, "phase")) is not None:
             queryset = queryset.filter(phase=phase)
         if variant := params.get("variant"):
@@ -400,9 +609,23 @@ class PhaseRunViewSet(viewsets.ReadOnlyModelViewSet):
             # happened, in exchange for nothing. Refuse before that runs.
             raise Conflict(
                 "The generation run this labelling run derives from no "
-                "longer exists, so there is nothing to re-label."
+                "longer exists, so there is nothing to re-label.",
+                code="missing_source_phase_run",
             )
-        retry_failed(phase_run)
+        try:
+            retry_failed(phase_run)
+        except RunCancelled as error:
+            # A distinct case from RunInFlight below: a CANCELLED run is
+            # terminal and will never finish on its own, so "wait for it to
+            # finish" would be actively misleading — its own message and
+            # `code` name the real reason instead.
+            raise Conflict(str(error), code="retry_run_cancelled") from error
+        except RunInFlight as error:
+            # `retry_failed` itself refuses a run that is not `is_terminal`
+            # (see its docstring) — this is that guard surfacing here as the
+            # 409 an API caller can act on, same as every other conflict on
+            # this endpoint.
+            raise Conflict(str(error), code="retry_run_in_flight") from error
         # `phase_run` came from `get_queryset()`'s `prefetch_related("calls")`;
         # `retry_failed` deletes and re-creates this run's calls, so that
         # cached `.calls.all()` is now stale. `leak_scan_ran`/`guarded_by`
@@ -415,6 +638,13 @@ class PhaseRunViewSet(viewsets.ReadOnlyModelViewSet):
 
 class LabelViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = LabelSerializer
+    # Explicit so all four viewsets in this module read the same way — this
+    # one has no unsafe method for `StaffWrites` to actually gate (read-only,
+    # no write action), so the omission was previously harmless in practice,
+    # but left a reader unable to tell whether that was deliberate or an
+    # oversight, and would have stayed silently wrong the moment a write
+    # action was ever added here.
+    permission_classes = [IsAuthenticated, StaffWrites]
 
     def get_queryset(self):
         queryset = Label.objects.select_related("hcv", "scenario")

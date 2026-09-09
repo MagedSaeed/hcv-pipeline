@@ -147,6 +147,12 @@ class PipelineRunSerializer(serializers.ModelSerializer):
             "experiment",
             "repetition_index",
             "status",
+            # The configuration THIS repetition actually used, pinned once at
+            # launch — see `PipelineRun.config`. Exposed here, not just via
+            # `/export/`, per the user's own framing of the decision: "even
+            # if these config data change, browsing an older run should show
+            # its previous config" (2026-09-09).
+            "config",
             "progress",
             "started_at",
             "finished_at",

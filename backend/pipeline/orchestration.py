@@ -5,11 +5,14 @@ Variants are independent and never share context — that independence is what
 makes the A/B comparison meaningful.
 """
 
+import copy
+
 from django.db import transaction
 from django.utils import timezone
 from django_q.tasks import async_task
 
 from core.keys import resolve_openrouter_key
+from pipeline.execution_config import config_snapshot
 from pipeline.generation import run_phase2
 from pipeline.labelling import failed_calls, finish_labelling_run, label_scenario, scenarios_for
 from pipeline.models import LLMCall, PhaseRun, PipelineRun
@@ -43,10 +46,18 @@ def launch(experiment, n_repetitions=1, inline=False):
         .values_list("repetition_index", flat=True)
         .first()
     ) or 0
+    # Snapshotted once per `launch()` call, not once per repetition — see
+    # `config_snapshot`'s own docstring for why. `deepcopy`d per row so no
+    # two PipelineRuns share the same in-memory dict (harmless today, since
+    # nothing mutates a `.config` in place after creation, but cheap
+    # insurance against that changing later).
+    config = config_snapshot(experiment)
 
     for offset in range(n_repetitions):
         run = PipelineRun.objects.create(
-            experiment=experiment, repetition_index=highest + offset + 1
+            experiment=experiment,
+            repetition_index=highest + offset + 1,
+            config=copy.deepcopy(config),
         )
         for variant in experiment.variants:
             generation = PhaseRun.objects.create(
@@ -138,7 +149,20 @@ def execute_pipeline_run(pipeline_run, on_progress=None):
     `run_labelling`), and once for a Phase 3 run CANCELLED outright. It is
     the seam `run_experiment --inline` uses to print progress as it goes;
     nothing here depends on it being set.
+
+    `pipeline_run.status` is re-fetched from the database FIRST, before the
+    entry guard reads it — a review round found this the one function the
+    CANCELLED sweep missed: the caller's copy can be stale (a worker fetched
+    a QUEUED run, an operator cancelled it before the worker actually got
+    here — `run_experiment --inline` loops over PipelineRun objects it
+    fetched back at `launch()` time, so repetition N's copy can be stale for
+    the whole time repetitions 1..N-1 take to run), and without this,
+    the guard below would trust that stale QUEUED/PENDING reading and
+    unconditionally write RUNNING over a row the database already has as
+    CANCELLED — the exact write `roll_up`'s own CANCELLED guard exists to
+    never let happen, defeated one line before it would ever run.
     """
+    pipeline_run.refresh_from_db(fields=["status"])
     if pipeline_run.status not in (PipelineRun.Status.PENDING, PipelineRun.Status.QUEUED):
         # Not idempotent on its own: re-running would call run_phase2 and
         # run_labelling again and duplicate every system, scenario, label
@@ -171,20 +195,39 @@ def execute_pipeline_run(pipeline_run, on_progress=None):
 
         if generation.status != PhaseRun.Status.COMPLETED:
             # Labelling nothing is not a success, and not a failure of its own.
-            labelling.status = PhaseRun.Status.CANCELLED
-            labelling.error = "Skipped: generation did not complete."
-            labelling.finished_at = timezone.now()
-            labelling.save(update_fields=["status", "error", "finished_at"])
-            if on_progress:
-                on_progress(labelling)
+            # `labelling` was fetched at the top of THIS iteration, before
+            # `run_phase2(generation)` ran — real wall-clock time an operator
+            # could have cancelled the run in — so re-check its CURRENT status
+            # rather than trust the possibly-stale local copy: an already
+            # CANCELLED labelling run (via `POST .../cancel/`, carrying its
+            # own "Cancelled by operator." error) must not have that more
+            # specific reason silently overwritten with this generic
+            # "skipped" one.
+            labelling.refresh_from_db(fields=["status"])
+            if labelling.status != PhaseRun.Status.CANCELLED:
+                labelling.status = PhaseRun.Status.CANCELLED
+                labelling.error = "Skipped: generation did not complete."
+                labelling.finished_at = timezone.now()
+                labelling.save(update_fields=["status", "error", "finished_at"])
+                if on_progress:
+                    on_progress(labelling)
             continue
         run_labelling(labelling, on_progress=on_progress)
 
     return roll_up(pipeline_run)
 
 
-def run_labelling(phase_run, on_progress=None):
-    """Fan out over the scenarios this run is responsible for.
+def _label_scenario_or_archive_failure(phase_run, scenario, sequence):
+    """Call `label_scenario`, and if it raises, archive the failure instead
+    of letting the exception escape — the ONE guard `run_labelling`'s
+    fan-out and `retry_failed`'s re-drive both need, shared here rather than
+    hand-written twice. Two independent copies that must agree is precisely
+    how `KEY_PATTERN` and `format=None` each survived their first fix in
+    this plan; a third stranding defect (this one: `retry_failed` calling
+    `label_scenario` with no guard at all, discovered after the identical
+    shape was already fixed twice — `queue_runs`' missing broker guard, and
+    `resolve_generation_config` sitting outside `run_phase2`'s try/except)
+    is exactly what a second hand-written guard would risk again.
 
     `label_scenario` is careful never to raise on a provider or database
     error — but the call it makes to `get_llm_client().complete()` is
@@ -192,17 +235,60 @@ def run_labelling(phase_run, on_progress=None):
     SecretLeak if a key-shaped string reaches the request body, which a
     rendered scenario narrative could carry. Catching broadly here, rather
     than naming that one exception, is the point: whatever any single
-    scenario does must not take the rest of the fan-out down with it. The
-    archived call keeps the default parsed_ok=False, so `failed_calls` (and
-    therefore `finish_labelling_run`) counts it correctly without any special
-    casing.
+    scenario does must not take the rest of the fan-out — or the retry —
+    down with it.
 
-    A run that already reached a terminal status is returned untouched, the
-    same way `execute_pipeline_run` guards a finished repetition. Re-running
-    one would make a second provider call for every scenario — double-counting
-    tokens and cost on the record — while `get_or_create` quietly hid the
-    duplication on the labels themselves. Re-driving only what failed is
-    `retry_failed`'s job.
+    Always returns the archived `LLMCall`, success or failure — never
+    leaves this scenario's slot unarchived. That matters most for
+    `retry_failed`, which deletes a failed call before re-labelling it: an
+    exception escaping here, unguarded, would destroy that archived row
+    with nothing left to replace it. This project's standard is that
+    archived calls are the record; a retry must never be able to consume
+    one without leaving a replacement in its place.
+    """
+    try:
+        call = label_scenario(phase_run, scenario, sequence=sequence)
+    except Exception as error:  # noqa: BLE001 — one scenario must not sink the run
+        # label_scenario may have already archived (and saved) this call —
+        # with parsed_ok=True — before raising further down (a
+        # non-DatabaseError from _persist, say). Update that record instead
+        # of adding a duplicate: a second row would leave the first one
+        # sitting there falsely claiming success.
+        existing = phase_run.calls.filter(scenario=scenario, sequence=sequence).first()
+        if existing is not None:
+            existing.parsed_ok = False
+            existing.parse_error = f"{type(error).__name__}: {error}"
+            existing.save()
+            call = existing
+        else:
+            call = LLMCall.objects.create(
+                phase_run=phase_run,
+                sequence=sequence,
+                scenario=scenario,
+                parse_error=f"{type(error).__name__}: {error}",
+            )
+    return call
+
+
+def run_labelling(phase_run, on_progress=None):
+    """Fan out over the scenarios this run is responsible for.
+
+    Each scenario is labelled through `_label_scenario_or_archive_failure`,
+    which guards against whatever any single scenario does taking the rest
+    of the fan-out down with it — see that function's own docstring. The
+    archived call keeps the default parsed_ok=False on a genuine failure, so
+    `failed_calls` (and therefore `finish_labelling_run`) counts it
+    correctly without any special casing.
+
+    A run that already reached a terminal status — COMPLETED, FAILED, or
+    CANCELLED — is returned untouched, the same way `execute_pipeline_run`
+    guards a finished repetition. Re-running a COMPLETED/FAILED one would
+    make a second provider call for every scenario — double-counting tokens
+    and cost on the record — while `get_or_create` quietly hid the
+    duplication on the labels themselves; re-running a CANCELLED one is
+    worse — a whole new round of real provider calls for a run an operator
+    deliberately stopped. Re-driving only what failed on an already-terminal
+    (COMPLETED/FAILED, never CANCELLED) run is `retry_failed`'s job.
 
     `total_children` is set to the scenario count BEFORE the loop starts, so
     a caller polling this row mid-run (the CLI's --watch, say) sees a real
@@ -220,7 +306,16 @@ def run_labelling(phase_run, on_progress=None):
     latter is what still reports something for a zero-scenario fan-out (the
     source phase run was deleted, say), which the per-scenario calls alone
     would never fire for at all.
+
+    `phase_run` is re-fetched from the database rather than trusted as
+    passed in: without it, a `phase_run` an operator cancelled moments
+    before this was invoked — `execute_pipeline_run`'s `labelling` can be
+    stale, real wall-clock time passing while `run_phase2` ran earlier in
+    the same loop iteration — would get resurrected: `is_terminal` reads
+    whatever `.status` the in-memory object currently holds, which is not
+    necessarily what the database says right now.
     """
+    phase_run.refresh_from_db(fields=["status"])
     if phase_run.is_terminal:
         return phase_run
 
@@ -241,32 +336,12 @@ def run_labelling(phase_run, on_progress=None):
     )
 
     for sequence, scenario in enumerate(scenarios, start=1):
-        try:
-            call = label_scenario(phase_run, scenario, sequence=sequence)
-            # Mirrors failed_calls' predicate exactly: a call counts as
-            # succeeded only if it parsed AND left no error behind.
-            if call.parsed_ok and not call.parse_error:
-                phase_run.completed_children += 1
-            else:
-                phase_run.failed_children += 1
-        except Exception as error:  # noqa: BLE001 — one scenario must not sink the run
-            # label_scenario may have already archived (and saved) this
-            # call — with parsed_ok=True — before raising further down (a
-            # non-DatabaseError from _persist, say). Update that record
-            # instead of adding a duplicate: a second row would leave the
-            # first one sitting there falsely claiming success.
-            existing = phase_run.calls.filter(scenario=scenario, sequence=sequence).first()
-            if existing is not None:
-                existing.parsed_ok = False
-                existing.parse_error = f"{type(error).__name__}: {error}"
-                existing.save()
-            else:
-                LLMCall.objects.create(
-                    phase_run=phase_run,
-                    sequence=sequence,
-                    scenario=scenario,
-                    parse_error=f"{type(error).__name__}: {error}",
-                )
+        call = _label_scenario_or_archive_failure(phase_run, scenario, sequence)
+        # Mirrors failed_calls' predicate exactly: a call counts as
+        # succeeded only if it parsed AND left no error behind.
+        if call.parsed_ok and not call.parse_error:
+            phase_run.completed_children += 1
+        else:
             phase_run.failed_children += 1
         phase_run.save(update_fields=["completed_children", "failed_children"])
         if on_progress:
@@ -275,6 +350,20 @@ def run_labelling(phase_run, on_progress=None):
     if on_progress:
         on_progress(finished)
     return finished
+
+
+class RunInFlight(RuntimeError):
+    """The run is not finished, so its archived calls are not safe to touch."""
+
+
+class RunCancelled(RuntimeError):
+    """The run was deliberately cancelled — it is terminal, and it will
+    never finish on its own, so `RunInFlight`'s "wait for it to finish"
+    would be actively misleading. Retrying is refused outright: re-driving
+    a cancelled run would resurrect it with brand-new provider calls, the
+    exact thing `run_phase2`/`run_labelling` already hard-stop on for the
+    same reason (see `PhaseRun.is_terminal`).
+    """
 
 
 def retry_failed(phase_run):
@@ -286,19 +375,90 @@ def retry_failed(phase_run):
     parse_error instead (see pipeline.labelling.failed_calls). Filtering on
     parsed_ok alone would silently skip retrying that call forever.
 
+    Deletes the failed calls it is about to re-drive BEFORE re-labelling
+    them (below), so each scenario in the loop goes through
+    `_label_scenario_or_archive_failure` — the same guard `run_labelling`'s
+    own fan-out uses, shared rather than hand-written a second time here.
+    A bare, unguarded `label_scenario(...)` call used to mean one scenario
+    raising (the `SecretLeak`/provider path `_label_scenario_or_archive_failure`'s
+    own docstring describes) propagated straight out of this function —
+    with the failed call already deleted and nothing archived in its
+    place, `finish_labelling_run` never reached, and the run left mid-retry
+    with counters and status unreconciled. Archived calls are this
+    project's record; a retry must never be able to consume one without
+    leaving a replacement.
+
     A run with nothing to retry is left untouched rather than handed to
     `finish_labelling_run`: a phase run CANCELLED because its generation
     never completed has zero calls, and finishing it would report a false
     COMPLETED with failed_children=0 — wiping the CANCELLED status and its
     error for work that never happened. This also makes retrying an
     already-healthy run a true no-op.
+
+    CANCELLED is refused OUTRIGHT next, regardless of `is_terminal` (which
+    now includes it): a review round found the previous framing genuinely
+    unreachable in a way that mattered — the docstring said re-driving a
+    cancelled run was "legitimate", but nothing here ever actually did
+    that (a zero-call CANCELLED run always hit the early return above; a
+    CANCELLED run WITH failed calls hit `RunInFlight` instead, whose
+    wording — "wait for it to finish" — is false for a run that will never
+    finish on its own, having been deliberately stopped). `RunCancelled`
+    names the real reason plainly instead of leaving that case to fall
+    through to a message written for a different one.
+
+    The whole-branch review proved the deeper bug the `RunInFlight` guard
+    below closes: a phase-3 run RUNNING with total=5 completed=0 failed=1
+    (a worker mid fan-out) let `POST .../retry/` return 200, delete the one
+    archived failed call, and flip the run RUNNING -> completed with
+    incoherent counters — while the worker kept writing to a row now marked
+    terminal. Raising `RunInFlight` unless `phase_run.is_terminal` closes
+    that at the SOURCE, inside this function, so the management command and
+    any future caller are protected the same way the view already is — not
+    just at the one layer that happened to call this first.
+
+    A CONFIRMED, pre-existing sibling of that same bug: `LLMCall.scenario`
+    is `SET_NULL`, and the admin permits deleting a GENERATED scenario, so a
+    failed call's `scenario_id` can go null while the call itself is still
+    sitting here, archived, waiting to be retried. The naive version of this
+    function built `scenario_ids` by dropping every call with no
+    `scenario_id` — silently excluding it from the re-drive — and then
+    deleted `failed_calls(phase_run)` WHOLESALE, that null-scenario call
+    included: one delete, zero replacement, exactly the "archived call
+    consumed with nothing left in its place" this function's own docstring
+    (above) says must never happen. `finish_labelling_run` would then
+    recount from an emptied table and report a false COMPLETED. Only the
+    REDRIVABLE calls — the ones whose scenario still exists — are deleted
+    below; a call whose scenario is gone has nothing to re-label it against,
+    so it is left exactly where it is, still archived, still counted as
+    failed by `finish_labelling_run`'s own fresh recount. This is the sibling
+    of the view's `missing_source_phase_run` guard, but scoped to one call
+    rather than the whole run — refusing the WHOLE retry over one orphaned
+    call would block every OTHER genuinely retriable failure for no reason.
+    Guarded here, inside `retry_failed` itself, rather than only in the view,
+    for the same reason `RunInFlight` is: `retry_failed(phase_run)` called
+    directly — the management command's path — bypasses the view entirely.
     """
     if not failed_calls(phase_run).exists():
         return phase_run
 
+    if phase_run.status == PhaseRun.Status.CANCELLED:
+        raise RunCancelled(
+            f"{phase_run} was cancelled and is terminal — it will never "
+            "finish on its own, and retrying it would resurrect it with new "
+            "provider calls. Launch a new run instead."
+        )
+
+    if not phase_run.is_terminal:
+        raise RunInFlight(
+            f"{phase_run} is {phase_run.status}, not finished — a worker may "
+            "still be writing to it, so its archived calls cannot be touched. "
+            "Wait for it to finish, or cancel the pipeline run first."
+        )
+
     failed = failed_calls(phase_run)
-    scenario_ids = [call.scenario_id for call in failed if call.scenario_id]
-    failed.delete()
+    redrivable = failed.exclude(scenario_id=None)
+    scenario_ids = list(redrivable.values_list("scenario_id", flat=True))
+    redrivable.delete()
 
     highest = (
         phase_run.calls.order_by("-sequence").values_list("sequence", flat=True).first()
@@ -306,7 +466,7 @@ def retry_failed(phase_run):
     for offset, scenario in enumerate(
         scenarios_for(phase_run).filter(id__in=scenario_ids), start=1
     ):
-        label_scenario(phase_run, scenario, sequence=highest + offset)
+        _label_scenario_or_archive_failure(phase_run, scenario, sequence=highest + offset)
     return finish_labelling_run(phase_run)
 
 
@@ -334,7 +494,27 @@ def roll_up(pipeline_run):
     on it" for anything built on top of this status later. All-PENDING (no
     QUEUED at all — nothing has actually been queued) deliberately stays
     RUNNING: calling that "queued" would be a mislabel.
+
+    Re-checks CANCELLED from the database before doing any of that, not the
+    possibly-stale `pipeline_run` passed in: `execute_pipeline_run` calls
+    this both on its early-return guard (a `pipeline_run` fetched at task
+    entry, and by the time this runs an operator's `POST .../cancel/` may
+    already have landed) and at the very end of its loop (a `pipeline_run`
+    whose in-memory `.status` was set to RUNNING at the top of that function
+    and never refreshed since, however long the loop's own phase-2/phase-3
+    work took). Without this, a cancelled run's phase runs — themselves
+    correctly left CANCELLED by `cancel` — would still get rolled up into
+    FAILED here (every phase run CANCELLED is neither `<= {COMPLETED}` nor
+    in `in_progress`, so it falls into the FAILED branch below), silently
+    overwriting a deliberate cancellation with a false "this run failed".
+    Once CANCELLED, a `PipelineRun`'s status is never rederived from its
+    phase runs again — `cancel` is the one place that writes it, same as
+    every other terminal transition here already treats COMPLETED/FAILED as
+    something nothing re-derives after the fact.
     """
+    pipeline_run.refresh_from_db(fields=["status"])
+    if pipeline_run.status == PipelineRun.Status.CANCELLED:
+        return pipeline_run
     statuses = set(pipeline_run.phase_runs.values_list("status", flat=True))
     in_progress = {PhaseRun.Status.PENDING, PhaseRun.Status.QUEUED, PhaseRun.Status.RUNNING}
     not_yet_started = {PhaseRun.Status.PENDING, PhaseRun.Status.QUEUED}

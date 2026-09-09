@@ -15,6 +15,11 @@ def member(db):
 
 
 @pytest.fixture
+def staff(db):
+    return User.objects.create_user(email="admin@example.com", password="pw-123456", is_staff=True)
+
+
+@pytest.fixture
 def labelled(db):
     tax = Taxonomy.objects.create(vocabulary_id="HCV-21", version="1.1", is_active=True)
     insider = HCV.objects.create(taxonomy=tax, hcv_id="HCV-07", name="Malicious Insiders", order=7)
@@ -146,9 +151,21 @@ def test_the_label_list_does_not_n_plus_one(api_client, member, labelled):
 
 
 @pytest.mark.django_db
-def test_labels_are_read_only(api_client, member, labelled):
-    api_client.force_authenticate(user=member)
+def test_labels_are_read_only(api_client, staff, member, labelled):
+    """POST is unsupported for anyone — matches the other three viewsets now
+    that `LabelViewSet` carries the same explicit `permission_classes`
+    (task 5, step 5: "all four viewsets read the same way").
+
+    DRF checks permissions before it resolves a handler, so a non-staff POST
+    is refused with 403 first — 405 only surfaces once permission has
+    already been granted, which is why this asserts POST as staff (see
+    `test_run_api.test_runs_are_read_only` for the identical reasoning).
+    """
+    api_client.force_authenticate(user=staff)
     assert api_client.post("/api/labels/", {}, format="json").status_code == 405
+
+    api_client.force_authenticate(user=member)
+    assert api_client.post("/api/labels/", {}, format="json").status_code == 403
 
 
 @pytest.mark.django_db

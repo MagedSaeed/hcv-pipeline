@@ -34,6 +34,14 @@ class ExperimentAdmin(admin.ModelAdmin):
 class PipelineRunAdmin(admin.ModelAdmin):
     list_display = ("__str__", "status", "started_at", "finished_at")
     list_filter = ("status",)
+    # `config` is the pinned snapshot execution and validation both trust as
+    # authoritative (see `pipeline.execution_config`'s own docstring) — a
+    # bare `ModelAdmin` renders a JSONField as an editable textarea, which
+    # was a live hand-edit route to a dishonest snapshot (e.g. a lying
+    # `input_resource_kind`) that `validate_snapshot`'s value checks alone
+    # cannot close, since a hand-edited value and an honest one are the same
+    # shape. Read-only here removes the write path instead.
+    readonly_fields = ("config",)
 
 
 @admin.register(PhaseRun)

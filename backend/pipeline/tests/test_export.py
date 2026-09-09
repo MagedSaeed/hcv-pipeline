@@ -12,8 +12,8 @@ from rest_framework.test import force_authenticate
 from corpus.models import FewShotExample, Origin, Scenario, SystemDescription
 from llm.fake import FakeLLMClient
 from pipeline.clients import set_llm_client
-from pipeline.export import build_bundle, write_csv_zip
-from pipeline.models import Experiment, LLMCall
+from pipeline.export import build_bundle, build_run_bundle, write_csv_zip
+from pipeline.models import Experiment, LLMCall, PipelineRun
 from pipeline.orchestration import execute_pipeline_run, launch
 from pipeline.views import ExperimentViewSet
 from prompts.models import PromptTemplate
@@ -41,6 +41,11 @@ SENTINEL = "sk-or-v1-EXPORTSENTINEL"
 @pytest.fixture
 def member(db):
     return User.objects.create_user(email="member@example.com", password="pw-123456")
+
+
+@pytest.fixture
+def staff(db):
+    return User.objects.create_user(email="admin@example.com", password="pw-123456", is_staff=True)
 
 
 @pytest.fixture
@@ -85,13 +90,23 @@ def experiment(db, settings):
 
 @pytest.mark.django_db
 def test_the_bundle_has_every_section_the_spec_names(experiment):
+    """No experiment-wide `inputs` section any more (task 5, step 2): with N
+    repetitions potentially pinning N different configurations, no single
+    section could represent "the" inputs — each repetition's own pinned
+    snapshot lives in `run_configs` (keyed by `pipeline_run` id) instead,
+    and `experiment_current` (renamed from `experiment`) is unmistakably
+    the experiment's CURRENT, live configuration, never what a run actually
+    used. See `test_a_run_export_carries_its_own_pinned_inputs` for where a
+    singular `inputs` section does still appear — `build_run_bundle`, one
+    repetition at a time, where it is unambiguous.
+    """
     bundle = build_bundle(experiment)
     assert set(bundle) == {
-        "experiment",
+        "experiment_current",
         "taxonomy",
         "prompts",
-        "inputs",
         "runs",
+        "run_configs",
         "systems",
         "scenarios",
         "labels",
@@ -111,34 +126,15 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
     set of a representative row of every section means removing OR renaming
     any exported field fails a test here, not just a lucky few.
 
-    Adds a seed scenario and a `target_system` on top of the shared fixture
-    so `inputs.seed_scenarios`/`inputs.target_system` are non-empty too —
-    every SystemDescription/Scenario-shaped row in the bundle (`systems`,
-    `scenarios`, `inputs.seed_systems`, `inputs.seed_scenarios`,
-    `inputs.target_system`) shares one shape by construction (`_system_row`/
+    `systems`/`scenarios` share one shape by construction (`_system_row`/
     `_scenario_row`), so one `system_keys`/`scenario_keys` set below covers
-    all of them.
+    both — `build_run_bundle`'s `inputs` has its OWN, deliberately leaner
+    shape (see `test_a_run_export_carries_its_own_pinned_inputs`), not this
+    one.
     """
-    seed_system = experiment.seed_systems.get()
-    Scenario.objects.create(
-        system_description=seed_system,
-        scenario_id="seed_01",
-        actor="A",
-        trigger="T",
-        standing_state="S",
-        asset="As",
-        threat="Th",
-        outcome="O",
-        narrative="N",
-        origin=Origin.SEED,
-    )
-    target = SystemDescription.objects.create(title="Target", body="t", origin=Origin.MANUAL)
-    experiment.target_system = target
-    experiment.save()
-
     bundle = build_bundle(experiment)
 
-    assert set(bundle["experiment"]) == {
+    assert set(bundle["experiment_current"]) == {
         "id",
         "name",
         "description",
@@ -187,7 +183,6 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
             "created_at",
         }
 
-    assert set(bundle["inputs"]) == {"seed_systems", "seed_scenarios", "fewshots", "target_system"}
     system_keys = {
         "id",
         "title",
@@ -221,10 +216,6 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
         "created_at",
         "updated_at",
     }
-    assert set(bundle["inputs"]["seed_systems"][0]) == system_keys
-    assert set(bundle["inputs"]["seed_scenarios"][0]) == scenario_keys
-    assert bundle["inputs"]["fewshots"] == []
-    assert set(bundle["inputs"]["target_system"]) == system_keys
 
     assert len(bundle["runs"]) == 2
     assert set(bundle["runs"][0]) == {
@@ -302,9 +293,9 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
 @pytest.mark.django_db
 def test_the_bundle_pins_the_configuration(experiment):
     bundle = build_bundle(experiment)
-    assert bundle["experiment"]["name"] == "baseline"
-    assert bundle["experiment"]["phase2_model"] == "m2"
-    assert bundle["experiment"]["variants"] == ["A"]
+    assert bundle["experiment_current"]["name"] == "baseline"
+    assert bundle["experiment_current"]["phase2_model"] == "m2"
+    assert bundle["experiment_current"]["variants"] == ["A"]
 
 
 @pytest.mark.django_db
@@ -441,6 +432,184 @@ def test_the_bundle_resolves_every_run_after_being_repinned_between_two_real_lau
 
 
 @pytest.mark.django_db
+def test_editing_every_pinned_field_does_not_change_what_a_run_reports(
+    api_client, staff, experiment
+):
+    """USER DECISION proof, closed. On the pre-fix code, `PATCH
+    {"seed_systems": [other]}` on a COMPLETED experiment changed
+    `bundle["inputs"]["seed_systems"]` in the very same export — the expert
+    ground-truth anchor and the record of what variant A actually saw both
+    "left the archive". `PipelineRun.config`, pinned once at launch and read
+    by `build_run_bundle` (never `Experiment`'s live fields), is what keeps
+    that from happening now. Editing the experiment itself stays completely
+    unrestricted — the PATCH below returns 200, not 409 or 400 — matching
+    the user's explicit ruling that nothing freezes.
+
+    Covers six of the seven newly-snapshotted fields in one PATCH;
+    `generate_scenarios` is covered separately in the next test — flipping
+    BOTH `generate_systems` and `generate_scenarios` off in the same request
+    is refused outright by `Experiment.clean()`, so they cannot share one.
+    """
+    run = experiment.runs.get()
+    assert run.config["seed_systems"][0]["title"] == "Oldsmar"
+    assert run.config["fewshots"] == []
+    assert run.config["target_system"] is None
+    assert run.config["generate_systems"] is True
+    assert run.config["n_systems"] == 1
+    assert run.config["n_scenarios_per_system"] == 1
+
+    swapped = SystemDescription.objects.create(
+        title="Swapped", body="A different plant entirely.", origin=Origin.SEED
+    )
+    target = SystemDescription.objects.create(title="Target", body="t", origin=Origin.MANUAL)
+    FewShotExample.objects.create(phase=2, name="ex", input_text="in", output_text="out")
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.patch(
+        f"/api/experiments/{experiment.pk}/",
+        {
+            "seed_systems": [swapped.pk],
+            "fewshots": [FewShotExample.objects.get(name="ex").pk],
+            "target_system": target.pk,
+            "n_systems": 5,
+            "n_scenarios_per_system": 9,
+            "generate_systems": False,
+        },
+        format="json",
+    )
+    assert response.status_code == 200
+
+    bundle = build_run_bundle(PipelineRun.objects.get(pk=run.pk))
+    assert bundle["inputs"]["seed_systems"][0]["title"] == "Oldsmar"
+    assert bundle["inputs"]["fewshots"] == []
+    assert bundle["inputs"]["target_system"] is None
+    assert bundle["inputs"]["generate_systems"] is True
+    assert bundle["inputs"]["n_systems"] == 1
+    assert bundle["inputs"]["n_scenarios_per_system"] == 1
+
+    # The distinction is real, not a no-op: `experiment_current` DOES show
+    # the edit — it is simply not what this run's own `inputs` reports.
+    assert bundle["experiment_current"]["n_systems"] == 5
+
+
+@pytest.mark.django_db
+def test_editing_generate_scenarios_after_launch_does_not_change_what_a_run_reports(
+    api_client, staff, experiment
+):
+    """The seventh snapshotted scalar, covered on its own — see the previous
+    test's docstring for why it cannot share a single PATCH with
+    `generate_systems`.
+    """
+    run = experiment.runs.get()
+    assert run.config["generate_scenarios"] is True
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.patch(
+        f"/api/experiments/{experiment.pk}/", {"generate_scenarios": False}, format="json"
+    )
+    assert response.status_code == 200
+
+    bundle = build_run_bundle(PipelineRun.objects.get(pk=run.pk))
+    assert bundle["inputs"]["generate_scenarios"] is True
+    assert bundle["experiment_current"]["generate_scenarios"] is False
+
+
+@pytest.mark.django_db
+def test_editing_a_seed_systems_body_after_launch_keeps_the_snapshots_original_text():
+    """Pinning ids alone is not enough: `ReadOnlyIfGenerated` only protects
+    a GENERATED row, so a seed `SystemDescription` (and its `Scenario`s)
+    stay editable after the fact, and an id could still point at text that
+    has since changed. Proof, made concrete: a seed system's `body` and its
+    scenario's `narrative`, both edited AFTER launch — the run's own
+    snapshot must keep the ORIGINAL text, matching what `rendered_system_prompt`
+    /`rendered_user_prompt` already archived verbatim on the call.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-BODY", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="x", order=1)
+    generation = PromptTemplate.objects.create_version(phase=2, name="g3", user_prompt="g")
+    labelling = PromptTemplate.objects.create_version(phase=3, name="l3", user_prompt="l")
+    seed = SystemDescription.objects.create(
+        title="Oldsmar", body="Original body.", origin=Origin.SEED
+    )
+    Scenario.objects.create(
+        system_description=seed,
+        scenario_id="seed_01",
+        actor="A",
+        trigger="T",
+        standing_state="S",
+        asset="As",
+        threat="Th",
+        outcome="O",
+        narrative="Original narrative.",
+        origin=Origin.SEED,
+    )
+    made = Experiment.objects.create(
+        name="body-edit",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt=generation,
+        phase3_model="m3",
+        phase3_prompt=labelling,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+    made.variants = ["A"]
+    made.save()
+    made.seed_systems.add(seed)
+
+    run = launch(made, n_repetitions=1)[0]
+
+    seed.body = "Edited body."
+    seed.save()
+    scenario = seed.scenarios.get()
+    scenario.narrative = "Edited narrative."
+    scenario.save()
+
+    bundle = build_run_bundle(PipelineRun.objects.get(pk=run.pk))
+    snapshot_system = bundle["inputs"]["seed_systems"][0]
+    assert snapshot_system["body"] == "Original body."
+    assert len(snapshot_system["scenarios"]) == 1
+    assert snapshot_system["scenarios"][0]["narrative"] == "Original narrative."
+
+    # The live rows genuinely changed — proves this isn't a no-op edit.
+    seed.refresh_from_db()
+    assert seed.body == "Edited body."
+    scenario.refresh_from_db()
+    assert scenario.narrative == "Edited narrative."
+
+
+@pytest.mark.django_db
+def test_two_runs_of_one_experiment_report_different_pinned_configs(api_client, staff, experiment):
+    """Two repetitions of the SAME experiment, with a config edit between
+    the two launches — each run must report ITS OWN snapshot, and the two
+    must differ, proving the pin is per-run, not per-experiment.
+    """
+    first_run = experiment.runs.get()
+    assert first_run.config["n_systems"] == 1
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.patch(
+        f"/api/experiments/{experiment.pk}/", {"n_systems": 7}, format="json"
+    )
+    assert response.status_code == 200
+    # The PATCH went through a DIFFERENT `Experiment` instance (DRF's own
+    # `get_object()`); this test's local `experiment` is now stale in
+    # memory and must be refreshed before `launch()` reads its fields.
+    experiment.refresh_from_db()
+
+    second_run = launch(experiment, n_repetitions=1)[0]
+
+    first_run.refresh_from_db()
+    assert first_run.config["n_systems"] == 1
+    assert second_run.config["n_systems"] == 7
+    assert first_run.config != second_run.config
+
+    bundle = build_bundle(experiment)
+    assert bundle["run_configs"][first_run.pk]["n_systems"] == 1
+    assert bundle["run_configs"][second_run.pk]["n_systems"] == 7
+
+
+@pytest.mark.django_db
 def test_the_bundle_carries_generated_material_and_labels(experiment):
     bundle = build_bundle(experiment)
     assert bundle["systems"][0]["title"] == "Riverbend"
@@ -517,21 +686,21 @@ def test_the_bundle_contains_no_api_key_even_when_one_was_actually_written(exper
 
 @pytest.mark.django_db
 def test_the_csv_zip_holds_one_file_per_section(experiment):
-    """`inputs` is split into one file per input KIND, not one `inputs.csv` —
-    seed systems, seed scenarios, few-shots and the target system are
-    genuinely different shapes; concatenating them crashed the writer the
-    moment more than one kind was non-empty (see
-    `test_the_csv_zip_handles_a_seed_system_and_a_fewshot_together`)."""
+    """No `inputs_*.csv` files at the experiment level any more: `build_bundle`
+    carries no experiment-wide `inputs` section (see
+    `test_the_bundle_has_every_section_the_spec_names`) — each repetition's
+    pinned config lives in its own `run_configs.csv` row instead (one CSV,
+    not repeated across every phase-run row of `runs.csv`).
+    `test_a_run_export_writes_a_single_inputs_csv_row` covers the per-run
+    export, which DOES carry a singular `inputs.csv`.
+    """
     archive = zipfile.ZipFile(io.BytesIO(write_csv_zip(build_bundle(experiment))))
     assert set(archive.namelist()) == {
-        "experiment.csv",
+        "experiment_current.csv",
         "taxonomy.csv",
         "prompts.csv",
-        "inputs_seed_systems.csv",
-        "inputs_seed_scenarios.csv",
-        "inputs_fewshots.csv",
-        "inputs_target_system.csv",
         "runs.csv",
+        "run_configs.csv",
         "systems.csv",
         "scenarios.csv",
         "labels.csv",
@@ -547,30 +716,9 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
     ONLY inside `write_csv_zip`, entirely separately from the JSON `taxonomy`
     section those JSON-level tests check — deleting that injection left the
     whole suite green until this test existed. Every CSV member's header is
-    pinned here, in the exact column ORDER `csv.DictWriter` actually writes,
-    using a fixture built out with a seed scenario, a few-shot and a
-    `target_system` so every member has real rows and a real header (an
-    empty section writes no header line at all — see `_write_csv`).
+    pinned here, in the exact column ORDER `csv.DictWriter` actually writes
+    (an empty section writes no header line at all — see `_write_csv`).
     """
-    seed_system = experiment.seed_systems.get()
-    Scenario.objects.create(
-        system_description=seed_system,
-        scenario_id="seed_01",
-        actor="A",
-        trigger="T",
-        standing_state="S",
-        asset="As",
-        threat="Th",
-        outcome="O",
-        narrative="N",
-        origin=Origin.SEED,
-    )
-    FewShotExample.objects.create(phase=2, name="ex", input_text="in", output_text="out")
-    experiment.fewshots.add(FewShotExample.objects.get(name="ex"))
-    target = SystemDescription.objects.create(title="Target", body="t", origin=Origin.MANUAL)
-    experiment.target_system = target
-    experiment.save()
-
     archive = zipfile.ZipFile(io.BytesIO(write_csv_zip(build_bundle(experiment))))
 
     def header(name):
@@ -610,7 +758,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "updated_at",
     ]
 
-    assert header("experiment") == [
+    assert header("experiment_current") == [
         "id",
         "name",
         "description",
@@ -647,10 +795,6 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "created_by",
         "created_at",
     ]
-    assert header("inputs_seed_systems") == system_header
-    assert header("inputs_seed_scenarios") == scenario_header
-    assert header("inputs_fewshots") == ["id", "phase", "name", "input", "output"]
-    assert header("inputs_target_system") == system_header
     assert header("systems") == system_header
     assert header("scenarios") == scenario_header
     assert header("runs") == [
@@ -678,6 +822,16 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "created_by",
         "started_at",
         "finished_at",
+    ]
+    assert header("run_configs") == [
+        "pipeline_run",
+        "seed_systems",
+        "fewshots",
+        "target_system",
+        "generate_systems",
+        "generate_scenarios",
+        "n_systems",
+        "n_scenarios_per_system",
     ]
     assert header("labels") == [
         "id",
@@ -729,34 +883,45 @@ def test_the_csv_calls_are_not_truncated(experiment):
 
 
 @pytest.mark.django_db
-def test_the_csv_zip_handles_a_seed_system_and_a_fewshot_together(experiment):
-    """Every fixture in the original suite had zero few-shots, so a live bug
-    went uncaught: `inputs` used to concatenate seed systems and few-shots —
-    two different shapes — into one list, and `csv.DictWriter.writerows`
-    raises `ValueError: dict contains fields not in fieldnames` (an
-    uncaught 500) the instant a row's keys don't match the first row's.
-    `experiment` already carries one seed system; this adds one few-shot too,
-    which used to be enough to trigger it.
+def test_a_run_export_writes_a_single_inputs_csv_row(experiment):
+    """`inputs.csv` exists only on the PER-RUN export (`build_run_bundle`,
+    task 5 step 4) — `build_bundle`'s experiment-wide bundle carries no
+    `inputs` section at all any more (see
+    `test_the_csv_zip_holds_one_file_per_section`). It is always exactly ONE
+    row: `run.config` is a single dict, not a list of differently-shaped
+    items, so the historical crash this used to guard (`inputs`
+    concatenating seed systems and few-shots — two different shapes — into
+    one list, which raised `ValueError: dict contains fields not in
+    fieldnames` the moment both were non-empty) cannot recur here. Confirms
+    both a seed system and a few-shot come through the ONE row without
+    crashing the writer.
     """
     FewShotExample.objects.create(phase=2, name="ex", input_text="in", output_text="out")
     experiment.fewshots.add(FewShotExample.objects.get(name="ex"))
 
-    archive = zipfile.ZipFile(io.BytesIO(write_csv_zip(build_bundle(experiment))))
-    assert "Oldsmar" in archive.read("inputs_seed_systems.csv").decode("utf-8")
-    assert "ex" in archive.read("inputs_fewshots.csv").decode("utf-8")
+    # A second repetition, so its `.config` snapshot is fresh and includes
+    # the few-shot just added — `launch()` is all that is needed here, this
+    # does not need to actually execute.
+    run = launch(experiment, n_repetitions=1)[0]
+
+    archive = zipfile.ZipFile(io.BytesIO(write_csv_zip(build_run_bundle(run))))
+    text = archive.read("inputs.csv").decode("utf-8")
+    assert "Oldsmar" in text
+    assert "ex" in text
 
 
 @pytest.mark.django_db
 def test_write_csv_zip_unions_fieldnames_across_heterogeneous_rows(experiment):
     """Direct defense-in-depth check on `_as_rows`'s union-fieldnames fix,
-    not exercised by any CURRENT bundle section on its own — after C1's
-    `inputs` split, every section is internally homogeneous by construction.
-    But `csv.DictWriter` trusting only the FIRST row's keys is exactly what
-    made `inputs.csv` 500 the moment a second, differently-shaped row showed
-    up; a future section going heterogeneous must get a blank cell, not a
-    `ValueError: dict contains fields not in fieldnames`. Built directly
-    (not via `build_bundle`) since the fix guards against a shape no current
-    section actually produces.
+    not exercised by any CURRENT bundle section on its own — every section
+    is internally homogeneous by construction (see `_runs`/`_systems`/etc,
+    and `inputs`'s own single-dict shape on the per-run export). But
+    `csv.DictWriter` trusting only the FIRST row's keys is exactly what made
+    the old, multi-shape `inputs` 500 the moment a second, differently-shaped
+    row showed up; a future section going heterogeneous must get a blank
+    cell, not a `ValueError: dict contains fields not in fieldnames`. Built
+    directly (not via `build_bundle`) since the fix guards against a shape no
+    current section actually produces.
     """
     bundle = build_bundle(experiment)
     bundle["calls"] = [
@@ -808,7 +973,7 @@ def test_the_export_endpoint_returns_json_by_default(api_client, member, experim
     assert response.status_code == 200
     assert response["Content-Type"] == "application/json"
     assert "attachment" in response["Content-Disposition"]
-    assert set(json.loads(response.content)) >= {"experiment", "calls"}
+    assert set(json.loads(response.content)) >= {"experiment_current", "calls"}
 
 
 @pytest.mark.django_db
@@ -857,6 +1022,298 @@ def test_export_survives_a_path_format_suffix(api_client, member, experiment):
 
     response = api_client.get(f"/api/experiments/{experiment.pk}/progress.json")
     assert response.status_code == 200
+
+
+# --- Step 4: per-run export (`GET /api/pipeline-runs/{id}/export/`) -------
+#
+# Same `?format=json|csv` contract as the experiment-level export above, and
+# the same guarantees, tested independently at this route too rather than
+# assumed from the experiment-level tests: no API key, byte-identical
+# output, and the isolation evidence present.
+
+
+@pytest.mark.django_db
+def test_a_run_export_returns_json_by_default(api_client, member, experiment):
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export/")
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "application/json"
+    assert "attachment" in response["Content-Disposition"]
+    body = json.loads(response.content)
+    assert set(body) >= {"experiment_current", "inputs", "runs", "calls"}
+    assert len(body["runs"]) == 2  # this run's own two phase runs (variant A only)
+    assert {row["pipeline_run"] for row in body["runs"]} == {run.pk}
+
+
+@pytest.mark.django_db
+def test_a_run_export_returns_a_zip_for_csv(api_client, member, experiment):
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export/?format=csv")
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "application/zip"
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    assert "calls.csv" in archive.namelist()
+    assert "inputs.csv" in archive.namelist()
+
+
+@pytest.mark.django_db
+def test_a_run_export_requires_authentication(api_client, experiment):
+    run = experiment.runs.get()
+    assert api_client.get(f"/api/pipeline-runs/{run.pk}/export/").status_code == 403
+
+
+@pytest.mark.django_db
+def test_a_run_export_carries_only_that_runs_own_material(api_client, member, experiment):
+    """Scoped to ONE repetition, not the whole experiment: a second
+    repetition's calls/systems/scenarios must not leak into this run's own
+    export.
+    """
+    first_run = experiment.runs.get()
+    _run_another_repetition(experiment)
+    second_run = PipelineRun.objects.exclude(pk=first_run.pk).get(experiment=experiment)
+
+    api_client.force_authenticate(user=member)
+    body = json.loads(api_client.get(f"/api/pipeline-runs/{first_run.pk}/export/").content)
+
+    assert {row["pipeline_run"] for row in body["runs"]} == {first_run.pk}
+    assert len(body["calls"]) == 2  # this run's own phase-2 + phase-3 call, not both runs'
+    phase_run_ids = {row["phase_run"] for row in body["runs"]}
+    assert all(call["phase_run"] in phase_run_ids for call in body["calls"])
+    # Sanity: the OTHER run's own export is likewise scoped, not just this
+    # one — proves the scoping isn't an accident of which run happened first.
+    other_body = json.loads(api_client.get(f"/api/pipeline-runs/{second_run.pk}/export/").content)
+    assert {row["pipeline_run"] for row in other_body["runs"]} == {second_run.pk}
+
+
+@pytest.mark.django_db
+def test_a_run_export_carries_the_isolation_evidence(api_client, member, experiment):
+    """A Run A call must carry proof its leak scan ran — same guarantee as
+    `test_the_bundle_records_the_isolation_evidence`, tested independently
+    at this route too."""
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    body = json.loads(api_client.get(f"/api/pipeline-runs/{run.pk}/export/").content)
+
+    generation = [c for c in body["calls"] if c["scenario"] is None]
+    assert generation[0]["leak_scan_ran"] is True
+    assert generation[0]["guarded_by"] is not None
+
+
+@pytest.mark.django_db
+def test_a_run_export_contains_no_api_key(api_client, member, experiment):
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export/")
+    assert SENTINEL not in response.content.decode("utf-8")
+    assert "sk-or-" not in response.content.decode("utf-8")
+
+
+@pytest.mark.django_db
+def test_a_run_export_contains_no_api_key_even_when_one_was_actually_written(
+    api_client, member, experiment
+):
+    """Same reasoning as `test_the_bundle_contains_no_api_key_even_when_one_was_actually_written`:
+    proves the redaction survives being read back THROUGH a real `LLMCall`
+    row, not merely that the ordinary fixture flow never writes a key.
+    """
+    run = experiment.runs.get()
+    phase_run = run.phase_runs.get(phase=2)
+    call = LLMCall(
+        phase_run=phase_run,
+        sequence=99,
+        rendered_system_prompt=f"system prompt with a key: {SENTINEL}",
+        raw_response=SENTINEL,
+    )
+    call.save()  # LLMCall.save() redacts every one of these fields in place.
+
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export/")
+    assert SENTINEL not in response.content.decode("utf-8")
+    assert "sk-or-" not in response.content.decode("utf-8")
+
+
+@pytest.mark.django_db
+def test_two_run_exports_of_an_unchanged_run_are_byte_identical(api_client, member, experiment):
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    first = api_client.get(f"/api/pipeline-runs/{run.pk}/export/").content
+    second = api_client.get(f"/api/pipeline-runs/{run.pk}/export/").content
+    assert first == second
+
+
+@pytest.mark.django_db
+def test_an_unknown_run_export_format_is_a_400(api_client, member, experiment):
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export/?format=xml")
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_a_run_export_survives_a_path_format_suffix(api_client, member, experiment):
+    """The actual bug `ExportContentNegotiationMixin` (shared with
+    `ExperimentViewSet.export`, see `test_export_survives_a_path_format_suffix`)
+    guards against, now proven at THIS route too: `DefaultRouter` generates a
+    format-SUFFIX route for every action (e.g. `GET .../export.csv`), which
+    passes `format` as a URL kwarg and used to raise `TypeError` (a 500)
+    wherever an action had no such parameter.
+    """
+    run = experiment.runs.get()
+    api_client.force_authenticate(user=member)
+    response = api_client.get(f"/api/pipeline-runs/{run.pk}/export.csv")
+    assert response.status_code == 200
+    assert response["Content-Type"] == "application/zip"
+
+
+@pytest.mark.django_db
+def test_build_run_bundle_has_every_section_with_no_key_missing(experiment):
+    """Finding 4, task 5 review round: no test pinned `build_run_bundle`'s
+    OWN top-level key set — `test_a_run_export_returns_json_by_default`
+    checks only a subset via `>=`, so `taxonomy`/`systems`/`scenarios`/
+    `labels`/`prompts` were each independently deletable from it with the
+    suite still green. Mirrors `test_the_bundle_has_every_section_the_spec_names`
+    (the equivalent test for `build_bundle`) for the per-run shape instead.
+    """
+    run = experiment.runs.get()
+    bundle = build_run_bundle(run)
+    assert set(bundle) == {
+        "experiment_current",
+        "taxonomy",
+        "prompts",
+        "inputs",
+        "runs",
+        "systems",
+        "scenarios",
+        "labels",
+        "calls",
+    }
+
+
+@pytest.mark.django_db
+def test_a_run_export_carries_its_own_pinned_inputs_with_every_nested_field_populated():
+    """`build_run_bundle`'s `inputs` is `run.config` verbatim — the run's own
+    pinned snapshot, in its native (nested) shape, distinct from
+    `build_bundle`'s `run_configs` (see
+    `test_the_bundles_run_configs_pins_exact_key_sets_and_values_including_nested_fields`,
+    which checks the SAME snapshot data through that other bundle).
+
+    A review round found this test's predecessor vacuous at exactly the
+    level that mattered: with the shared `experiment` fixture's bare seed
+    system (no scenario, no few-shot, no `target_system`), `abox`/
+    `intended_hcvs` could be dropped from the scenario snapshot, a
+    few-shot's `output` could be silently omitted, and `target_system`
+    could be hard-coded to `None`, all with this test still green — none of
+    those fields were ever populated with real data to check. This builds
+    an experiment with all three actually set, and pins VALUES, not just
+    key sets, at every nesting level.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-DEEP", version="1.0", is_active=True)
+    hcv1 = HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="a", order=1)
+    hcv2 = HCV.objects.create(taxonomy=tax, hcv_id="HCV-02", name="b", order=2)
+    generation = PromptTemplate.objects.create_version(phase=2, name="dg", user_prompt="g")
+    labelling = PromptTemplate.objects.create_version(phase=3, name="dl", user_prompt="l")
+    seed = SystemDescription.objects.create(title="Oldsmar", body="A plant.", origin=Origin.SEED)
+    seed_scenario = Scenario.objects.create(
+        system_description=seed,
+        scenario_id="seed_01",
+        actor="A",
+        trigger="T",
+        standing_state="S",
+        asset="As",
+        threat="Th",
+        outcome="O",
+        narrative="N",
+        origin=Origin.SEED,
+        abox={"nodes": ["x"]},
+    )
+    seed_scenario.intended_hcvs.set([hcv1, hcv2])
+    target = SystemDescription.objects.create(title="Target", body="t", origin=Origin.MANUAL)
+    FewShotExample.objects.create(
+        phase=2, name="ex", input_text="the input", output_text="the output"
+    )
+    fewshot = FewShotExample.objects.get(name="ex")
+
+    made = Experiment.objects.create(
+        name="deep",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt=generation,
+        phase3_model="m3",
+        phase3_prompt=labelling,
+        n_systems=1,
+        n_scenarios_per_system=1,
+        target_system=target,
+    )
+    made.variants = ["A"]
+    made.save()
+    made.seed_systems.add(seed)
+    made.fewshots.add(fewshot)
+
+    run = launch(made, n_repetitions=1)[0]
+
+    bundle = build_run_bundle(run)
+    assert bundle["inputs"] == run.config
+    config = bundle["inputs"]
+    assert set(config) == {
+        "seed_systems",
+        "fewshots",
+        "target_system",
+        "generate_systems",
+        "generate_scenarios",
+        "n_systems",
+        "n_scenarios_per_system",
+    }
+
+    snapshot_system = config["seed_systems"][0]
+    assert set(snapshot_system) == {"id", "title", "slug", "body", "scenarios"}
+    assert snapshot_system["title"] == "Oldsmar"
+
+    snapshot_scenario = snapshot_system["scenarios"][0]
+    assert set(snapshot_scenario) == {
+        "scenario_id",
+        "actor",
+        "trigger",
+        "standing_state",
+        "asset",
+        "threat",
+        "outcome",
+        "narrative",
+        "intended_hcvs",
+        "abox",
+    }
+    assert snapshot_scenario["intended_hcvs"] == ["HCV-01", "HCV-02"]
+    assert snapshot_scenario["abox"] == {"nodes": ["x"]}
+
+    snapshot_fewshot = config["fewshots"][0]
+    assert set(snapshot_fewshot) == {
+        "id",
+        "name",
+        "phase",
+        "is_active",
+        "input",
+        "output",
+        "input_file_id",
+        "output_file_id",
+        "input_resource_kind",
+        "output_resource_kind",
+    }
+    assert snapshot_fewshot["input"] == "the input"
+    assert snapshot_fewshot["output"] == "the output"
+    assert snapshot_fewshot["is_active"] is True
+    assert snapshot_fewshot["input_resource_kind"] is None
+    assert snapshot_fewshot["output_resource_kind"] is None
+
+    assert config["target_system"] is not None
+    assert config["target_system"]["id"] == target.pk
+    assert config["target_system"]["title"] == "Target"
+
+    # And the same data, reachable the OTHER way — build_bundle's run_configs.
+    experiment_bundle = build_bundle(made)
+    assert experiment_bundle["run_configs"] == {run.pk: run.config}
 
 
 @pytest.mark.parametrize("bad_name", ["evil\r\nSet-Cookie: x=y", 'quote"name', "slash/name"])
@@ -932,6 +1389,47 @@ def test_exporting_a_never_run_experiment_ships_empty_pinned_sections_not_an_err
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     assert "prompts.csv" in archive.namelist()
     assert "taxonomy.csv" in archive.namelist()
+
+
+@pytest.mark.django_db
+def test_a_run_with_no_snapshot_reports_its_config_absence_explicitly(
+    api_client, member, experiment
+):
+    """Finding 5, task 5 review round: a `PipelineRun` created before the
+    migration that added `config` (or by any path that bypasses `launch()`)
+    has `config == {}` — the field's bare default. Left as-is, that reads
+    identically to "this run's config was genuinely empty" (no seeds, no
+    few-shots — a real, legitimate shape `config_snapshot` itself never
+    actually produces, since it always writes all seven keys). `inputs`
+    must instead read `None`, explicitly, so a reader cannot mistake "never
+    snapshotted" for "snapshotted, nothing in it" — and the CSV export
+    (`inputs.csv`, `run_configs.csv`) must not crash on it either.
+    """
+    run = experiment.runs.get()
+    run.config = {}
+    run.save(update_fields=["config"])
+
+    api_client.force_authenticate(user=member)
+
+    run_json = api_client.get(f"/api/pipeline-runs/{run.pk}/export/").json()
+    assert run_json["inputs"] is None
+
+    run_csv = api_client.get(f"/api/pipeline-runs/{run.pk}/export/?format=csv")
+    assert run_csv.status_code == 200
+    run_archive = zipfile.ZipFile(io.BytesIO(run_csv.content))
+    assert "inputs.csv" in run_archive.namelist()
+    assert run_archive.read("inputs.csv") == b""  # no rows, no header — see _write_csv
+
+    experiment_json = api_client.get(f"/api/experiments/{experiment.pk}/export/").json()
+    assert experiment_json["run_configs"][str(run.pk)] is None
+
+    experiment_csv = api_client.get(f"/api/experiments/{experiment.pk}/export/?format=csv")
+    assert experiment_csv.status_code == 200
+    experiment_archive = zipfile.ZipFile(io.BytesIO(experiment_csv.content))
+    run_configs_rows = list(
+        csv.DictReader(io.StringIO(experiment_archive.read("run_configs.csv").decode("utf-8")))
+    )
+    assert run_configs_rows == [{"pipeline_run": str(run.pk), "config": ""}]
 
 
 def _run_another_repetition(experiment):
@@ -1012,24 +1510,18 @@ def test_the_tied_sections_order_by_an_explicit_id_tiebreaker(experiment):
         build_bundle(experiment)
 
     # `"generation_run_id" IN` (a WHERE clause) singles out `_systems`'s own
-    # query — `generation_run_id` is also just a plain SELECTed column on
-    # `_inputs`'s unrelated seed_systems query, which would otherwise match
-    # too and silently hide a dropped tiebreaker behind that query's own
-    # (unaffected) `order_by("title", "id")`.
+    # query — `build_bundle` no longer runs any other query against
+    # `corpus_systemdescription` (the old, live-reading `_inputs`/
+    # `_seed_scenarios` are gone; a run's inputs come from its pinned
+    # `PipelineRun.config` snapshot now), but this stays explicit rather
+    # than relying on that being the only such query by coincidence.
     systems_sql = next(
         q["sql"]
         for q in queries.captured_queries
         if 'FROM "corpus_systemdescription"' in q["sql"] and '"generation_run_id" IN' in q["sql"]
     )
-    # Same trap, one level deeper: a bare `'FROM "corpus_scenario"' in q["sql"]`
-    # matches `_seed_scenarios`'s query FIRST — it runs earlier, inside
-    # `_inputs`, before `_scenarios` itself ever executes — and that query's
-    # `WHERE ... generation_run_id IS NULL` shape happens to carry the exact
-    # same `order_by(...)` call, so it would silently pass even with
-    # `_scenarios`'s OWN tiebreaker removed. `"corpus_scenario"."generation_run_id" IN`
-    # (an INNER JOIN's IN clause) is unique to `_scenarios`'s query;
-    # `_seed_scenarios`'s uses `generation_run_id IS NULL` instead and never
-    # matches this substring.
+    # Same reasoning, one level deeper: `"corpus_scenario"."generation_run_id"
+    # IN` (an INNER JOIN's IN clause) is unique to `_scenarios`'s query.
     scenarios_sql = next(
         q["sql"]
         for q in queries.captured_queries

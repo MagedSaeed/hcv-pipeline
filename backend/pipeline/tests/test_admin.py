@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
 
-from pipeline.admin import ExperimentAdmin, PhaseRunAdmin
+from pipeline.admin import ExperimentAdmin, PhaseRunAdmin, PipelineRunAdmin
 from pipeline.models import Experiment
 from pipeline.orchestration import launch
 from prompts.models import PromptTemplate
@@ -22,6 +22,17 @@ def test_phase_run_admin_lists_the_progress_counters():
     assert "completed_children" in PhaseRunAdmin.list_display
     assert "failed_children" in PhaseRunAdmin.list_display
     assert "progress" in PhaseRunAdmin.list_display
+
+
+def test_pipeline_run_admin_config_is_read_only():
+    """Round 6 review, finding 1: `PipelineRunAdmin` was a bare `ModelAdmin`,
+    so its JSONField `config` — the pinned snapshot both execution and
+    `validate_snapshot` trust as authoritative — rendered as an editable
+    textarea in the admin. That was a live hand-edit route to a dishonest
+    snapshot (e.g. a lying `input_resource_kind`) that value validation
+    alone cannot distinguish from an honest one, since a hand edit produces
+    the identical shape. Read-only closes the write path instead."""
+    assert "config" in PipelineRunAdmin.readonly_fields
 
 
 @pytest.fixture

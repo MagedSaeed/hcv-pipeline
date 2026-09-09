@@ -277,6 +277,37 @@ def test_finishing_fails_a_run_that_had_a_failed_child(_client, run, scenario):
     assert "1" in finished.error
 
 
+@pytest.mark.django_db
+def test_finishing_never_overwrites_a_cancelled_run(_client, run, scenario):
+    """Archive-fidelity fix, task 5 follow-up: this is the function that
+    writes the FINAL status of a fan-out `run_labelling` just finished, and
+    an operator's `POST .../cancel/` can land in the database at any point
+    while that fan-out is still running (the cancel action's own caveat: it
+    does not interrupt a worker already executing, so the worker's
+    remaining writes — individual `LLMCall` rows, the counters below — may
+    still land). What must never happen is the run's FINAL status silently
+    flipping away from CANCELLED to COMPLETED/FAILED here — that would
+    misreport a deliberately-cancelled run as one that ran to completion or
+    failed on its own. A failed call is archived first, so this proves the
+    guard checks the run's OWN current status, not merely "were there zero
+    calls" — the same shape `failed_calls` would otherwise report FAILED for.
+    """
+    _client.fail_next("boom")
+    label_scenario(run, scenario)
+    run.status = PhaseRun.Status.CANCELLED
+    run.error = "Cancelled by operator."
+    run.completed_children = 0
+    run.failed_children = 0
+    run.save(update_fields=["status", "error", "completed_children", "failed_children"])
+
+    finished = finish_labelling_run(run)
+
+    assert finished.status == PhaseRun.Status.CANCELLED
+    assert finished.error == "Cancelled by operator."
+    assert finished.completed_children == 0
+    assert finished.failed_children == 0
+
+
 @pytest.mark.django_db(transaction=True)
 def test_a_persist_failure_is_recorded_without_raising_or_lying_about_parsing(
     _client, run, scenario

@@ -3,12 +3,20 @@ import json
 import pytest
 
 from core.keys import MissingAPIKey
-from corpus.models import Origin, Scenario, SystemDescription
+from corpus.models import (
+    FewShotExample,
+    Origin,
+    ResourceFile,
+    ResourceKind,
+    Scenario,
+    SystemDescription,
+)
 from llm.fake import FakeLLMClient
 from pipeline.clients import reset_llm_client, set_llm_client
 from pipeline.generation import run_phase2
 from pipeline.models import Experiment, PhaseRun
 from prompts.models import PromptTemplate
+from prompts.rendering import format_hcv_table
 from taxonomy.models import HCV, Taxonomy
 
 CARD = {
@@ -71,7 +79,18 @@ def make_run(experiment, taxonomy, template, variant="A"):
 
     A PhaseRun with no pipeline_run is the ad-hoc iterate-mode path and falls
     back to defaults — which would silently ignore target_system.
+
+    The `PipelineRun` this creates carries a real `config` snapshot, built
+    the same way `launch()` builds one — `run_phase2` now reads `seed_systems`
+    /`fewshots`/`n_systems`/`target_system`/etc from THAT pinned snapshot,
+    never live off `experiment` (see `pipeline.execution_config`), so a
+    `PipelineRun` created without one would silently execute against empty
+    defaults regardless of what `experiment` actually says. Snapshotted at
+    the moment this helper is called — every test that edits `experiment`
+    does so BEFORE calling this, never between this and `run_phase2`, so
+    that is the same moment the original live-read path would have read it.
     """
+    from pipeline.execution_config import config_snapshot
     from pipeline.models import PipelineRun
 
     highest = (
@@ -80,7 +99,11 @@ def make_run(experiment, taxonomy, template, variant="A"):
         .values_list("repetition_index", flat=True)
         .first()
     ) or 0
-    pipeline_run = PipelineRun.objects.create(experiment=experiment, repetition_index=highest + 1)
+    pipeline_run = PipelineRun.objects.create(
+        experiment=experiment,
+        repetition_index=highest + 1,
+        config=config_snapshot(experiment),
+    )
     return PhaseRun.objects.create(
         pipeline_run=pipeline_run,
         phase=2,
@@ -482,6 +505,257 @@ def test_run_phase2_does_not_re_execute_a_finished_run(
     assert again.status == status
     assert _client.calls == []
     assert again.calls.count() == 0
+
+
+@pytest.mark.django_db
+def test_run_phase2_does_not_resurrect_a_cancelled_run(_client, experiment, taxonomy, template):
+    """`PhaseRun.is_terminal` now treats CANCELLED as terminal too (task 5
+    review round), precisely so `run_phase2` hard-stops here: an operator's
+    `POST .../cancel/` on a run a worker is about to pick up must not be
+    resurrected into a real, brand-new provider call the moment that worker
+    gets to it — nothing is queued on `_client`, so if this actually tried
+    to call the provider it would raise "no queued response left" instead
+    of quietly returning.
+    """
+    phase_run = make_run(experiment, taxonomy, template)
+    phase_run.status = PhaseRun.Status.CANCELLED
+    phase_run.error = "Cancelled by operator."
+    phase_run.save(update_fields=["status", "error"])
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.CANCELLED
+    assert result.error == "Cancelled by operator."
+    assert _client.calls == []
+    assert result.calls.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_fewshot_referencing_a_taxonomy_resource_still_leaks_via_the_snapshot_path(
+    _client, experiment, taxonomy, template
+):
+    """The isolation guarantee, re-verified through the NEW snapshot-reading
+    path (task 5 review round, finding 1): `config_snapshot` captures
+    `input_resource_kind`/`output_resource_kind` specifically so
+    `prompts.rendering._fewshot_rows`' variant-A taxonomy-resource guard
+    still fires when a run executes against its PINNED config instead of
+    the live experiment — losing that would silently widen Run A's
+    taxonomy exposure the moment a few-shot referencing the taxonomy was
+    used through `run_phase2` rather than `build_phase2_context` directly.
+    Mirrors `prompts.tests.test_isolation
+    .test_no_hcv_survives_via_a_fewshot_file_pointing_at_a_taxonomy_resource`,
+    end to end through `run_phase2` this time, via `make_run` (which now
+    snapshots the experiment the same way `launch()` does).
+    """
+    resource = ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    FewShotExample.objects.create(phase=2, name="leaky", input_file=resource, output_text="ok")
+    experiment.fewshots.add(FewShotExample.objects.get(name="leaky"))
+
+    phase_run = make_run(experiment, taxonomy, template, variant="A")
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "leaky" in result.error
+    assert "TaxonomyLeak" in result.error
+    # Refused before any provider call was ever made.
+    assert _client.calls == []
+
+
+@pytest.mark.django_db
+def test_a_snapshot_missing_a_guard_relevant_field_fails_the_run_not_renders(
+    _client, experiment, taxonomy, template
+):
+    """THE reviewer's exact probe, task 5 second review round: a few-shot
+    dict lacking `input_resource_kind` — the precise shape a bug in
+    `config_snapshot` produced one round earlier — used to be read with a
+    permissive `.get("input_resource_kind")` default, silently switching
+    OFF `prompts.rendering._fewshot_rows`' variant-A taxonomy-resource
+    guard. A TAXONOMY-kind resource's text then rendered into a Run A
+    prompt and the run completed successfully: a taxonomy leak into the
+    unbiased variant, invisible in the results — the precise failure the
+    isolation guarantee's layers of guards exist to prevent.
+
+    `execution_config.validate_snapshot` now fails CLOSED instead: every
+    field a guard depends on is required, so this malformed snapshot —
+    missing exactly the field the exploit needed — must fail the run
+    outright, before any provider call, rather than quietly rendering with
+    the guard disabled.
+    """
+    resource = ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    FewShotExample.objects.create(phase=2, name="leaky", input_file=resource, output_text="ok")
+    experiment.fewshots.add(FewShotExample.objects.get(name="leaky"))
+
+    phase_run = make_run(experiment, taxonomy, template, variant="A")
+    # Corrupt the pinned snapshot into the exact malformed shape the exploit
+    # needed: the few-shot dict is present, but missing `input_resource_kind`.
+    pipeline_run = phase_run.pipeline_run
+    del pipeline_run.config["fewshots"][0]["input_resource_kind"]
+    pipeline_run.save(update_fields=["config"])
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "MalformedSnapshot" in result.error
+    # The leak this exact defect used to allow: refused before any provider
+    # call was made, so a taxonomy-kind resource's text never reached a
+    # rendered prompt at all, let alone the model.
+    assert _client.calls == []
+    assert result.calls.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("lying_value", ["", "prose", "TAXONOMY", 0, False])
+def test_a_snapshot_with_a_lying_resource_kind_fails_the_run_not_renders(
+    _client, experiment, taxonomy, template, lying_value
+):
+    """Round 6 review, finding 1 (the blocker): the reviewer re-ran the same
+    exploit as the test above, but with `input_resource_kind` PRESENT — not
+    missing — and LYING: `""`, `"prose"`, wrong-case `"TAXONOMY"`, `0`, and
+    `False` all rendered a TAXONOMY-kind resource's text into a Run A prompt
+    and the run COMPLETED, because shape-only validation (the previous
+    round's fix) only checks the key exists, never that its value is
+    honest — every one of these reads as "no file backing" to
+    `_fewshot_rows`' variant-A guard, same as the missing-key case did.
+
+    `validate_snapshot` now checks `input_resource_kind` against the real
+    `ResourceKind` choices, so all five of these must fail the run outright,
+    before any provider call — the same proof as the missing-key test above,
+    for a present-but-dishonest value instead of an absent one. (A bare
+    `None` is deliberately NOT one of these values — see
+    `test_execution_config.py::test_a_null_resource_kind_remains_legitimately_valid`
+    for why that one is closed a different way.)
+    """
+    resource = ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    FewShotExample.objects.create(phase=2, name="leaky", input_file=resource, output_text="ok")
+    experiment.fewshots.add(FewShotExample.objects.get(name="leaky"))
+
+    phase_run = make_run(experiment, taxonomy, template, variant="A")
+    pipeline_run = phase_run.pipeline_run
+    pipeline_run.config["fewshots"][0]["input_resource_kind"] = lying_value
+    pipeline_run.save(update_fields=["config"])
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "MalformedSnapshot" in result.error
+    # The leak this exact defect used to allow: refused before any provider
+    # call was made, so a taxonomy-kind resource's text never reached a
+    # rendered prompt at all, let alone the model.
+    assert _client.calls == []
+    assert result.calls.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_file_backed_fewshot_with_its_kind_nulled_fails_the_run_not_renders(
+    _client, experiment, taxonomy, template
+):
+    """Coordinator follow-up after the value-validation round: closing the
+    lying-`None` case by making `PipelineRunAdmin.config` read-only alone
+    rests on trusting `config_snapshot` to always keep `input_file_id` and
+    `input_resource_kind` in lock-step — and a writer that drops or nulls
+    exactly the kind while the file id survives is precisely the bug that
+    caused the ORIGINAL Run A leak, one review round earlier. This plan has
+    now been bitten by "trust the other side of this boundary" twice.
+
+    Proof, held to the same bar as the earlier exploit probes: a snapshot
+    with `input_file_id` PRESENT (a real TAXONOMY-kind resource) but
+    `input_resource_kind` nulled out, on variant A. The pairing check
+    (`_require_file_kind_pairing`) must refuse this before any provider
+    call — FAILED, `MalformedSnapshot`, and ZERO archived `LLMCall` rows,
+    exactly the bar the missing-key and lying-value probes were both held
+    to above.
+    """
+    resource = ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    FewShotExample.objects.create(phase=2, name="leaky", input_file=resource, output_text="ok")
+    experiment.fewshots.add(FewShotExample.objects.get(name="leaky"))
+
+    phase_run = make_run(experiment, taxonomy, template, variant="A")
+    pipeline_run = phase_run.pipeline_run
+    # Confirm the snapshot really does carry the file id before corrupting
+    # only the kind — otherwise this would not be testing the pairing check
+    # at all, just a bare missing/lying kind again.
+    assert pipeline_run.config["fewshots"][0]["input_file_id"] == resource.pk
+    pipeline_run.config["fewshots"][0]["input_resource_kind"] = None
+    pipeline_run.save(update_fields=["config"])
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "MalformedSnapshot" in result.error
+    assert _client.calls == []
+    assert result.calls.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_bare_empty_config_refuses_to_execute_rather_than_using_adhoc_defaults(
+    _client, experiment, taxonomy, template
+):
+    """A `PipelineRun.config` of `{}` — the field's bare default, meaning
+    "never actually snapshotted" (a pre-migration row, or any path that
+    bypasses `launch()`) — used to fall through every permissive `.get(key,
+    default)` in the old reader and execute as if it were a legitimate
+    ad-hoc (iterate-mode) run: `n_systems=3`, no seeds, no few-shots,
+    silently substituting a DIFFERENT configuration than the one the
+    experiment actually pins. An orchestrated run (one WITH a
+    `pipeline_run`) whose config does not validate must refuse to execute
+    at all, not guess. Round 6 review, finding 4: the failure message must
+    also say this run PREDATES the snapshot feature and needs re-launching,
+    not just "does not match the shape" — this is the single most likely
+    malformed config in practice, an ordinary pre-migration row, not
+    corruption.
+    """
+    phase_run = make_run(experiment, taxonomy, template)
+    phase_run.pipeline_run.config = {}
+    phase_run.pipeline_run.save(update_fields=["config"])
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "MalformedSnapshot" in result.error
+    assert "predates the config-snapshot feature" in result.error
+    assert _client.calls == []
+
+
+@pytest.mark.django_db
+def test_a_deleted_target_system_fails_cleanly_before_any_provider_call(
+    _client, experiment, taxonomy, template
+):
+    """Finding 6, task 5 second review round: a `target_system` deleted
+    between launch and execution used to fail only AFTER a real provider
+    call was made and paid for (inside `_persist`, once the response with
+    bare scenarios came back), with an opaque `DoesNotExist:
+    SystemDescription matching query does not exist.` `resolve_generation_config`
+    now checks existence up front, before any call, and names what is
+    actually missing.
+    """
+    target = SystemDescription.objects.create(title="Oldsmar", body="x", origin=Origin.SEED)
+    experiment.generate_systems = False
+    experiment.target_system = target
+    experiment.save()
+
+    phase_run = make_run(experiment, taxonomy, template)
+    target_id = target.pk
+    # Simulate the target being removed from the experiment and then
+    # deleted, after this run's snapshot already pinned it.
+    experiment.target_system = None
+    experiment.save()
+    target.delete()
+
+    result = run_phase2(phase_run)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "ReferencedRowMissing" in result.error
+    assert "Oldsmar" in result.error
+    assert str(target_id) in result.error
+    assert _client.calls == []
 
 
 @pytest.mark.django_db

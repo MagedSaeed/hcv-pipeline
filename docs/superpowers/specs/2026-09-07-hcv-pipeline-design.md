@@ -409,16 +409,51 @@ POST   /api/prompts/{id}/preview/             → exact rendered system+user str
 GET    /api/models/                           OpenRouter model list, cached 1h
 
 CRUD   /api/experiments/
-POST   /api/experiments/{id}/run/             {n_repetitions} → batch mode
+POST   /api/experiments/{id}/run/             {n_repetitions} → batch mode; 202
+                                              carries the cancel caveat below
 GET    /api/experiments/{id}/export/          ?format=json|csv
 
+GET    /api/pipeline-runs/                    one row per repetition; ?experiment=
+GET    /api/pipeline-runs/{id}/               status, progress, own pinned config
+DELETE /api/pipeline-runs/{id}/               409 while pending/queued/running
+POST   /api/pipeline-runs/{id}/cancel/        pending/queued/running → cancelled;
+                                              does not interrupt a worker already
+                                              executing it, only marks the run (and
+                                              its open phase runs) dead so it can
+                                              be deleted
+GET    /api/pipeline-runs/{id}/export/        ?format=json|csv — one repetition,
+                                              carrying that run's own config
+
 POST   /api/phase-runs/                       ad-hoc single phase → iterate mode
-GET    /api/phase-runs/{id}/                  status polling
+GET    /api/phase-runs/{id}/                  status polling; ?pipeline_run=&phase=
+                                              &variant=&status=&experiment=
 POST   /api/phase-runs/{id}/retry/
 GET    /api/phase-runs/{id}/calls/            LLMCall inspector
 
 GET    /api/labels/                           ?scenario=&phase_run=
 ```
+
+A repetition (`PipelineRun`) is never edited over the API — deletion is the
+one exception, and it is refused while a worker may still hold the run
+(QUEUED or RUNNING). `cancel` is the route out of a run stuck in either of
+those states with no worker coming for it (a broker that accepted a task and
+then died, say): it marks the run, and every phase run under it that is not
+already terminal, CANCELLED, which is a genuinely terminal status (nothing
+re-drives a cancelled run through the ordinary execution path). It does
+**not** reach into a worker already executing — any write that worker is
+mid-way through may still land after `cancel` returns. The same caveat is
+surfaced in `run`'s own 202 body, not only at cancel time, so an operator
+learns it the moment they start a batch.
+
+`Experiment` stays completely unrestricted to edit, at any time, whether or
+not it has runs — nothing freezes it. What keeps an already-launched run's
+record truthful despite that is `PipelineRun.config`: a snapshot of the
+seven fields that live only on `Experiment` (`seed_systems`, `fewshots`,
+`target_system`, `generate_systems`, `generate_scenarios`, `n_systems`,
+`n_scenarios_per_system`), pinned once at launch and read back at BOTH
+render time and export time — never re-read from the experiment afterward.
+Editing an experiment while a run sits QUEUED cannot change what that run
+prompts a model with, nor what its export reports it prompted with.
 
 `POST /api/prompts/{id}/preview/` renders against a chosen experiment
 configuration and returns the literal strings that would be sent. This is the
@@ -431,29 +466,58 @@ the run that produced it, via `DELETE /api/phase-runs/{id}/`, which cascades.
 
 ### Export contents
 
-`GET /api/experiments/{id}/export/` returns everything needed to reconstruct
-the experiment without database access:
+Two routes share one assembly. `GET /api/experiments/{id}/export/` covers
+every repetition the experiment has ever run; `GET
+/api/pipeline-runs/{id}/export/` covers exactly one. Both return everything
+needed to reconstruct their scope without database access:
 
 ```
-experiment      config, model ids, temperatures, toggles, counts, N
-taxonomy        the pinned version, all 21 rows verbatim
-prompts         each pinned template, at the version used
-inputs          seed systems and few-shot pairs as they were rendered from
-runs            per repetition and variant: status, timings, tokens, cost
-systems         generated system descriptions
-scenarios       card fields, narrative, origin, source run and variant
-labels          hcv, evidence, rationale, source, and the call that produced it
-calls           every LLMCall in full — both rendered prompts, the complete
-                request and response JSON, parse errors, and the projected
-                model, finish_reason, tokens, cost and latency
+experiment_current   the experiment's CURRENT, live, editable configuration —
+                      model ids, temperatures, toggles, counts, N. Named
+                      "current" deliberately: it is NOT what any particular
+                      run used, since Experiment stays freely editable even
+                      after it has runs. What a run actually used is below.
+taxonomy              every taxonomy actually pinned by a phase run in scope,
+                      all 21 rows verbatim
+prompts               each pinned template, at the version used
+runs                  per repetition and variant: status, timings, tokens, cost
+run_configs           experiment-level export only — one entry per
+                      repetition, keyed by its PipelineRun id: the seed
+                      systems (with their own expert scenario pack, resolved
+                      text), few-shots (resolved text), target system, and
+                      the generate/count toggles, exactly as PINNED at that
+                      repetition's launch. Two repetitions of the same
+                      experiment can carry genuinely different snapshots if
+                      the experiment was edited between the two launches.
+inputs                per-run export only — the ONE run's own entry from
+                      run_configs above, unambiguous at this scope
+systems               generated system descriptions
+scenarios             card fields, narrative, origin, source run and variant
+labels                hcv, evidence, rationale, source, and the call that
+                      produced it
+calls                 every LLMCall in full — both rendered prompts, the
+                      complete request and response JSON, parse errors, and
+                      the projected model, finish_reason, tokens, cost and
+                      latency
 ```
 
-`format=json` nests this as one bundle. `format=csv` emits a zip of flat tables
-on the same content, with `calls.csv` carrying the prompt and response columns
-in full rather than truncated — the export is an archival record, so size is
-the wrong thing to optimise. Deferred metrics and the offline ontology step both
-read this bundle, which is why it carries the prompts and calls rather than only
-the labels.
+There is no single, experiment-wide `inputs` section on the experiment-level
+export: with N repetitions potentially pinning N different configurations,
+no one section could represent "the" inputs without arbitrarily picking one
+and silently losing the rest — `run_configs` carries each repetition's own
+instead. Both the archived `rendered_system_prompt`/`rendered_user_prompt`
+on every call and each run's own entry in `run_configs`/`inputs` are read
+from what was PINNED at that run's launch, never from `experiment_current`
+— the prompt a variant actually saw and the structured record of what it was
+given always agree with each other, and an edit to the experiment after
+launch can never retroactively change either.
+
+`format=json` nests this as one bundle. `format=csv` emits a zip of flat
+tables on the same content, with `calls.csv` carrying the prompt and
+response columns in full rather than truncated — the export is an archival
+record, so size is the wrong thing to optimise. Deferred metrics and the
+offline ontology step both read this bundle, which is why it carries the
+prompts and calls rather than only the labels.
 
 ## 10. Screens
 

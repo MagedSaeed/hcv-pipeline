@@ -122,6 +122,22 @@ def test_a_run_reports_its_status_and_progress(api_client, member, executed):
 
 
 @pytest.mark.django_db
+def test_a_run_reports_its_own_pinned_config(api_client, member, executed):
+    """Finding 4, task 5 review round: `config` was added to
+    `PipelineRunSerializer` with no test ever checking it actually reaches
+    the API response — deletable with the suite still green. Per the user's
+    own framing ("browsing an older run should show its previous config"),
+    it belongs on the plain run resource, not just the export.
+    """
+    api_client.force_authenticate(user=member)
+    row = api_client.get(f"/api/pipeline-runs/{executed.pk}/").json()
+
+    assert row["config"] == executed.config
+    assert row["config"]["n_systems"] == 1
+    assert row["config"]["seed_systems"] == []
+
+
+@pytest.mark.django_db
 def test_runs_filter_by_experiment(api_client, member, executed, noise):
     api_client.force_authenticate(user=member)
     body = api_client.get(f"/api/pipeline-runs/?experiment={executed.experiment_id}").json()
@@ -247,13 +263,19 @@ def test_staff_deletes_a_finished_run_and_its_output_goes_with_it(api_client, st
 
 @pytest.mark.django_db
 def test_a_run_in_flight_cannot_be_deleted(api_client, staff, executed):
-    """A worker still holds it; deleting rows out from under it is a crash, not a delete."""
+    """A worker still holds it; deleting rows out from under it is a crash,
+    not a delete. The 409 now also names the actual escape route (task 5,
+    step 3) — cancel it first — instead of advertising an affordance that
+    did not exist until this task built it.
+    """
     api_client.force_authenticate(user=staff)
     for state in (PipelineRun.Status.QUEUED, PipelineRun.Status.RUNNING):
         executed.status = state
         executed.save(update_fields=["status"])
         response = api_client.delete(f"/api/pipeline-runs/{executed.pk}/")
         assert response.status_code == 409
+        assert response.json()["code"] == "run_in_flight"
+        assert f"/api/pipeline-runs/{executed.pk}/cancel/" in str(response.json())
         assert PipelineRun.objects.filter(pk=executed.pk).exists()
 
 
@@ -309,6 +331,36 @@ def test_phase_runs_filter_by_pipeline_run(api_client, member, executed, noise):
         executed.phase_runs.values_list("id", flat=True)
     )
     assert api_client.get("/api/phase-runs/").json()["count"] == 4
+
+
+@pytest.mark.django_db
+def test_phase_runs_filter_by_experiment(api_client, member, executed, noise):
+    """`?experiment=` exists on `/api/pipeline-runs/` (see
+    `test_runs_filter_by_experiment`) and used to be silently ABSENT here:
+    `/api/phase-runs/?experiment=<id>` returned 200 with every phase run of
+    every experiment, no matter which one was asked for — the natural
+    isolation query, "all variant-A phase-2 runs of experiment X", could not
+    be expressed at all. `noise` supplies a second experiment's phase runs
+    so this has a genuine non-match to exclude.
+    """
+    api_client.force_authenticate(user=member)
+    body = api_client.get(f"/api/phase-runs/?experiment={executed.experiment_id}").json()
+    assert body["count"] == 2
+    assert {row["id"] for row in body["results"]} == set(
+        executed.phase_runs.values_list("id", flat=True)
+    )
+    # Without the filter both experiments' phase runs show up — proves the
+    # count of 2 above came from the filter actually excluding `noise`'s,
+    # not from there only ever being one experiment's phase runs at all.
+    assert api_client.get("/api/phase-runs/").json()["count"] == 4
+
+
+@pytest.mark.django_db
+def test_a_nonexistent_experiment_id_matches_nothing_on_phase_runs(
+    api_client, member, executed, noise
+):
+    api_client.force_authenticate(user=member)
+    assert api_client.get("/api/phase-runs/?experiment=0").json()["count"] == 0
 
 
 @pytest.mark.django_db
@@ -499,5 +551,80 @@ def test_retry_refuses_when_the_generation_run_is_gone(api_client, staff, execut
     response = api_client.post(f"/api/phase-runs/{labelling.pk}/retry/")
 
     assert response.status_code == 409
+    assert response.json()["code"] == "missing_source_phase_run"
     assert "no longer exists" in str(response.json()).lower()
     assert labelling.calls.filter(pk=call.pk).exists()
+
+
+@pytest.mark.django_db
+def test_retry_refuses_a_run_still_in_flight(api_client, staff, executed):
+    """The view-level half of the whole-branch review's proof (see
+    `test_orchestration.test_retry_refuses_a_run_still_in_flight` for the
+    direct-call half): a phase-3 run RUNNING with total=5 completed=0
+    failed=1 (a worker mid fan-out) used to let `POST .../retry/` return
+    200, delete the one archived failed call, and flip the run RUNNING ->
+    completed with incoherent counters. `retry_failed`'s own `RunInFlight`
+    now surfaces here as a 409 via `Conflict`, with a distinct `code` from
+    every other 409 this API raises.
+    """
+    labelling = executed.phase_runs.get(phase=3)
+    labelling.status = PhaseRun.Status.RUNNING
+    labelling.total_children = 5
+    labelling.completed_children = 0
+    labelling.failed_children = 1
+    labelling.save(
+        update_fields=["status", "total_children", "completed_children", "failed_children"]
+    )
+    call = labelling.calls.get()
+    call.parsed_ok = False
+    call.parse_error = "timeout"
+    call.save()
+    call_pk = call.pk
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(f"/api/phase-runs/{labelling.pk}/retry/")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "retry_run_in_flight"
+    assert LLMCall.objects.filter(pk=call_pk).exists()
+    call.refresh_from_db()
+    assert call.parsed_ok is False
+    assert call.parse_error == "timeout"
+    labelling.refresh_from_db()
+    assert labelling.status == PhaseRun.Status.RUNNING
+    assert labelling.total_children == 5
+    assert labelling.completed_children == 0
+    assert labelling.failed_children == 1
+
+
+@pytest.mark.django_db
+def test_retry_refuses_a_cancelled_run_with_a_distinct_code(api_client, staff, executed):
+    """The view-level half of `test_orchestration
+    .test_retry_refuses_a_cancelled_run_with_an_accurate_message`: a run
+    cancelled mid-flight (failed calls already archived) gets its own 409
+    `code`, distinct from `retry_run_in_flight` — the two are different
+    facts ("a worker may still be executing" vs. "this was deliberately
+    stopped and will never finish").
+    """
+    labelling = executed.phase_runs.get(phase=3)
+    call = labelling.calls.get()
+    call.parsed_ok = False
+    call.parse_error = "timeout"
+    call.save()
+    call_pk = call.pk
+    labelling.status = PhaseRun.Status.CANCELLED
+    labelling.error = "Cancelled by operator."
+    labelling.save(update_fields=["status", "error"])
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(f"/api/phase-runs/{labelling.pk}/retry/")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "retry_run_cancelled"
+    assert LLMCall.objects.filter(pk=call_pk).exists()
+    call.refresh_from_db()
+    assert call.parsed_ok is False
+    assert call.parse_error == "timeout"
+    labelling.refresh_from_db()
+    assert labelling.status == PhaseRun.Status.CANCELLED
+    assert labelling.error == "Cancelled by operator."

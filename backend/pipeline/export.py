@@ -23,6 +23,20 @@ empty for the same reason. The export still succeeds (200, a valid JSON body
 or a valid zip) rather than refusing outright — an operator exporting a
 freshly-created experiment should see "nothing has run yet", not an error
 that looks like the export itself is broken.
+
+Two bundle shapes share almost all of their assembly: `build_bundle`
+(everything an experiment has ever run) and `build_run_bundle` (one
+repetition). Both read `taxonomy`/`prompts`/`systems`/`scenarios`/`labels`/
+`calls` off the same `phase_run_ids`-scoped helpers below — the only
+difference is which `PhaseRun` ids that scope resolves to. `build_bundle`'s
+`experiment_current` section is deliberately named to make clear it is the
+experiment's CURRENT, live, editable configuration — never mistake it for
+what any particular run actually used, which is `runs[N]["config"]` (or,
+for `build_run_bundle`, the top-level `inputs`) instead. See
+`PipelineRun.config`'s own docstring for why: `Experiment` may be (and is
+meant to stay) freely editable even after it has runs, so only a value
+PINNED at launch, never re-read afterward, can be trusted to describe what a
+past run actually saw.
 """
 
 import csv
@@ -37,18 +51,6 @@ from corpus.models import Scenario, SystemDescription
 from pipeline.models import Label, LLMCall, PhaseRun, PipelineRun
 from prompts.models import PromptTemplate
 from taxonomy.models import Taxonomy
-
-SECTIONS = (
-    "experiment",
-    "taxonomy",
-    "prompts",
-    "inputs",
-    "runs",
-    "systems",
-    "scenarios",
-    "labels",
-    "calls",
-)
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -169,8 +171,11 @@ def _prompts(phase_run_ids):
 
 def _system_row(s):
     """One `SystemDescription` row, generated or seed/manual alike — reused
-    by `_systems` and `_inputs`'s `seed_systems`/`target_system` so every
-    place a system appears in the bundle carries the same fields.
+    by `_systems` so every GENERATED system in the bundle carries the same
+    fields. Not used for a run's seed/target systems: those are read off the
+    run's own `config` snapshot instead (see `pipeline.orchestration
+    ._snapshot_system`), which carries a deliberately leaner, resolved-text
+    shape, not this row's full audit trail.
     """
     return {
         "id": s.pk,
@@ -190,8 +195,7 @@ def _system_row(s):
 
 def _scenario_row(s):
     """One `Scenario` row, generated or seed/manual alike — reused by
-    `_scenarios` and `_inputs`'s `seed_scenarios` for the same reason as
-    `_system_row`.
+    `_scenarios` for the same reason as `_system_row`.
     """
     return {
         "id": s.pk,
@@ -215,57 +219,15 @@ def _scenario_row(s):
     }
 
 
-def _seed_scenarios(experiment):
-    """The Phase-1 expert seed pack attached to this experiment's inputs.
-
-    `_scenarios` only covers what THIS experiment's own runs generated
-    (`generation_run_id__in=phase_run_ids`) — without this, the seed pack,
-    the material the whole experiment is anchored on, is invisible in the
-    archive beyond its seed systems' bare title and body, and scoring a
-    generated label against the expert ground truth is impossible from the
-    bundle alone. Scoped to `generation_run__isnull=True` so a scenario THIS
-    experiment generated against its own `target_system` (already covered by
-    `_scenarios`) is not duplicated here.
-    """
-    system_ids = set(experiment.seed_systems.values_list("id", flat=True))
-    if experiment.target_system_id:
-        system_ids.add(experiment.target_system_id)
-    if not system_ids:
-        return []
-    return [
-        _scenario_row(s)
-        for s in Scenario.objects.filter(
-            system_description_id__in=system_ids, generation_run__isnull=True
-        )
-        .select_related("generation_run")
-        .prefetch_related("intended_hcvs")
-        .order_by("system_description_id", "order", "scenario_id", "id")
-    ]
-
-
-def _inputs(experiment):
-    return {
-        "seed_systems": [
-            _system_row(s)
-            for s in experiment.seed_systems.select_related("generation_run").order_by(
-                "title", "id"
-            )
-        ],
-        "seed_scenarios": _seed_scenarios(experiment),
-        "fewshots": [
-            {
-                "id": f.pk,
-                "phase": f.phase,
-                "name": f.name,
-                "input": f.resolved_input,
-                "output": f.resolved_output,
-            }
-            for f in experiment.fewshots.all()
-        ],
-        "target_system": (
-            _system_row(experiment.target_system) if experiment.target_system_id else None
-        ),
-    }
+# `_seed_scenarios`/`_inputs` used to live here, reading `experiment
+# .seed_systems`/`.fewshots`/`.target_system` LIVE — exactly the hole the
+# whole-branch review proved: `PATCH {"seed_systems": [other]}` on a
+# COMPLETED experiment changed what an already-finished run's export
+# reported. There is no live equivalent anymore. What a run's inputs
+# actually were is `PipelineRun.config`, pinned once at launch by
+# `pipeline.execution_config.config_snapshot` and never re-read afterward —
+# `build_bundle` surfaces it per-run on each `runs[]` entry, and
+# `build_run_bundle` surfaces one run's own copy of it directly as `inputs`.
 
 
 def _call_sums(phase_run_ids):
@@ -287,10 +249,26 @@ def _call_sums(phase_run_ids):
     }
 
 
-def _runs(experiment, phase_run_ids):
+def _runs(pipeline_runs, phase_run_ids):
+    """One row per (pipeline run, phase run) pair.
+
+    Takes the `PipelineRun`s directly (already fetched/scoped by the
+    caller — `build_bundle` passes every repetition of one experiment,
+    `build_run_bundle` passes a single one-element list) rather than an
+    `experiment`, so this same function serves both bundle shapes.
+
+    Does NOT carry `config` on these rows — a review round found it
+    repeated identically across every phase-run row of the same pipeline
+    run (2-4x, one per phase run), a meaningful fraction of a small
+    bundle's size for a value that is often the largest single field in it.
+    `build_bundle` carries it once per repetition instead, in its own
+    `run_configs` section (keyed by `pipeline_run` id); `build_run_bundle`
+    already carries the one run it covers at `inputs` and needs nothing
+    extra here.
+    """
     call_sums = _call_sums(phase_run_ids)
     rows = []
-    for run in PipelineRun.objects.filter(experiment=experiment).prefetch_related("phase_runs"):
+    for run in pipeline_runs:
         for phase_run in run.phase_runs.all():
             sums = call_sums.get(
                 phase_run.pk, {"prompt_tokens": 0, "completion_tokens": 0, "cost": None}
@@ -438,15 +416,88 @@ def _calls(phase_run_ids):
     ]
 
 
+def _run_config_or_none(config):
+    """`None`, explicitly, for a run with no snapshot at all — never a bare
+    `{}` a reader could mistake for "this run's config was genuinely empty".
+
+    `PipelineRun.config` defaults to `{}`; the ONLY code path that ever
+    writes anything else is `launch()` via `execution_config.config_snapshot`,
+    which always writes all seven keys (empty lists/`None` for an unset
+    one, but never an empty dict outright). So a bare `{}` can only mean one
+    thing: this row predates the migration that added the field, or was
+    created some other way that bypassed `launch()` — "never snapshotted",
+    not "snapshotted with nothing in it".
+    """
+    return config if config else None
+
+
 def build_bundle(experiment):
-    """Everything needed to reconstruct this experiment without the database."""
+    """Everything needed to reconstruct this experiment without the database.
+
+    Covers every repetition this experiment has ever run. `experiment_current`
+    is the experiment's CURRENT, live, editable configuration — named that way
+    deliberately, so it is never mistaken for what any one run actually used.
+    That is `run_configs[pipeline_run_id]`: each repetition's own pinned
+    snapshot, which can legitimately differ from another repetition's if the
+    experiment was edited between two launches (see `PipelineRun.config`).
+    Carried ONCE per repetition here, in its own section, rather than
+    repeated on every one of that repetition's phase-run rows in `runs[]`
+    (a review round found that repeated a meaningful fraction of a small
+    bundle's total size for what is often its single largest field).
+
+    There is deliberately no single, experiment-wide `inputs` section here —
+    with N repetitions potentially pinning N different configurations, no
+    one section could represent "the" inputs without arbitrarily picking
+    one and silently losing the rest. `build_run_bundle` (one repetition)
+    does carry that singular `inputs`, because it is unambiguous there.
+    """
     phase_run_ids = _phase_run_ids(experiment)
+    # Materialised, not left as a lazy queryset: `_runs` below iterates it
+    # fully (populating Django's own queryset result cache), so the second
+    # iteration for `run_configs` costs no extra query either way — `list()`
+    # here just makes that explicit rather than relying on the caching
+    # behaviour being understood by whoever reads this next.
+    pipeline_runs = list(
+        PipelineRun.objects.filter(experiment=experiment).prefetch_related("phase_runs")
+    )
     return {
-        "experiment": _experiment(experiment),
+        "experiment_current": _experiment(experiment),
         "taxonomy": _taxonomy(phase_run_ids),
         "prompts": _prompts(phase_run_ids),
-        "inputs": _inputs(experiment),
-        "runs": _runs(experiment, phase_run_ids),
+        "runs": _runs(pipeline_runs, phase_run_ids),
+        "run_configs": {run.pk: _run_config_or_none(run.config) for run in pipeline_runs},
+        "systems": _systems(phase_run_ids),
+        "scenarios": _scenarios(phase_run_ids),
+        "labels": _labels(phase_run_ids),
+        "calls": _calls(phase_run_ids),
+    }
+
+
+def build_run_bundle(run):
+    """Everything needed to reconstruct ONE repetition without the database.
+
+    Scoped to `run`'s own phase runs only — never another repetition's — and
+    to `run.config`, the configuration PINNED at launch, surfaced here as
+    `inputs` — `None`, explicitly, rather than a bare `{}`, for a run that
+    predates the snapshot feature (see `_run_config_or_none`). Never the
+    experiment's current, live fields: that is what let a `PATCH` to a
+    completed experiment change what its export reported (see
+    `PipelineRun.config`'s docstring). `experiment_current` is included too,
+    the same live section `build_bundle` carries, purely for a reader's
+    context — it is not what this run used.
+
+    Reuses every per-`phase_run_ids` helper `build_bundle` already has
+    (`_taxonomy`/`_prompts`/`_systems`/`_scenarios`/`_labels`/`_calls`/
+    `_runs`) rather than a second, parallel assembly — only the scope
+    (this run's phase runs, not every phase run of the experiment) differs.
+    """
+    phase_run_ids = list(PhaseRun.objects.filter(pipeline_run=run).values_list("pk", flat=True))
+    return {
+        "experiment_current": _experiment(run.experiment),
+        "taxonomy": _taxonomy(phase_run_ids),
+        "prompts": _prompts(phase_run_ids),
+        "inputs": _run_config_or_none(run.config),
+        "runs": _runs([run], phase_run_ids),
         "systems": _systems(phase_run_ids),
         "scenarios": _scenarios(phase_run_ids),
         "labels": _labels(phase_run_ids),
@@ -466,7 +517,15 @@ def _as_rows(section):
     fixes that specific case, but this keeps the NEXT heterogeneous section
     from hitting the same bug rather than trusting every future section to
     stay uniform by convention.
+
+    `None` (a run-level export's `inputs` for a run with no snapshot at
+    all — see `_run_config_or_none`) writes zero rows, the same as an empty
+    list — matching `_write_csv`'s existing "an empty section writes no
+    header line at all" convention rather than raising on `for entry in
+    None`.
     """
+    if section is None:
+        return [], []
     if isinstance(section, dict):
         section = [section]
     rows = []
@@ -515,30 +574,49 @@ def _taxonomy_csv_rows(taxonomies):
     ]
 
 
+def _run_configs_csv_rows(run_configs):
+    """Flatten `run_configs` (`{pipeline_run_id: config-or-None}`) into one
+    row per repetition, tagged with which one it came from — the same join
+    problem `_taxonomy_csv_rows` solves for taxonomy rows, one level up. A
+    `None` config (no snapshot at all — see `_run_config_or_none`) stays a
+    `None` value in its own `config` column rather than silently vanishing
+    into blank cells across every OTHER column, so "never snapshotted" and
+    "snapshotted, nothing in it" both stay distinguishable after flattening.
+    """
+    rows = []
+    for pipeline_run_id, config in run_configs.items():
+        if config is None:
+            rows.append({"pipeline_run": pipeline_run_id, "config": None})
+        else:
+            rows.append({"pipeline_run": pipeline_run_id, **config})
+    return rows
+
+
 def write_csv_zip(bundle):
     """One CSV per section, zipped. Long columns are written in full.
 
-    `inputs` is split into one file per input KIND (seed systems, seed
-    scenarios, few-shots, target system) rather than a single `inputs.csv`:
-    they are genuinely different shapes, and concatenating them used to raise
-    `ValueError: dict contains fields not in fieldnames` — a live 500 — the
-    moment an experiment had both a seed system and a few-shot, since every
-    fixture in this test suite happened to have zero few-shots and never hit
-    it. `taxonomy` is flattened the same way, for the same reason (see
-    `_taxonomy_csv_rows`).
+    Iterates whatever sections `bundle` actually has, in the order
+    `build_bundle`/`build_run_bundle` built it — the two shapes differ (only
+    `build_bundle`'s carries `run_configs`; only `build_run_bundle`'s
+    carries a singular `inputs`), and this stays correct for either without
+    needing to know which one it was handed. `taxonomy` and `run_configs`
+    are the two sections flattened first (see `_taxonomy_csv_rows`/
+    `_run_configs_csv_rows`): both are dict/list shapes that would otherwise
+    either lose which taxonomy/run a row belongs to, or (for `run_configs`,
+    a dict KEYED by id) turn into one bizarre row with pipeline_run ids as
+    column names. Every other section — `inputs` included, a single dict
+    for one run's pinned config, nested `scenarios` and all — goes through
+    the generic path: `_as_rows` already turns a bare dict into one row and
+    JSON-encodes any nested value into its cell, the same way
+    `experiment_current`'s `variants` list already was.
     """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in SECTIONS:
+        for name, section in bundle.items():
             if name == "taxonomy":
-                _write_csv(archive, "taxonomy", _taxonomy_csv_rows(bundle["taxonomy"]))
-            elif name == "inputs":
-                inputs = bundle["inputs"]
-                _write_csv(archive, "inputs_seed_systems", inputs["seed_systems"])
-                _write_csv(archive, "inputs_seed_scenarios", inputs["seed_scenarios"])
-                _write_csv(archive, "inputs_fewshots", inputs["fewshots"])
-                target = inputs["target_system"]
-                _write_csv(archive, "inputs_target_system", [target] if target else [])
+                _write_csv(archive, "taxonomy", _taxonomy_csv_rows(section))
+            elif name == "run_configs":
+                _write_csv(archive, "run_configs", _run_configs_csv_rows(section))
             else:
-                _write_csv(archive, name, bundle[name])
+                _write_csv(archive, name, section)
     return buffer.getvalue()

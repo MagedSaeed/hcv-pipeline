@@ -2,10 +2,11 @@ import json
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from core.keys import MissingAPIKey
 from core.models import AppSettings
-from corpus.models import Origin, Scenario, SystemDescription
+from corpus.models import FewShotExample, Origin, Scenario, SystemDescription
 from llm.fake import FakeLLMClient
 from pipeline.clients import reset_llm_client, set_llm_client
 from pipeline.generation import run_phase2
@@ -13,6 +14,8 @@ from pipeline.labelling import finish_labelling_run
 from pipeline.labelling import label_scenario as real_label_scenario
 from pipeline.models import Experiment, Label, LLMCall, PhaseRun, PipelineRun
 from pipeline.orchestration import (
+    RunCancelled,
+    RunInFlight,
     execute_pipeline_run,
     launch,
     retry_failed,
@@ -68,6 +71,215 @@ def experiment(db):
         n_systems=1,
         n_scenarios_per_system=1,
     )
+
+
+@pytest.mark.django_db
+def test_the_pinned_snapshot_is_authoritative_not_the_live_experiment_at_execution_time():
+    """The exact proof a review round found: `generation._build_context`
+    used to read `seed_systems`/`n_systems`/`fewshots`/`target_system` off
+    the LIVE `Experiment` at EXECUTION time, while `PipelineRun.config` was
+    only ever pinned at LAUNCH time — so editing the experiment while a run
+    sat QUEUED, then executing it, made the archive contradict itself: the
+    run's own `inputs.n_systems` (its pinned snapshot) said one thing while
+    its archived `rendered_user_prompt` said another. That is the opposite
+    of the brief's own words — "makes the structured record agree with the
+    text record already archived verbatim" — task 5's entire point.
+
+    Launch pins `n_systems=1`, `seed_systems=[OLDSEED]`. The experiment is
+    then edited to `n_systems=42`, `seed_systems=[NEWSEED]` WHILE the run
+    sits QUEUED (never re-launched). The rendered prompt must still read
+    "n=1 seeds=OLDSEED" — what was pinned — and the run's own export
+    (`build_run_bundle`) must agree with it.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-SNAP", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="x", order=1)
+    echo_template = PromptTemplate.objects.create_version(
+        phase=2,
+        name="echo",
+        user_prompt=(
+            "n={{ n_systems }} seeds={% for s in seed_systems %}{{ s.title }}{% endfor %}"
+        ),
+    )
+    labelling_template = PromptTemplate.objects.create_version(phase=3, name="l", user_prompt="l")
+    old_seed = SystemDescription.objects.create(title="OLDSEED", body="old", origin=Origin.SEED)
+    snapshot_experiment = Experiment.objects.create(
+        name="snapshot-authority",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt=echo_template,
+        phase3_model="m3",
+        phase3_prompt=labelling_template,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+    snapshot_experiment.variants = ["A"]
+    snapshot_experiment.save()
+    snapshot_experiment.seed_systems.add(old_seed)
+
+    run = launch(snapshot_experiment, n_repetitions=1)[0]
+    assert run.config["n_systems"] == 1
+    assert run.config["seed_systems"][0]["title"] == "OLDSEED"
+
+    # Edit the experiment WHILE the run sits QUEUED (PENDING here — the
+    # distinction between the two does not matter for this proof, neither
+    # is re-launched) — matching the proof scenario exactly.
+    new_seed = SystemDescription.objects.create(title="NEWSEED", body="new", origin=Origin.SEED)
+    snapshot_experiment.n_systems = 42
+    snapshot_experiment.seed_systems.set([new_seed])
+    snapshot_experiment.save()
+
+    fake = FakeLLMClient()
+    fake.queue(GENERATED)
+    set_llm_client(fake)
+    execute_pipeline_run(run)
+
+    generation = run.phase_runs.get(phase=2, variant="A")
+    call = generation.calls.get()
+    assert call.rendered_user_prompt == "n=1 seeds=OLDSEED"
+    assert "42" not in call.rendered_user_prompt
+    assert "NEWSEED" not in call.rendered_user_prompt
+
+    # The structured record agrees with the text record just archived.
+    from pipeline.export import build_run_bundle
+
+    bundle = build_run_bundle(run)
+    assert bundle["inputs"]["n_systems"] == 1
+    assert bundle["inputs"]["seed_systems"][0]["title"] == "OLDSEED"
+
+
+@pytest.mark.django_db
+def test_a_malformed_snapshot_fails_the_run_instead_of_stranding_it(experiment):
+    """Finding 2, task 5 second review round: `resolve_generation_config`
+    used to be called OUTSIDE `run_phase2`'s try/except, before the
+    RUNNING-transition write. A malformed snapshot (`MalformedSnapshot`,
+    or a query error — anything at all) then escaped `run_phase2` entirely,
+    breaking its own docstring's promise ("Always ends in a terminal
+    status") and `execute_pipeline_run`'s one level up: the `PipelineRun`
+    stayed RUNNING forever (set BEFORE `run_phase2` was ever called), this
+    `PhaseRun` stayed PENDING (never reaching its own RUNNING write, which
+    happens after config resolution), and a re-drive would hit the
+    idempotency guard and merely re-roll it up — stranded with no way out
+    except `cancel`. Now the whole batch reaches a real terminal state.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    run.config = {}
+    run.save(update_fields=["config"])
+
+    execute_pipeline_run(run)  # must not raise
+
+    run.refresh_from_db()
+    assert run.status == PipelineRun.Status.FAILED
+    assert run.finished_at is not None
+    for phase_run in run.phase_runs.all():
+        assert phase_run.is_terminal
+    generation = run.phase_runs.get(phase=2)
+    assert generation.status == PhaseRun.Status.FAILED
+    assert "MalformedSnapshot" in generation.error
+
+
+@pytest.mark.django_db
+def test_an_inactive_fewshot_is_snapshotted_but_never_rendered():
+    """Finding 5, task 5 review round: `config_snapshot` had no `is_active`
+    filter while the live renderer always did (`experiment.fewshots.filter(
+    phase=2, is_active=True)`), so the snapshot could list a few-shot the
+    model never actually saw. Fixed by recording `is_active` on every
+    snapshotted row (active or not) and filtering on it at READ time
+    (`pipeline.execution_config._snapshot_fewshots`) instead of at snapshot
+    time — the archive still shows BOTH few-shots, a complete historical
+    record of what existed at launch, but only the active one reaches the
+    rendered prompt.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-ACTIVE", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-01", name="x", order=1)
+    echo_template = PromptTemplate.objects.create_version(
+        phase=2, name="echo-fs", user_prompt="{% for f in fewshots %}{{ f.input }}{% endfor %}"
+    )
+    labelling_template = PromptTemplate.objects.create_version(phase=3, name="l", user_prompt="l")
+    fewshot_experiment = Experiment.objects.create(
+        name="active-filter",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt=echo_template,
+        phase3_model="m3",
+        phase3_prompt=labelling_template,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+    fewshot_experiment.variants = ["A"]
+    fewshot_experiment.save()
+    FewShotExample.objects.create(
+        phase=2, name="dead", input_text="DEAD", output_text="o", is_active=False
+    )
+    FewShotExample.objects.create(
+        phase=2, name="live", input_text="LIVE", output_text="o", is_active=True
+    )
+    fewshot_experiment.fewshots.set(FewShotExample.objects.filter(name__in=["dead", "live"]))
+
+    run = launch(fewshot_experiment, n_repetitions=1)[0]
+    # The snapshot itself lists BOTH, with their real is_active values —
+    # a complete record, not pre-filtered away.
+    snapshotted = {f["name"]: f["is_active"] for f in run.config["fewshots"]}
+    assert snapshotted == {"dead": False, "live": True}
+
+    fake = FakeLLMClient()
+    fake.queue(json.dumps({"system_descriptions": []}))
+    set_llm_client(fake)
+    execute_pipeline_run(run)
+
+    generation = run.phase_runs.get(phase=2, variant="A")
+    call = generation.calls.get()
+    assert call.rendered_user_prompt == "LIVE"
+    assert "DEAD" not in call.rendered_user_prompt
+
+
+@pytest.mark.django_db
+def test_phase_3_fewshots_are_read_from_the_snapshot_and_actually_rendered():
+    """Finding 5, task 5 second review round: phase-3 few-shots read from a
+    snapshot were entirely untested — forcing `resolve_labelling_fewshots`
+    to return `[]` unconditionally left the whole suite green. Proven here
+    end to end: a phase-3 few-shot's resolved `input` text must actually
+    reach the archived `rendered_user_prompt` of a labelling call, the
+    phase-3 sibling of `test_the_pinned_snapshot_is_authoritative_...` and
+    `test_an_inactive_fewshot_is_snapshotted_but_never_rendered` above,
+    which only ever exercised phase 2.
+    """
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-P3FS", version="1.0", is_active=True)
+    HCV.objects.create(taxonomy=tax, hcv_id="HCV-07", name="x", order=7)
+    generation_template = PromptTemplate.objects.create_version(phase=2, name="g3", user_prompt="g")
+    echo_labelling_template = PromptTemplate.objects.create_version(
+        phase=3,
+        name="echo-l",
+        user_prompt="{% for f in fewshots %}{{ f.input }}{% endfor %} {{ scenario.scenario_id }}",
+    )
+    fewshot_experiment = Experiment.objects.create(
+        name="p3-fewshots",
+        taxonomy=tax,
+        phase2_model="m2",
+        phase2_prompt=generation_template,
+        phase3_model="m3",
+        phase3_prompt=echo_labelling_template,
+        n_systems=1,
+        n_scenarios_per_system=1,
+    )
+    fewshot_experiment.variants = ["A"]
+    fewshot_experiment.save()
+    FewShotExample.objects.create(
+        phase=3, name="p3-example", input_text="P3EXAMPLE", output_text="o"
+    )
+    fewshot_experiment.fewshots.set(FewShotExample.objects.filter(name="p3-example"))
+
+    fake = FakeLLMClient()
+    fake.queue(GENERATED)
+    fake.queue(LABELLED)
+    set_llm_client(fake)
+    run = launch(fewshot_experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    call = labelling.calls.get()
+    assert "P3EXAMPLE" in call.rendered_user_prompt
 
 
 @pytest.mark.django_db
@@ -178,6 +390,42 @@ def test_labelling_is_skipped_when_generation_failed(_client, experiment):
 
     labelling = run.phase_runs.get(phase=3, variant="A")
     assert labelling.status == PhaseRun.Status.CANCELLED
+
+
+@pytest.mark.django_db
+def test_execute_pipeline_run_does_not_overwrite_an_already_cancelled_labelling_reason(experiment):
+    """The "generation did not complete -> skip labelling" branch used to
+    write CANCELLED + a generic "Skipped: generation did not complete."
+    unconditionally, using a `labelling` object fetched BEFORE
+    `run_phase2(generation)` ran — stale by the time this branch executes if
+    an operator's `POST .../cancel/` (which writes a MORE SPECIFIC
+    "Cancelled by operator." error) landed in the real wall-clock time that
+    call took. Simulated here by having `run_phase2` itself, as a side
+    effect, mark the labelling run CANCELLED with that specific reason
+    before failing generation — exactly the concurrent-cancel timing this
+    guards against. The status was already correct either way (both are
+    CANCELLED); what this proves is the more specific reason survives.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    labelling = run.phase_runs.get(phase=3, variant="A")
+
+    def fake_run_phase2(phase_run):
+        PhaseRun.objects.filter(pk=labelling.pk).update(
+            status=PhaseRun.Status.CANCELLED, error="Cancelled by operator."
+        )
+        phase_run.status = PhaseRun.Status.FAILED
+        phase_run.error = "boom"
+        phase_run.save(update_fields=["status", "error"])
+        return phase_run
+
+    with patch("pipeline.orchestration.run_phase2", side_effect=fake_run_phase2):
+        execute_pipeline_run(run)
+
+    labelling.refresh_from_db()
+    assert labelling.status == PhaseRun.Status.CANCELLED
+    assert labelling.error == "Cancelled by operator."
 
 
 @pytest.mark.django_db
@@ -394,6 +642,114 @@ def test_retry_on_a_cancelled_run_is_a_true_no_op(_client, experiment):
 
 
 @pytest.mark.django_db
+def test_retry_refuses_a_cancelled_run_with_an_accurate_message(_client, experiment):
+    """Finding 3, task 5 review round: retrying a run cancelled MID-FLIGHT
+    (with failed calls already archived, unlike the zero-call case above)
+    used to raise `RunInFlight` — "a worker may still be writing to it,
+    wait for it to finish" — which is FALSE for a run that was deliberately
+    cancelled and will never finish on its own. `RunCancelled` names the
+    real reason, and the archived failed call must survive untouched, the
+    same guarantee `RunInFlight`'s own case already proves.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    system = SystemDescription.objects.create(title="Riverbend", body="b", origin=Origin.SEED)
+    scenario = Scenario.objects.create(
+        system_description=system, scenario_id="sc_01", origin=Origin.SEED, order=1
+    )
+    failed_call = LLMCall.objects.create(
+        phase_run=labelling,
+        sequence=1,
+        scenario=scenario,
+        parsed_ok=False,
+        parse_error="timeout",
+    )
+    labelling.status = PhaseRun.Status.CANCELLED
+    labelling.error = "Cancelled by operator."
+    labelling.save(update_fields=["status", "error"])
+
+    with pytest.raises(RunCancelled):
+        retry_failed(labelling)
+
+    assert LLMCall.objects.filter(pk=failed_call.pk).exists()
+    failed_call.refresh_from_db()
+    assert failed_call.parse_error == "timeout"
+    labelling.refresh_from_db()
+    assert labelling.status == PhaseRun.Status.CANCELLED
+    assert labelling.error == "Cancelled by operator."
+
+
+@pytest.mark.django_db
+def test_retry_survives_one_scenario_exploding_mid_retry(_client, experiment):
+    """The third instance of a stranding shape this plan has already been
+    bitten by twice — `queue_runs`' missing broker guard, and
+    `resolve_generation_config` sitting outside `run_phase2`'s try/except.
+    `retry_failed` used to call `label_scenario` directly, with no guard, in
+    a loop that had ALREADY DELETED the failed calls it was about to
+    re-drive. One scenario raising (`label_scenario`'s own call to
+    `get_llm_client().complete()` is unguarded — `OpenRouterClient`
+    deliberately raises `SecretLeak` if a key-shaped string reaches the
+    request body, the same case `run_labelling`'s own guard exists for) used
+    to propagate straight out of `retry_failed`: the exploding scenario's
+    archived call already deleted with nothing put back in its place,
+    `finish_labelling_run` never reached, the run left mid-retry with stale
+    counters and status.
+
+    Now `_label_scenario_or_archive_failure` — the SAME function
+    `run_labelling`'s own fan-out uses, not a second hand-written copy —
+    guards `retry_failed`'s loop too: a failure is recorded against that one
+    scenario, the OTHER scenario in the same retry batch still succeeds, and
+    the run reaches a real terminal status with counters that match what is
+    actually archived.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    _client.queue(GENERATED_TWO_SCENARIOS)
+    _client.fail_next("boom1")
+    _client.fail_next("boom2")
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    assert labelling.status == PhaseRun.Status.FAILED
+    assert labelling.calls.count() == 2
+    original_call_ids = set(labelling.calls.values_list("pk", flat=True))
+
+    def exploding(phase_run, scenario, sequence=1):
+        if scenario.scenario_id == "sc_01":
+            raise RuntimeError("simulated explosion mid-retry")
+        return real_label_scenario(phase_run, scenario, sequence=sequence)
+
+    _client.queue(LABELLED)  # sc_02's successful re-drive
+    with patch("pipeline.orchestration.label_scenario", side_effect=exploding):
+        retried = retry_failed(labelling)
+
+    # A real terminal status, not left mid-retry (one scenario still failed).
+    assert retried.status == PhaseRun.Status.FAILED
+
+    # Counters match what is ACTUALLY archived after the retry.
+    assert retried.completed_children == 1
+    assert retried.failed_children == 1
+    assert retried.calls.count() == 2
+
+    exploded = retried.calls.get(scenario__scenario_id="sc_01")
+    assert exploded.parsed_ok is False
+    assert "simulated explosion mid-retry" in exploded.parse_error
+
+    survived = retried.calls.get(scenario__scenario_id="sc_02")
+    assert survived.parsed_ok is True
+
+    # No archived call was destroyed without a replacement: the two
+    # ORIGINAL (pre-retry) rows are gone — retry_failed deletes what it
+    # re-drives — but two NEW rows, one per scenario, took their place.
+    # Never zero for either scenario.
+    assert not LLMCall.objects.filter(pk__in=original_call_ids).exists()
+    assert Label.objects.filter(phase_run=labelling).count() == 1
+
+
+@pytest.mark.django_db
 def test_retry_on_a_healthy_run_is_a_true_no_op(_client, experiment):
     """I2, the other direction: retrying a run with nothing failed must not
     make any provider call at all — proven here by leaving nothing queued."""
@@ -413,6 +769,59 @@ def test_retry_on_a_healthy_run_is_a_true_no_op(_client, experiment):
     assert retried.status == PhaseRun.Status.COMPLETED
     assert retried.calls.count() == calls_before
     assert Label.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_retry_does_not_destroy_an_archived_call_whose_scenario_was_deleted(_client, experiment):
+    """Round 6 review, finding 2 — CONFIRMED, pre-existing: `LLMCall.scenario`
+    is SET_NULL, and the admin permits deleting a GENERATED scenario. The
+    naive `retry_failed` built its re-drive list by dropping any failed call
+    whose `scenario_id` was null — silently excluding it from the re-drive —
+    but then deleted `failed_calls(phase_run)` WHOLESALE, that orphaned call
+    included: the only archived record of that failure was destroyed with
+    nothing left in its place, and the run flipped FAILED -> COMPLETED with
+    counters (1/0/0) that no longer described anything real. That is
+    precisely what `retry_failed`'s own docstring says must never happen —
+    an archived call consumed without a replacement.
+
+    sc_01 and sc_02 both fail; sc_01's scenario is then deleted (mirroring
+    the admin's `Scenario` delete, which is exactly what a generated
+    scenario permits). Retrying must leave sc_01's failed call archived
+    untouched — there is no scenario left to re-label it against — while
+    sc_02, still live, is retried normally. The run must still read FAILED,
+    not a false COMPLETED.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    _client.queue(GENERATED_TWO_SCENARIOS)
+    _client.fail_next("timeout")  # sc_01 fails
+    _client.fail_next("timeout")  # sc_02 fails
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    assert labelling.status == PhaseRun.Status.FAILED
+    assert labelling.calls.count() == 2
+
+    orphaned_call = labelling.calls.get(scenario__scenario_id="sc_01")
+    orphaned_call.scenario.delete()
+    orphaned_call.refresh_from_db()
+    assert orphaned_call.scenario_id is None  # SET_NULL fired, as it does in production
+
+    _client.queue(LABELLED)  # sc_02's retry succeeds
+    retried = retry_failed(labelling)
+
+    # sc_01's failure still counts: the run must not silently flip healthy.
+    assert retried.status == PhaseRun.Status.FAILED
+    assert retried.failed_children == 1
+    assert retried.completed_children == 1
+    # The orphaned call was never deleted and nothing replaced it — the
+    # exact guarantee `_label_scenario_or_archive_failure`'s own docstring
+    # names: "a retry must never be able to consume [an archived call]
+    # without leaving a replacement in its place."
+    assert LLMCall.objects.filter(pk=orphaned_call.pk).exists()
+    assert labelling.calls.count() == 2
+    assert Label.objects.count() == 1  # sc_02's label, from the successful retry
 
 
 @pytest.mark.django_db
@@ -590,6 +999,76 @@ def test_roll_up_of_zero_phase_runs_is_not_vacuously_completed(experiment):
 
 
 @pytest.mark.django_db
+def test_roll_up_never_overwrites_a_cancelled_run(experiment):
+    """Archive-fidelity fix, task 5 follow-up: `roll_up` used to re-derive
+    `PipelineRun.status` purely from its phase runs' current statuses, with
+    no idea CANCELLED could mean "an operator deliberately stopped this",
+    not "still in progress". Every phase run CANCELLED is neither `<=
+    {COMPLETED}` nor in `roll_up`'s own `in_progress` set, so it fell into
+    the FAILED branch — silently turning a deliberate cancellation into a
+    false "this run failed" the moment anything (a stale worker's
+    `execute_pipeline_run` loop reaching its own `roll_up(pipeline_run)`
+    call, say) rolled it up again afterward. Those are different, and
+    wrong-in-a-different-way, facts about what happened to the experiment.
+    Once CANCELLED, nothing should re-derive this run's status from its
+    children again — proven here by cancelling AFTER already setting
+    the phase runs to a shape that would otherwise roll up FAILED.
+    """
+    run = launch(experiment, n_repetitions=1)[0]
+    run.phase_runs.filter(phase=2, variant="A").update(status=PhaseRun.Status.COMPLETED)
+    run.phase_runs.filter(phase=2, variant="B").update(status=PhaseRun.Status.FAILED)
+    # Without the CANCELLED guard, {COMPLETED, FAILED, PENDING, ...} is
+    # neither all-COMPLETED nor free of in-progress statuses in a way that
+    # matters here — FAILED alone (not in `in_progress`) is enough to send
+    # an un-cancelled run down the FAILED branch, which is exactly the
+    # regression this test must catch.
+    run.status = PipelineRun.Status.CANCELLED
+    run.finished_at = None
+    run.save(update_fields=["status", "finished_at"])
+
+    rolled = roll_up(run)
+
+    assert rolled.status == PipelineRun.Status.CANCELLED
+    assert rolled.finished_at is None
+
+
+@pytest.mark.django_db
+def test_execute_pipeline_run_does_not_resurrect_a_run_cancelled_after_it_was_fetched(experiment):
+    """Finding 2, task 5 review round: the CANCELLED sweep missed
+    `execute_pipeline_run` itself. Its entry guard used to read the
+    possibly-STALE in-memory `pipeline_run.status` and then unconditionally
+    write RUNNING — precisely what would defeat `roll_up`'s own CANCELLED
+    guard one call later, since `roll_up` would then read back RUNNING (this
+    function's own write) and re-derive a status from the phase runs as if
+    nothing had been cancelled. The window is widest in `run_experiment
+    --inline`, which loops over `PipelineRun` objects fetched back at
+    `launch()` time — repetition N's copy can be stale for however long
+    repetitions 1..N-1 take to run. Reproduced here directly: a worker
+    fetches a QUEUED run into `stale`, an operator cancels the REAL row in
+    the database, then the worker's stale copy is finally handed to
+    `execute_pipeline_run`.
+    """
+    run = launch(experiment, n_repetitions=1)[0]
+    run.status = PipelineRun.Status.QUEUED
+    run.save(update_fields=["status"])
+    run.phase_runs.update(status=PhaseRun.Status.QUEUED)
+
+    stale = PipelineRun.objects.get(pk=run.pk)  # the worker's own, soon-stale copy
+    assert stale.status == PipelineRun.Status.QUEUED
+
+    run.status = PipelineRun.Status.CANCELLED
+    run.finished_at = timezone.now()
+    run.save(update_fields=["status", "finished_at"])
+    run.phase_runs.update(status=PhaseRun.Status.CANCELLED, error="Cancelled by operator.")
+
+    execute_pipeline_run(stale)
+
+    run.refresh_from_db()
+    assert run.status == PipelineRun.Status.CANCELLED
+    assert set(run.phase_runs.values_list("status", flat=True)) == {PhaseRun.Status.CANCELLED}
+
+
+@pytest.mark.django_db
 def test_launch_with_no_key_configured_creates_nothing_and_raises(_client, experiment, settings):
     """C2a: spec §12 — with no key from either source, launching must fail
     before any HTTP call is made, and (because `launch` is atomic and resolves
@@ -720,6 +1199,41 @@ def test_run_labelling_does_not_re_execute_a_finished_run(_client, experiment):
     assert again.finished_at == finished_at
     assert LLMCall.objects.count() == calls_before
     assert Label.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_run_labelling_does_not_resurrect_a_cancelled_run(_client, experiment):
+    """The phase-3 sibling of `test_generation
+    .test_run_phase2_does_not_resurrect_a_cancelled_run`: `is_terminal`
+    deliberately excludes CANCELLED (so `retry_failed` can legitimately
+    re-drive a run cancelled because its generation never completed — but
+    that path never calls `run_labelling`, only `label_scenario` +
+    `finish_labelling_run` directly, so this guard cannot interfere with
+    it). Without it, a `phase_run` an operator cancelled moments before a
+    worker reaches it gets resurrected: a whole new fan-out of real provider
+    calls. Nothing is queued on `_client`, so any such call would raise.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    labelling.status = PhaseRun.Status.CANCELLED
+    labelling.error = "Cancelled by operator."
+    labelling.total_children = 3
+    labelling.completed_children = 1
+    labelling.failed_children = 0
+    labelling.save(
+        update_fields=["status", "error", "total_children", "completed_children", "failed_children"]
+    )
+
+    result = run_labelling(labelling)
+
+    assert result.status == PhaseRun.Status.CANCELLED
+    assert result.error == "Cancelled by operator."
+    assert result.total_children == 3
+    assert result.completed_children == 1
+    assert _client.calls == []
+    assert result.calls.count() == 0
 
 
 @pytest.mark.django_db
@@ -901,6 +1415,64 @@ def test_retry_failed_reconciles_completed_children_too(_client, experiment):
     assert retried.completed_children == 2
     assert retried.failed_children == 0
     assert retried.progress == {"done": 2, "total": 2, "failed": 0, "percent": 100}
+
+
+@pytest.mark.django_db
+def test_retry_refuses_a_run_still_in_flight(_client, experiment):
+    """The whole-branch review's proof, reproduced directly: a phase-3 run
+    RUNNING with total=5 completed=0 failed=1 (a worker mid fan-out) used to
+    let `retry_failed` return normally — deleting the one archived failed
+    call and flipping the run RUNNING -> completed with incoherent counters,
+    while the worker kept writing to a row now marked terminal.
+
+    `retry_failed` must raise `RunInFlight` here — called directly, not
+    through the API view — because task 2 already guarded the view layer and
+    this task's whole point is that the guard belongs INSIDE `retry_failed`
+    itself, so a management command or any other future caller is protected
+    the same way. `PhaseRunViewSet.retry`'s 409 (see test_run_api.py) is a
+    thin wrapper around this same exception.
+
+    Every value the bug destroyed is asserted survived byte-for-byte: the
+    call's pk, its `parsed_ok`/`parse_error`, and the run's own status,
+    counters and `finished_at`.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    run = launch(experiment, n_repetitions=1)[0]
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    system = SystemDescription.objects.create(title="Riverbend", body="b", origin=Origin.SEED)
+    scenario = Scenario.objects.create(
+        system_description=system, scenario_id="sc_01", origin=Origin.SEED, order=1
+    )
+    labelling.status = PhaseRun.Status.RUNNING
+    labelling.total_children = 5
+    labelling.completed_children = 0
+    labelling.failed_children = 1
+    labelling.save(
+        update_fields=["status", "total_children", "completed_children", "failed_children"]
+    )
+    failed_call = LLMCall.objects.create(
+        phase_run=labelling,
+        sequence=1,
+        scenario=scenario,
+        parsed_ok=False,
+        parse_error="timeout",
+    )
+    call_pk = failed_call.pk
+
+    with pytest.raises(RunInFlight):
+        retry_failed(labelling)
+
+    assert LLMCall.objects.filter(pk=call_pk).exists()
+    failed_call.refresh_from_db()
+    assert failed_call.parsed_ok is False
+    assert failed_call.parse_error == "timeout"
+    labelling.refresh_from_db()
+    assert labelling.status == PhaseRun.Status.RUNNING
+    assert labelling.total_children == 5
+    assert labelling.completed_children == 0
+    assert labelling.failed_children == 1
+    assert labelling.finished_at is None
 
 
 @pytest.mark.django_db

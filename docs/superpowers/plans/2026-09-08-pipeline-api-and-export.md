@@ -1800,3 +1800,172 @@ Plan 4 (the React frontend) consumes: `/api/experiments/` (+ `run`, `progress`, 
 `/api/pipeline-runs/`, `/api/phase-runs/` (+ `calls`, `retry`), `/api/labels/`,
 plus plan 1's and plan 2's endpoints. It must ship an extension allowlist with any
 ResourceFile download route (carried forward from plan 1's review).
+
+---
+
+### Task 5: Close the lifecycle seams (added after the whole-branch review)
+
+Tasks 1-4 each guarded the state transitions they owned; nobody owned the seams between
+them. The final whole-layer review found a permanent dead end, an archive that can still be
+rewritten after the fact, and a destructive action with no in-flight guard.
+
+**USER DECISION (2026-09-09), superseding this plan's first draft of step 2.** The draft froze
+an experiment's configuration once it had runs. The user rejected that framing and specified a
+better one: *"runs should keep their config data attached. That is, even if these config data
+change, browsing an older run should show its previous config."* So nothing freezes — the
+configuration is **snapshotted onto the run**, and the export reads the snapshot. The user can
+edit an experiment freely; an old run stays truthful because it carries its own copy.
+
+**Files:**
+- Modify: `backend/pipeline/models.py` (+ migrations), `backend/pipeline/orchestration.py`,
+  `backend/pipeline/views.py`, `backend/pipeline/serializers.py`, `backend/pipeline/export.py`
+- Test: `backend/pipeline/tests/test_lifecycle.py` (new), plus additions to existing files
+
+**Interfaces:**
+- Produces: `PipelineRun.config` (JSON snapshot), `PipelineRun.Status.CANCELLED`,
+  `POST /api/pipeline-runs/{id}/cancel/`, `GET /api/pipeline-runs/{id}/export/`,
+  `?experiment=` on `/api/phase-runs/`.
+
+**Deferred by ruling:** `POST /api/phase-runs/` (iterate mode, spec §5.4/§9) moves to its own
+task. Its archival design is unresolved — an ad-hoc `PhaseRun` has no experiment, and
+`_phase_run_ids` scopes on `pipeline_run__experiment`, so it can never reach a bundle as the
+export is currently scoped. Removing the freeze also relieves the workflow pressure that made
+it urgent: the user can now edit an experiment and relaunch instead.
+
+---
+
+- [ ] **Step 1: `retry_failed` must refuse a run in flight — fix it at the source**
+
+The whole-branch review proved: a phase-3 run RUNNING with `total=5 completed=0 failed=1`
+(a worker mid-fan-out), `POST .../retry/` returns **200**, **deletes archived `LLMCall` pk 4**,
+and flips the run RUNNING→`completed` with incoherent counters, while the worker keeps writing
+to a row now marked terminal.
+
+Task 2 parked "the deeper fix inside `retry_failed` is noted but not attempted — the guard is
+at one layer only". That parked ruling has stopped being acceptable: this is the same missing
+guard through a second door. Fix it **inside `retry_failed`**, so the management command and any
+future caller are protected too:
+
+```python
+class RunInFlight(RuntimeError):
+    """The run is not finished, so its archived calls are not safe to touch."""
+```
+
+`retry_failed` raises `RunInFlight` unless `phase_run.is_terminal`. The view maps it to **409**
+via the existing `Conflict`. Keep the view's phase-2 and missing-`source_phase_run` guards; they
+fire earlier and say something more specific.
+
+Test: a RUNNING phase run's archived calls survive a refused retry byte-for-byte (pks, counters,
+status, `finished_at`), and the management command is refused too.
+
+- [ ] **Step 2: Snapshot the configuration onto the run**
+
+Seven fields live only on `Experiment` and are read **live** at export time: `seed_systems`,
+`fewshots`, `target_system`, `generate_systems`, `generate_scenarios`, `n_systems`,
+`n_scenarios_per_system`. (`model`, `temperature`, `prompt_template` and `taxonomy` are already
+pinned on `PhaseRun`, and `variants` is recoverable from the phase runs' own `variant` values.)
+
+Proved on a **completed** experiment: `PATCH {"seed_systems": [other]}` → 200, and the bundle's
+`inputs.seed_systems` goes `['Oldsmar']` → `['Swapped']` with `seed_scenarios` 1 → 0. The expert
+ground-truth anchor and the record of *what variant A actually saw* both leave the archive.
+
+Add `PipelineRun.config = models.JSONField(default=dict)`, written by `launch()` inside its
+existing atomic block, alongside the phase runs it already pins.
+
+**Snapshot resolved text, not just ids.** Pinning ids alone is not enough: a seed
+`SystemDescription` is editable (`ReadOnlyIfGenerated` only protects *generated* rows), so an id
+can still point at text that has since changed. Capture, at launch:
+
+- each seed system's `id`, `title`, `slug` and `body`
+- each seed system's scenarios (the Phase-1 expert pack) with `scenario_id`, the card fields,
+  `narrative`, `intended_hcvs` and `abox`
+- each few-shot's `id`, `name`, `phase` and its **resolved** `input`/`output` text
+- `target_system` the same way as a seed system
+- the scalars: `generate_systems`, `generate_scenarios`, `n_systems`, `n_scenarios_per_system`
+
+This makes the structured record agree with the text record already archived verbatim in each
+call's `rendered_system_prompt`/`rendered_user_prompt`.
+
+`export.py`'s `_inputs` must read **the run's snapshot**, not the experiment. Where a bundle
+covers several runs, carry each run's own snapshot on its `runs[]` entry. Rename or relabel the
+bundle's `experiment` section so it is unmistakably the experiment's **current** configuration
+rather than what ran — a reader must never mistake one for the other.
+
+Tests: a full launch → `PATCH` every one of the seven fields → export, asserting the bundle
+still reports what the run actually used; a seed system's `body` edited after launch, asserting
+the snapshot keeps the original text; two runs of one experiment with a config edit between
+them, asserting each run reports its own config and the two differ.
+
+- [ ] **Step 3: A run that will never finish must have a way out**
+
+**The dead end, confirmed and permanent.** A run stuck QUEUED — the broker accepted the task
+then died, `max_attempts=1`, `catch_up=False` — has no route out across all 28 registered
+routes: `DELETE run` 409, `DELETE experiment` 409 (task 1 requires the runs gone first),
+`PATCH`/`PUT` 405, `DELETE phase-run` 405, and no `cancel` exists. Task 2's own 409 message says
+*"Wait for it to finish, or cancel it first"* — advertising an affordance never built — and
+`Experiment.name` is unique, so the operator cannot even recreate it.
+
+`PipelineRun.Status` has **no** `CANCELLED` member (`PhaseRun.Status` does). Add it, with a
+migration. Then add `POST /api/pipeline-runs/{id}/cancel/`, staff-only:
+
+- **USER DECISION:** allowed from any non-terminal state — PENDING, QUEUED **and** RUNNING. A
+  terminal run is a 409.
+- Sets the run and every non-terminal phase run under it to CANCELLED.
+- The message must be honest: cancelling marks the run dead so it can be deleted; it does
+  **not** reach into a worker still executing, whose in-flight writes may still land. Say that
+  plainly rather than implying interruption.
+
+**USER DECISION — surface this at launch, not only at cancel.** The `run` action's 202 response
+must carry the same caveat, so the operator learns when starting a batch that cancelling marks
+a run dead rather than interrupting it. Assert it in the launch test.
+
+Then make task 2's 409 message name this route.
+
+Test the full escape as one journey: launch → leave the run QUEUED (patched `async_task`) →
+`DELETE run` 409 → `cancel` 200 → `DELETE run` 204 → `DELETE experiment` 204. That journey is
+what was impossible.
+
+- [ ] **Step 4: Per-run export**
+
+**USER DECISION:** *"the export will be per run."* Add `GET /api/pipeline-runs/{id}/export/`
+with the same `?format=json|csv` contract as the experiment export, scoped to one repetition and
+carrying that run's own config snapshot. Keep the experiment-level bundle — it now contains
+every run, each with its own snapshot — so both the whole experiment and a single repetition can
+be archived.
+
+Reuse the experiment export's assembly rather than writing a second one; if the shapes differ,
+extract what they share. The same guarantees apply and must be tested at this route too: no API
+key, deterministic byte-identical output, and the isolation evidence present.
+
+- [ ] **Step 5: Two cross-task inconsistencies**
+
+- `?experiment=` exists on `pipeline-runs` and not on `phase-runs`, and the miss is **silent**:
+  `/api/phase-runs/?experiment=1` returns 200 with every phase run of every experiment, so the
+  natural isolation query — "all variant-A phase-2 runs of experiment X" — cannot be expressed.
+  Add it (`pipeline_run__experiment_id`), through `integer_param`.
+- The two 409s carry only English `detail` while the 503s carry a machine-readable `code`. Give
+  `Conflict` a `default_code` and distinct codes per case, matching the 503 pattern.
+- `LabelViewSet` alone omits explicit `permission_classes`; make it explicit so all four
+  viewsets read the same way.
+
+- [ ] **Step 6: Verify, format, lint**
+
+```bash
+cd backend && uv run pytest && uv run ruff format . && uv run ruff check --fix .
+uv run python manage.py makemigrations --check --dry-run
+uv run pytest prompts/tests/test_isolation.py -q
+```
+
+Baseline is 650 passing. Every guard added here must be verified by breaking it and watching the
+test fail — this codebase has caught six vacuous tests already.
+
+## Done when (task 5)
+
+- `retry_failed` itself refuses a run in flight; no archived call can be destroyed through any
+  caller, view or command.
+- A run carries its own configuration snapshot, so editing an experiment can never change what
+  an existing run's export reports — proven by editing all seven fields and a seed body.
+- A run stuck QUEUED or RUNNING can be cancelled, then deleted, then its experiment deleted —
+  proven as one end-to-end journey — and the caveat is surfaced at launch.
+- A single run can be exported on its own.
+- All four viewsets agree on filters, permissions and error shapes.
