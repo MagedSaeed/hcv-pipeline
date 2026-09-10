@@ -62,22 +62,25 @@ LTS concept, so those are pinned to current stable and noted as such.
 | Validation | pydantic | 2.13.5 | current stable |
 | DB (prod) | PostgreSQL | 17 | current stable major |
 | Serving | gunicorn / whitenoise | 26.2.0 / 6.12.0 | current stable |
-| Runtime | Node | **24.20.0 LTS** ("Krypton") | active LTS |
+| Runtime | Node | **22.16.0 LTS** ("Jod") | active LTS; what the build machine runs |
 | UI | react / react-dom | 19.2.8 | no LTS track |
 | Build | vite | 8.2.2 | no LTS track |
 | Routing | react-router-dom | 7.18.3 | no LTS track |
 | Styling | tailwindcss | 4.3.3 | no LTS track; CSS-first config, no `tailwind.config.js` |
 | Data fetching | @tanstack/react-query | 5.102.8 | no LTS track |
 | HTTP | axios | 1.20.0 | no LTS track |
-| Frontend tests | vitest | 4.0.6 | no LTS track; Vite-native test runner |
-| Frontend tests | @testing-library/react | 17.0.1 | no LTS track |
+| Frontend tests | vitest | 4.1.11 | no LTS track; 4.0.6 carries GHSA-5xrq-8626-4rwp (CVSS 9.8) |
+| Frontend tests | @testing-library/react | 16.3.3 | no LTS track; 17.x does not exist |
 | API mocking | msw | 2.12.4 | no LTS track; mocks at the network boundary, not by stubbing modules |
+| DOM for tests | jsdom | 29.1.1 | no LTS track; 30.x requires Node >= 22.22.2 |
+| Linter | oxlint | 1.79.0 | no LTS track |
 
-The backend rows above are pinned versions verified against the running code
-(`backend/pyproject.toml`). The frontend rows are not yet verifiable against
-anything: no `frontend/` directory and no `package.json` exist in the
-repository yet. Those versions are pinned in advance, for when that work
-starts — aspirational, not descriptive, until a frontend actually exists.
+Every row above is a pinned version verified against the running code —
+`backend/pyproject.toml` and `frontend/package.json`. Three frontend rows were
+written in advance and had to be corrected once the frontend was actually
+installed: `@testing-library/react` 17.x does not exist, `vitest` 4.0.6 carries
+a critical advisory, and Node 24.20.0 is not what the build machine runs. The
+versions above are what is installed, not what was hoped for.
 
 SQLite in development, PostgreSQL in production. Redis is required in both,
 since Django-Q2 uses it as broker. `docker-compose.yml` provisions Redis and
