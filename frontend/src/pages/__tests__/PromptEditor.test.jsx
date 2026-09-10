@@ -85,12 +85,19 @@ let templates;
 let nextTemplateId;
 let phaseRuns;
 let nextPhaseRunId;
+// Every write to /api/prompts/ (POST create, PATCH new-version) - the thing
+// backend commit 65f6387 makes provable: a refused draft preview issues
+// NEITHER, so a test can assert zero writes rather than only "the version
+// count looks the same," which a bug that both wrote AND rolled back could
+// still pass.
+let promptWriteCount;
 
 function resetFixtures() {
   templates = TEMPLATES_SEED.map((row) => ({ ...row }));
   nextTemplateId = 100;
   phaseRuns = [];
   nextPhaseRunId = 900;
+  promptWriteCount = 0;
 }
 
 // Stands in for prompts/rendering.py's render(): raises exactly the way
@@ -103,6 +110,53 @@ function fakeRender(text, { variantA }) {
     throw new Error("'taxonomy' is undefined");
   }
   return text.replace(/\{\{\s*taxonomy\s*\}\}/gi, '<TAXONOMY TABLE>');
+}
+
+// Shared by both preview routes (id-based and id-less) - one render path,
+// matching `prompts/views.py::_preview`'s own "exactly one code path"
+// design (a second, subtly different one for drafts is how this project
+// has produced taxonomy leaks before).
+function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) {
+  if (phase === 2) {
+    const variant = body.variant;
+    if (variant === 'B' && !body.taxonomy) {
+      return HttpResponse.json(
+        { detail: 'Run B is the guided variant and requires a taxonomy.' },
+        { status: 400 }
+      );
+    }
+    try {
+      const system = fakeRender(systemPrompt, { variantA: variant === 'A' });
+      const user = fakeRender(userPrompt, { variantA: variant === 'A' });
+      return HttpResponse.json({
+        system_prompt: system,
+        user_prompt: user,
+        output_schema: outputSchema,
+        leak_scan_ran: variant === 'A',
+        guarded_by: variant === 'A' ? Number(body.guard_taxonomy) || 2 : null,
+      });
+    } catch (error) {
+      return HttpResponse.json({ detail: error.message }, { status: 400 });
+    }
+  }
+
+  // Phase 3.
+  if (!body.taxonomy) {
+    return HttpResponse.json({ detail: 'Phase 3 labelling requires a taxonomy.' }, { status: 400 });
+  }
+  if (!body.scenario) {
+    return HttpResponse.json(
+      { scenario: 'Previewing a phase 3 template requires a scenario id.' },
+      { status: 400 }
+    );
+  }
+  return HttpResponse.json({
+    system_prompt: fakeRender(systemPrompt, { variantA: false }),
+    user_prompt: fakeRender(userPrompt, { variantA: false }),
+    output_schema: outputSchema,
+    leak_scan_ran: false,
+    guarded_by: null,
+  });
 }
 
 function nextVersionFor(name, phase) {
@@ -127,6 +181,7 @@ beforeEach(() => {
     }),
 
     http.post('/api/prompts/', async ({ request }) => {
+      promptWriteCount += 1;
       const body = await request.json();
       const created = {
         id: nextTemplateId++,
@@ -145,6 +200,7 @@ beforeEach(() => {
     }),
 
     http.patch('/api/prompts/:id/', async ({ request, params }) => {
+      promptWriteCount += 1;
       const existing = templates.find((t) => t.id === Number(params.id));
       if (!existing) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
       const body = await request.json();
@@ -164,50 +220,48 @@ beforeEach(() => {
       return HttpResponse.json(created, { status: 201 });
     }),
 
+    // Mirrors backend commit 65f6387: `user_prompt` present in the body
+    // means "render THIS draft", never the persisted row's own text -
+    // and, on the id-less route, `phase` stands in for the row that
+    // doesn't exist yet. Neither branch touches `templates` - a refused
+    // draft (variant A referencing taxonomy, a missing B taxonomy, a
+    // missing phase-3 scenario) writes nothing, matching
+    // `prompts/views.py::_resolve_template`'s own "never .save()'d or
+    // .create()'d" guarantee.
     http.post('/api/prompts/:id/preview/', async ({ request, params }) => {
       const template = templates.find((t) => t.id === Number(params.id));
       if (!template) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
       const body = await request.json();
+      const isDraft = typeof body.user_prompt === 'string';
+      return renderPreview({
+        phase: template.phase,
+        systemPrompt: isDraft ? (body.system_prompt ?? '') : template.system_prompt,
+        userPrompt: isDraft ? body.user_prompt : template.user_prompt,
+        outputSchema: isDraft ? (body.output_schema ?? {}) : template.output_schema,
+        body,
+      });
+    }),
 
-      if (template.phase === 2) {
-        const variant = body.variant;
-        if (variant === 'B' && !body.taxonomy) {
-          return HttpResponse.json(
-            { detail: 'Run B is the guided variant and requires a taxonomy.' },
-            { status: 400 }
-          );
-        }
-        try {
-          const system = fakeRender(template.system_prompt, { variantA: variant === 'A' });
-          const user = fakeRender(template.user_prompt, { variantA: variant === 'A' });
-          return HttpResponse.json({
-            system_prompt: system,
-            user_prompt: user,
-            output_schema: template.output_schema,
-            leak_scan_ran: variant === 'A',
-            guarded_by: variant === 'A' ? Number(body.guard_taxonomy) || 2 : null,
-          });
-        } catch (error) {
-          return HttpResponse.json({ detail: error.message }, { status: 400 });
-        }
-      }
-
-      // Phase 3.
-      if (!body.taxonomy) {
-        return HttpResponse.json({ detail: 'Phase 3 labelling requires a taxonomy.' }, { status: 400 });
-      }
-      if (!body.scenario) {
+    http.post('/api/prompts/preview/', async ({ request }) => {
+      const body = await request.json();
+      if (!body.phase) {
         return HttpResponse.json(
-          { scenario: 'Previewing a phase 3 template requires a scenario id.' },
+          { phase: 'Previewing a template with no id requires phase.' },
           { status: 400 }
         );
       }
-      return HttpResponse.json({
-        system_prompt: fakeRender(template.system_prompt, { variantA: false }),
-        user_prompt: fakeRender(template.user_prompt, { variantA: false }),
-        output_schema: template.output_schema,
-        leak_scan_ran: false,
-        guarded_by: null,
+      if (typeof body.user_prompt !== 'string') {
+        return HttpResponse.json(
+          { user_prompt: 'Previewing a template with no id requires user_prompt.' },
+          { status: 400 }
+        );
+      }
+      return renderPreview({
+        phase: body.phase,
+        systemPrompt: body.system_prompt ?? '',
+        userPrompt: body.user_prompt,
+        outputSchema: body.output_schema ?? {},
+        body,
       });
     }),
 
@@ -348,22 +402,34 @@ describe('PromptEditor', () => {
     await selectTemplate(user, 'generation-baseline');
     await user.click(screen.getByLabelText(/variant a/i));
 
-    const saveButton = screen.getByRole('button', { name: /save/i });
-    await user.click(saveButton);
+    const previewButton = screen.getByRole('button', { name: /^preview$/i });
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    // Nothing has been previewed yet - Save starts disabled, not merely
+    // "not yet clicked". Spec §10: validated BEFORE it can be saved.
+    expect(saveButton).toBeDisabled();
+
+    await user.click(previewButton);
 
     expect(await screen.findByText(/render failed/i)).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent(/'taxonomy' is undefined/i);
     expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/rendered system prompt/i)).not.toBeInTheDocument();
 
-    // Blocked: resubmitting the identical, still-broken content is refused
-    // outright, with the reason visible, until something actually changes.
+    // Cannot be saved: Save stays disabled with the reason shown...
     expect(saveButton).toBeDisabled();
-    expect(screen.getByText(/fix the render error above before saving again/i)).toBeInTheDocument();
+    expect(screen.getByText(/fix the render error above, then preview again before saving/i)).toBeInTheDocument();
+    // ...and - the guarantee backend commit 65f6387 makes provable - NO
+    // write request was ever issued: no new row, no version bump. This is
+    // the whole point of a real, non-persisting draft preview.
+    expect(promptWriteCount).toBe(0);
+    expect(templates).toHaveLength(TEMPLATES_SEED.length);
+    expect(templates.find((t) => t.id === 1).version).toBe(1);
 
-    // Changing the draft is what lifts the block - not a page reload.
+    // Changing the draft is what lifts the block, not a page reload -
+    // Save stays disabled until it has been proven again by a fresh preview.
     await user.type(screen.getByLabelText(/user prompt/i), ' extra');
-    expect(saveButton).toBeEnabled();
+    expect(saveButton).toBeDisabled();
+    expect(promptWriteCount).toBe(0);
   });
 
   it('the same template body previews successfully for variant B', async () => {
@@ -378,15 +444,21 @@ describe('PromptEditor', () => {
     // to hunt for "the" taxonomy every single time.
     expect(screen.getByLabelText(/^taxonomy$/i)).toHaveValue('2');
 
-    await user.click(screen.getByRole('button', { name: /save/i }));
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    expect(saveButton).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
 
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(screen.getByText('RENDERED SYSTEM PROMPT'.toLowerCase(), { exact: false })).toBeTruthy();
     expect(screen.getByText(/<TAXONOMY TABLE>/)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    // Proven by a real preview of this exact draft - now Save may proceed,
+    // and nothing has been written yet (preview itself never persists).
+    expect(saveButton).toBeEnabled();
+    expect(promptWriteCount).toBe(0);
   });
 
-  it('editing a template creates a new version, and older versions are viewable', async () => {
+  it('editing a template creates a new version once it previews cleanly, and older versions are viewable', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/prompts'] });
 
@@ -397,16 +469,51 @@ describe('PromptEditor', () => {
     await user.clear(userPromptField);
     await user.type(userPromptField, 'Write a totally different system.');
 
-    await user.click(screen.getByRole('button', { name: /save/i }));
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    expect(saveButton).toBeDisabled();
 
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(screen.getByText('Version 2')).toBeInTheDocument();
+    expect(saveButton).toBeEnabled();
+
+    await user.click(saveButton);
+
+    expect(await screen.findByText('Version 2')).toBeInTheDocument();
     expect(screen.getByText('Version 1')).toBeInTheDocument();
+    expect(promptWriteCount).toBe(1);
 
     const version1Row = screen.getByText('Version 1').closest('li');
     await user.click(within(version1Row).getByRole('button', { name: /view/i }));
 
     expect(screen.getByLabelText(/user prompt/i)).toHaveValue('Write {{ n_systems }} systems.');
+  });
+
+  it('previews a brand-new template with no id yet through the id-less route, then creates it', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    await screen.findByLabelText(/^template$/i);
+    await user.click(screen.getByRole('button', { name: /new template/i }));
+
+    await user.type(screen.getByLabelText(/^name$/i), 'brand-new-template');
+    await user.click(screen.getByLabelText(/variant a/i));
+    await user.type(screen.getByLabelText(/user prompt/i), 'Make {{ n_systems }} systems.');
+
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    expect(saveButton).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
+    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
+    // Nothing was created by the preview itself - the id-less route never
+    // touches `templates` either, same as the id-based one.
+    expect(templates.find((t) => t.name === 'brand-new-template')).toBeUndefined();
+    expect(promptWriteCount).toBe(0);
+
+    await user.click(saveButton);
+
+    expect(await screen.findByText(/editing.*brand-new-template/i)).toBeInTheDocument();
+    expect(templates.find((t) => t.name === 'brand-new-template' && t.version === 1)).toBeTruthy();
+    expect(promptWriteCount).toBe(1);
   });
 
   // These two poll the real RUN_POLL_INTERVAL_MS (4s) with REAL timers

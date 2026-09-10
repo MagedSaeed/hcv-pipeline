@@ -383,21 +383,26 @@ export function useUpdatePromptTemplate() {
   });
 }
 
-// `POST /api/prompts/{id}/preview/` renders exactly what a real run would
-// send - the SAME renderer, against the addressed template's own PERSISTED
-// `system_prompt`/`user_prompt`/`output_schema` (spec §9: preview "does not
-// diverge from what a real run sends"). It carries no way to render
-// not-yet-saved text - see PromptEditor.jsx's own comment on `handleSave`
-// for how the editor works with that constraint rather than inventing a
-// client-side renderer to paper over it. A 400 here (StrictUndefined's
-// `PromptRenderError`, or a TaxonomyLeak) is not a mutation failure to
-// recover from - it is the guarantee working - so this deliberately has no
-// `onError`/retry handling beyond what the caller does with the rejected
-// promise.
+// `POST /api/prompts/{id}/preview/` (an existing template) or
+// `POST /api/prompts/preview/` (no id yet, phase required in the body
+// instead) renders exactly what a real run would send - the SAME renderer,
+// the same isolation guards (spec §9: preview "does not diverge from what a
+// real run sends"). Passing `system_prompt`/`user_prompt`/`output_schema` in
+// the payload renders that DRAFT instead of the addressed row's own stored
+// text, and persists nothing either way - no new version, no row - which is
+// what lets the editor validate an in-progress edit before saving it rather
+// than having to save first to find out it was broken (backend commit
+// 65f6387, `prompts/views.py::_resolve_template`). Omitting the id routes to
+// the id-less action for a template that has never been saved at all.
+// A 400 here (StrictUndefined's `PromptRenderError`, or a TaxonomyLeak) is
+// not a mutation failure to recover from - it is the guarantee working - so
+// this deliberately has no `onError`/retry handling beyond what the caller
+// does with the rejected promise.
 export function usePreviewPromptTemplate() {
   return useMutation({
     mutationFn: async ({ id, ...payload }) => {
-      const { data } = await apiClient.post(`/prompts/${id}/preview/`, payload);
+      const url = id != null ? `/prompts/${id}/preview/` : '/prompts/preview/';
+      const { data } = await apiClient.post(url, payload);
       return data;
     },
   });

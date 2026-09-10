@@ -92,13 +92,14 @@ export default function PromptEditor() {
 
   const [previewResult, setPreviewResult] = useState(null);
   const [previewError, setPreviewError] = useState(null);
-  // Snapshot of exactly what the LAST save+preview attempt was run
-  // against. While it still matches the current draft/variant/context, a
-  // failed attempt stays blocked - resubmitting byte-identical content
-  // would only create another version that fails the identical way.
-  // Anything that changes the snapshot (an edit, a variant switch, a
-  // different preview taxonomy/scenario) re-enables Save immediately.
-  const [lastAttemptKey, setLastAttemptKey] = useState(null);
+  // Snapshot of exactly what the LAST *successful* preview was run against
+  // (backend commit 65f6387 lets preview render a draft body without
+  // persisting anything - see the top-of-file note above `handlePreview`).
+  // Save is enabled only while this still matches the current draft/
+  // variant/context; any edit, a variant switch, or a different preview
+  // taxonomy/scenario invalidates it, so a save can never go out ahead of
+  // a render check on byte-identical content.
+  const [previewedKey, setPreviewedKey] = useState(null);
 
   // Iterate panel - POST /api/phase-runs/ (spec §9/§10).
   const [iterateExperimentId, setIterateExperimentId] = useState('');
@@ -151,7 +152,7 @@ export default function PromptEditor() {
     setNewName('');
     setDraft(emptyDraft);
     setSchemaError(null);
-    setLastAttemptKey(null);
+    setPreviewedKey(null);
     clearPreviewState();
   }
 
@@ -170,7 +171,7 @@ export default function PromptEditor() {
       outputSchemaText: JSON.stringify(template.output_schema ?? {}, null, 2),
     });
     setSchemaError(null);
-    setLastAttemptKey(null);
+    setPreviewedKey(null);
     clearPreviewState();
   }
 
@@ -187,7 +188,7 @@ export default function PromptEditor() {
     setVariant('');
     setDraft(emptyDraft);
     setSchemaError(null);
-    setLastAttemptKey(null);
+    setPreviewedKey(null);
     clearPreviewState();
   }
 
@@ -201,24 +202,32 @@ export default function PromptEditor() {
     clearPreviewState();
   }
 
-  // The exact snapshot a save+preview attempt was run against - id
-  // included, since a successful PATCH always produces a NEW id (spec
-  // §5.3/§9), so the same draft text is never mistaken for a different
-  // (unattempted) one just because saving moved `selectedId` forward.
-  function computeAttemptKey({ id, isNew, name, forVariant, body, taxonomy, scenario }) {
-    return JSON.stringify({ id, isNew, name, forVariant, body, taxonomy, scenario });
+  // The exact draft+context a preview attempt was run against - `id`
+  // included so switching which named template/version is loaded (or
+  // toggling into "new template" mode) never lets a stale success from a
+  // DIFFERENT template read as validation for this one. Unlike before
+  // backend commit 65f6387, this id never changes as a SIDE EFFECT of
+  // previewing - preview no longer writes anything - so there is no longer
+  // a staleness trap to route around by keying off a not-yet-known
+  // post-save id; this key is simply "what am I looking at right now".
+  function computeAttemptKey({ id, isNew, forVariant, body, taxonomy, scenario }) {
+    return JSON.stringify({ id, isNew, forVariant, body, taxonomy, scenario });
   }
 
   const currentAttemptKey = computeAttemptKey({
     id: selectedId,
     isNew: creatingNew,
-    name: newName,
     forVariant: variant,
     body: draft,
     taxonomy: previewTaxonomyValue,
     scenario: previewScenarioId,
   });
-  const blockedByUnchangedFailure = previewError != null && lastAttemptKey === currentAttemptKey;
+  // Save is gated on a SUCCESSFUL preview of this exact content - not
+  // merely on the absence of a current error. This is the literal reading
+  // of spec §10: "validated against its own variant before it can be
+  // saved" - a template that has never been previewed at all is just as
+  // unsaved-until-proven as one whose last preview failed.
+  const previewedCurrentDraft = previewedKey === currentAttemptKey;
 
   const missingRequiredPreviewInputs =
     phase === 2
@@ -226,20 +235,89 @@ export default function PromptEditor() {
       : !previewTaxonomyValue || !previewScenarioId;
 
   const missingName = creatingNew ? !newName.trim() : !selectedId;
-  const isSaving = createTemplate.isPending || updateTemplate.isPending || previewMutation.isPending;
-  const canAttemptSave = isStaff && !missingName && !missingRequiredPreviewInputs && !blockedByUnchangedFailure && !isSaving;
+  const isPreviewing = previewMutation.isPending;
+  const isPersisting = createTemplate.isPending || updateTemplate.isPending;
+  const canPreview = isStaff && !missingRequiredPreviewInputs && !isPreviewing;
+  const canSave = isStaff && !missingName && previewedCurrentDraft && !isPersisting;
+
+  function previewBlockedReason() {
+    if (!isStaff) return null; // covered by its own notice below
+    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B before previewing — the editor must know which one it is validating.';
+    if (phase === 2 && variant === 'B' && !previewTaxonomyValue) return 'Choose a taxonomy to render Variant B against.';
+    if (phase === 3 && !previewTaxonomyValue) return 'Choose a taxonomy to preview a phase 3 template against.';
+    if (phase === 3 && !previewScenarioId) return 'Choose a scenario to preview a phase 3 template against.';
+    return null;
+  }
 
   function saveBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
     if (missingName) return 'Name this template before saving.';
-    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B before saving — the editor must know which one it is validating.';
-    if (phase === 2 && variant === 'B' && !previewTaxonomyValue) return 'Choose a taxonomy to render Variant B against.';
-    if (phase === 3 && !previewTaxonomyValue) return 'Choose a taxonomy to preview a phase 3 template against.';
-    if (phase === 3 && !previewScenarioId) return 'Choose a scenario to preview a phase 3 template against.';
-    if (blockedByUnchangedFailure) return 'Fix the render error above before saving again — resubmitting the same content would only create another version that fails the same way.';
-    return null;
+    if (previewedCurrentDraft) return null;
+    if (previewError) return 'Fix the render error above, then preview again before saving.';
+    return 'Preview this exact content successfully before saving — nothing is saved until it renders cleanly.';
   }
 
+  // Renders the current draft through the real backend renderer WITHOUT
+  // persisting anything - `POST /api/prompts/{id}/preview/` (an existing
+  // template) or `POST /api/prompts/preview/` (a brand-new one, no id yet)
+  // both accept `system_prompt`/`user_prompt`/`output_schema` in the body
+  // and render THAT instead of any stored row, leaving no new version and
+  // no new row behind even when refused (backend commit 65f6387,
+  // `prompts/views.py::_resolve_template`). This is what makes "validated
+  // before it can be saved" literally true, rather than the save-first,
+  // validate-immediately-after compromise this screen shipped with
+  // originally - see the task report for that history.
+  async function handlePreview() {
+    let outputSchema;
+    try {
+      outputSchema = parseOutputSchema(draft.outputSchemaText);
+      setSchemaError(null);
+    } catch (error) {
+      setSchemaError(error.message);
+      return;
+    }
+
+    const attemptKey = currentAttemptKey;
+    clearPreviewState();
+
+    const draftFields = {
+      system_prompt: draft.systemPrompt,
+      user_prompt: draft.userPrompt,
+      output_schema: outputSchema,
+    };
+    const contextFields =
+      phase === 2
+        ? {
+            variant,
+            ...(variant === 'B' ? { taxonomy: Number(previewTaxonomyValue) } : {}),
+            n_systems: Number(previewNSystems || 3),
+            n_scenarios_per_system: Number(previewNScenarios || 5),
+          }
+        : {
+            taxonomy: Number(previewTaxonomyValue),
+            scenario: Number(previewScenarioId),
+          };
+
+    try {
+      const result = await previewMutation.mutateAsync({
+        id: creatingNew ? null : selectedId,
+        ...(creatingNew ? { phase } : {}),
+        ...draftFields,
+        ...contextFields,
+      });
+      setPreviewResult(result);
+      setPreviewedKey(attemptKey);
+    } catch (error) {
+      setPreviewError(error);
+    }
+  }
+
+  // Only reachable once `canSave` is true, i.e. once `handlePreview` has
+  // already rendered this EXACT draft cleanly - so this simply persists
+  // content already proven to render, through the ordinary
+  // create-a-version/create-version-one endpoints. No second preview call
+  // is needed: render() is a pure function of the template's text and the
+  // context, both unchanged since the successful preview.
   async function handleSave(event) {
     event.preventDefault();
     let outputSchema;
@@ -250,8 +328,6 @@ export default function PromptEditor() {
       setSchemaError(error.message);
       return;
     }
-
-    clearPreviewState();
 
     let saved;
     try {
@@ -279,50 +355,6 @@ export default function PromptEditor() {
     setSelectedName(saved.name);
     setSelectedId(saved.id);
     setCreatingNew(false);
-
-    // Validate the version that was just created, through the same
-    // renderer a real run uses - never a client-side stand-in. The
-    // preview endpoint can only render a PERSISTED template's own stored
-    // fields (there is no dry-run body override on it), so this is the
-    // earliest point at which the just-saved content can be checked at
-    // all; see this file's header comment / the task report for why.
-    //
-    // Keyed by `saved.id` (the NEW version PATCH/POST just created), not
-    // the pre-save `selectedId` still captured in `currentAttemptKey` -
-    // otherwise this snapshot could never match a later render's own
-    // `currentAttemptKey`, which reads `selectedId` AFTER the update above
-    // already moved it to `saved.id`, and the save-blocked guard below
-    // would never engage no matter how loudly the render failed.
-    setLastAttemptKey(
-      computeAttemptKey({
-        id: saved.id,
-        isNew: false,
-        name: newName,
-        forVariant: variant,
-        body: draft,
-        taxonomy: previewTaxonomyValue,
-        scenario: previewScenarioId,
-      })
-    );
-    const previewPayload =
-      phase === 2
-        ? {
-            variant,
-            ...(variant === 'B' ? { taxonomy: Number(previewTaxonomyValue) } : {}),
-            n_systems: Number(previewNSystems || 3),
-            n_scenarios_per_system: Number(previewNScenarios || 5),
-          }
-        : {
-            taxonomy: Number(previewTaxonomyValue),
-            scenario: Number(previewScenarioId),
-          };
-
-    try {
-      const result = await previewMutation.mutateAsync({ id: saved.id, ...previewPayload });
-      setPreviewResult(result);
-    } catch (error) {
-      setPreviewError(error);
-    }
   }
 
   const canRunIterate =
@@ -645,20 +677,33 @@ export default function PromptEditor() {
 
           {isStaff && (
             <div className="space-y-2">
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={!canAttemptSave}
-                className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isSaving ? 'Saving…' : 'Save & preview'}
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handlePreview}
+                  disabled={!canPreview}
+                  className="rounded-md border border-brand-600 px-4 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isPreviewing ? 'Previewing…' : 'Preview'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={!canSave}
+                  className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isPersisting ? 'Saving…' : 'Save'}
+                </button>
+              </div>
               <p className="text-xs text-gray-500">
-                Saving creates the next version of this template, then immediately previews it
-                through the real renderer — never a client-side stand-in. A version that fails to
-                render stays visible in the history below like any other version, clearly marked, so
-                nothing quietly looks safe.
+                Preview renders the draft above through the real backend renderer — never a
+                client-side stand-in — and persists nothing, win or lose (a refused draft creates no
+                new version). Save is disabled until this exact draft has previewed cleanly for this
+                exact variant, so a template that fails to render can never be written.
               </p>
+              {previewBlockedReason() && (
+                <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
+              )}
               {saveBlockedReason() && <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>}
               {createTemplate.isError && <ErrorBanner error={createTemplate.error} />}
               {updateTemplate.isError && <ErrorBanner error={updateTemplate.error} />}
@@ -668,7 +713,7 @@ export default function PromptEditor() {
           {previewError && (
             <div className="space-y-1">
               <p className="text-sm font-semibold text-red-800">
-                Render failed — this version cannot be used as-is, and there is no preview to show.
+                Render failed — nothing was saved, and there is no preview to show.
               </p>
               <ErrorBanner error={previewError} />
             </div>
