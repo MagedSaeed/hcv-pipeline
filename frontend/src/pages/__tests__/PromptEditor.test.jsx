@@ -133,6 +133,15 @@ let nextPhaseRunId;
 // count looks the same," which a bug that both wrote AND rolled back could
 // still pass.
 let promptWriteCount;
+// Task 10.4: whether the mock's own backing store currently has an active
+// taxonomy to fall back to for a variant-A preview that supplies no
+// explicit `guard_taxonomy` (the frontend never sends one for variant A -
+// see PromptEditor.jsx's own `handlePreview`, phase-2 `contextFields`). A
+// test sets this to `null` to simulate "no active taxonomy" and prove the
+// mock fails CLOSED exactly like the real `_preview` (backend/prompts/
+// views.py) does, rather than the old, more permissive mock that always
+// returned a clean 200 for variant A regardless.
+let mockActiveTaxonomyId;
 
 function resetFixtures() {
   templates = [...TEMPLATES_SEED, ...PAGINATION_TEMPLATE_VERSIONS].map((row) => ({ ...row }));
@@ -140,6 +149,7 @@ function resetFixtures() {
   phaseRuns = [];
   nextPhaseRunId = 900;
   promptWriteCount = 0;
+  mockActiveTaxonomyId = 2;
 }
 
 // Stands in for prompts/rendering.py's render(): raises exactly the way
@@ -167,6 +177,23 @@ function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) 
         { status: 400 }
       );
     }
+    // Task 10.4: fail CLOSED, mirroring `_preview`'s own reasoning
+    // (backend/prompts/views.py) - a variant-A render for which the
+    // isolation backstop could not actually run (no explicit
+    // `guard_taxonomy`, and no active taxonomy to fall back to) must never
+    // be presentable as a clean 200. The OLD mock always returned 200 with
+    // `leak_scan_ran: true` for variant A regardless, which is exactly what
+    // let PromptEditor.jsx's own dead "isolation scan did NOT run" green
+    // state look reachable when it never legitimately was.
+    if (variant === 'A' && !body.guard_taxonomy && mockActiveTaxonomyId == null) {
+      return HttpResponse.json(
+        {
+          detail:
+            'Cannot verify variant A stayed unbiased: no guard taxonomy is available (no active taxonomy, and none was supplied).',
+        },
+        { status: 400 }
+      );
+    }
     try {
       const system = fakeRender(systemPrompt, { variantA: variant === 'A' });
       const user = fakeRender(userPrompt, { variantA: variant === 'A' });
@@ -175,7 +202,7 @@ function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) 
         user_prompt: user,
         output_schema: outputSchema,
         leak_scan_ran: variant === 'A',
-        guarded_by: variant === 'A' ? Number(body.guard_taxonomy) || 2 : null,
+        guarded_by: variant === 'A' ? Number(body.guard_taxonomy) || mockActiveTaxonomyId : null,
       });
     } catch (error) {
       return HttpResponse.json({ detail: error.message }, { status: 400 });
@@ -683,5 +710,72 @@ describe('PromptEditor', () => {
     await selectTemplate(user, 'labelling-default');
     const scenarioSelect = await screen.findByLabelText(/^scenario$/i);
     expect(await within(scenarioSelect).findByText(/filler_64/)).toBeInTheDocument();
+  });
+
+  it('resets the variant choice whenever a different template loads, so a stale one can never carry over', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    await selectTemplate(user, 'phase2-safe');
+    await user.click(screen.getByLabelText(/variant b/i));
+    expect(screen.getByText(/editing: variant b/i)).toBeInTheDocument();
+
+    // Task 10.4's own confirmed bug: switching to a DIFFERENT template used
+    // to leave "B" selected and checked, as if it had already been chosen
+    // for THIS template too - a template only ever intended for variant A
+    // could then preview clean under the leftover B and be saved.
+    await selectTemplate(user, 'generation-baseline');
+
+    expect(screen.getByText(/no variant chosen yet/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/variant a/i)).not.toBeChecked();
+    expect(screen.getByLabelText(/variant b/i)).not.toBeChecked();
+    expect(screen.getByRole('button', { name: /^preview$/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
+  });
+
+  it('never lets a stale variant silently validate a newly-loaded template under the wrong one', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    // Preview 'phase2-safe' cleanly under variant B first.
+    await selectTemplate(user, 'phase2-safe');
+    await user.click(screen.getByLabelText(/variant b/i));
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
+    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
+
+    // 'generation-baseline' references {{ taxonomy }} - safe under B, but
+    // fails under A. Loading it resets the variant (the fix above), so it
+    // is never silently validated against the leftover "B" without the
+    // researcher explicitly choosing again for THIS template.
+    await selectTemplate(user, 'generation-baseline');
+
+    expect(screen.getByText(/no variant chosen yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
+  });
+
+  // Task 10.4: the real endpoint fails CLOSED (400) for a variant-A preview
+  // whose isolation scan could not actually run - never a clean 200 with
+  // `leak_scan_ran: false`. Before this task, the mock always returned 200
+  // regardless, which is the only reason PromptEditor.jsx's own dead
+  // "isolation scan did NOT run" green state ever looked reachable.
+  it('a variant-A preview that cannot verify isolation fails closed with a 400, never a green "Preview OK"', async () => {
+    const user = userEvent.setup();
+    mockActiveTaxonomyId = null; // nothing to fall back to, and the frontend never sends guard_taxonomy for variant A
+    renderApp({ initialEntries: ['/prompts'] });
+
+    // 'phase2-safe' never references {{ taxonomy }} - it would otherwise
+    // render "clean" every time, so a 400 here can only come from the
+    // fail-closed isolation check itself, not a StrictUndefined error.
+    await selectTemplate(user, 'phase2-safe');
+    await user.click(screen.getByLabelText(/variant a/i));
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
+
+    expect(await screen.findByText(/render failed/i)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/cannot verify variant a stayed unbiased/i);
+    expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
+    // The removed dead state must never appear, under any circumstance.
+    expect(screen.queryByText(/isolation scan did not run/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
   });
 });

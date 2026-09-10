@@ -102,17 +102,6 @@ export function runsRefetchInterval(runs) {
 }
 
 // -----------------------------------------------------------------------
-// Every list endpoint in this API returns DRF's paginated envelope -
-// {count, next, previous, results} - never a bare array (spec §9). This is
-// the one place that gets unwrapped; every hook below returns the whole
-// envelope (callers read `.results`) rather than each hook re-deciding how
-// to reach into the response.
-async function fetchList(url, params) {
-  const { data } = await apiClient.get(url, { params });
-  return data;
-}
-
-// -----------------------------------------------------------------------
 // THE RULE (spec §9: "a frontend data layer needs to unwrap `results` and
 // follow `next`/`previous`"), replacing an earlier comment here that called
 // reading only page one "the house style" - that comment was wrong, and
@@ -127,12 +116,25 @@ async function fetchList(url, params) {
 //   over fetching everything. Fetch-all is the DEFAULT; visible paging is
 //   only for a list a realistic screen could genuinely never hold at once.
 //
-// `fetchList` stays a single fetch and remains correct ONLY for a query
-// whose own scope keeps results well under PAGE_SIZE by construction, not
-// by hope - e.g. `usePhaseRuns` scoped to one repetition's own phase runs
-// (a handful of rows, domain-bounded), or `useTaxonomyHcvs` (always exactly
-// one taxonomy's ~21 HCVs, spec §5.1). Every hook below says, in its own
-// comment, which choice it made and why.
+// Task 10.1 left six list hooks below on a single first-page fetch,
+// reasoned as "bounded" or "modest, not in the review's confirmed
+// findings." Round 10.2-10.4's coordinator review rejected that: "fine
+// because small" is the EXACT assumption that shipped the original bug (an
+// Experiment is hand-created, "realistically tens, not hundreds" - until a
+// research project runs for months and it isn't). Every genuine LIST
+// endpoint in this app now fetches every page, full stop - no hook is left
+// as an example future code can copy "because this one's scope is small."
+// The two truly hard-bounded reads that remain (`usePhaseRuns` scoped to
+// one repetition's own phase runs; `useTaxonomyHcvs`, capped at ~21 rows by
+// spec §5.1) are ALSO fetch-all now, for the same reason: a bound that
+// holds today by construction is still exactly the kind of assumption this
+// rule exists to never trust again, and fetching a handful of rows in full
+// costs nothing extra.
+//
+// `fetchUnpaginatedList` (below `fetchAllPages`) is what is left for the
+// ONE remaining endpoint that genuinely is not a DRF-paginated list at all
+// (`useModels`) - see its own comment for why it must never be reached for
+// through by a new list hook.
 function nextPageNumber(next) {
   if (!next) return null;
   try {
@@ -157,31 +159,45 @@ async function fetchAllPages(url, params) {
   }
 }
 
-// Every fetch-all hook below returns `{ results }` - the same shape every
-// `fetchList`-backed hook returns after DRF's envelope, so a caller never
-// has to branch on which strategy backed a given query; it always just
-// reads `.results`. `count`/`next`/`previous` are meaningless once every
-// page has already been walked, so they are deliberately not carried
-// through.
+// Every fetch-all hook below returns `{ results }` - the same shape a raw
+// DRF envelope carries, so a caller never has to branch on which strategy
+// backed a given query; it always just reads `.results`. `count`/`next`/
+// `previous` are meaningless once every page has already been walked, so
+// they are deliberately not carried through.
 async function fetchAllPagesEnvelope(url, params) {
   return { results: await fetchAllPages(url, params) };
 }
 
+// The ONE remaining fetcher that reads only a single response with no
+// pagination follow-up at all - correct ONLY for an endpoint that is not
+// itself a DRF-paginated list, i.e. `useModels` below (`{count, results}`,
+// no `next`/`previous` - the catalogue is "cached an hour server-side" and
+// "never paged," per that hook's own comment). Named for exactly that
+// narrow case, not "the plain list fetcher," so nothing about this name
+// invites a future list hook to reach for it the way task 10.1's original
+// `fetchList` (read only page one, called "the house style") did - every
+// genuine list in this app goes through `fetchAllPagesEnvelope` above,
+// with no exception left.
+async function fetchUnpaginatedList(url, params) {
+  const { data } = await apiClient.get(url, { params });
+  return data;
+}
+
 // -----------------------------------------------------------------------
 // Experiments - read: any authenticated user; create/launch: staff (spec §9).
-// First-page only (task 10.1's review did not flag this one, unlike its
-// siblings below): an Experiment is created by hand, one per real
-// comparison design, not generated in bulk the way prompt VERSIONS or
-// PIPELINE RUNS are - realistically tens over this research tool's life,
-// not hundreds. Left as `fetchList` to keep this task's diff scoped to
-// confirmed findings; the SAME risk class applies here too (Dashboard's own
-// list, and PromptEditor's "borrow inputs from experiment" select, would
-// both silently hide experiment 51+), so revisit this the moment the count
-// realistically approaches PAGE_SIZE.
+// FETCH-ALL: task 10.1 left this one first-page, reasoned as "an Experiment
+// is hand-created, realistically tens over this research tool's life, not
+// hundreds." The 10.2-10.4 coordinator review rejected that reasoning
+// outright - a researcher can pass 50 over months of real use, and "fine
+// because small" is the exact assumption that shipped the original bug.
+// Backs both the Dashboard's own experiments list AND PromptEditor's
+// "borrow inputs from experiment" select - either silently hiding
+// experiment 51+ is exactly the false negative this rule exists to
+// prevent.
 export function useExperiments(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.experiments.list(params),
-    queryFn: () => fetchList('/experiments/', params),
+    queryFn: () => fetchAllPagesEnvelope('/experiments/', params),
     ...options,
   });
 }
@@ -207,6 +223,26 @@ export function useCreateExperiment() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.experiments.all });
+    },
+  });
+}
+
+// `PATCH /api/experiments/{id}/` - staff. Unlike `PATCH /api/prompts/{id}/`,
+// this genuinely mutates the addressed row in place (spec §9: "Experiment
+// stays completely unrestricted to edit, at any time, whether or not it has
+// runs - nothing freezes it") - there is no version history to preserve
+// here, so the response IS the same row, updated. Task 10.3: the
+// Experiment Builder form doubles as this screen's Edit action.
+export function useUpdateExperiment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/experiments/${id}/`, payload);
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.experiments.all });
+      queryClient.setQueryData(queryKeys.experiments.detail(data.id), data);
     },
   });
 }
@@ -266,13 +302,14 @@ export function useRunOptions(experimentId, options = {}) {
 // The OpenRouter model catalogue (llm/models_api.py) - cached an hour
 // server-side. Shaped `{count, results}`, NOT the paginated envelope every
 // other list endpoint returns (no `next`/`previous` - it is never paged),
-// so this deliberately reads through the same `fetchList` unwrap-by-
-// `.results` convention as everything else rather than inventing a second
-// response shape for callers to special-case.
+// so this deliberately reads through `fetchUnpaginatedList` (an
+// unwrap-by-`.results`, single-fetch read) rather than `fetchAllPagesEnvelope`
+// - there is no `next` cursor here to follow, and treating the ABSENCE of
+// one as "must be page 1 of many" would be its own, opposite mistake.
 export function useModels(options = {}) {
   return useQuery({
     queryKey: queryKeys.models.list(),
-    queryFn: () => fetchList('/models/'),
+    queryFn: () => fetchUnpaginatedList('/models/'),
     ...options,
   });
 }
@@ -346,6 +383,20 @@ export function useCancelPipelineRun() {
 // (`code: "run_in_flight"`) - cancel first. Cascades to this repetition's
 // phase runs, calls, labels and every system/scenario it generated (spec
 // §5.2: "Deletion is per run, never per row").
+//
+// task 10.2's own confirmed walkthrough finding: a pending POLL of this
+// run's own detail query (`usePipelineRun` above, `refetchInterval` active
+// while the run is non-terminal) can resolve a 404 just AFTER this DELETE
+// succeeds but BEFORE RunDetail's own `navigate('/dashboard')` takes
+// effect - "no visible impact" in the walkthrough, but a real race between
+// a stale in-flight fetch and the redirect all the same. `cancelQueries`
+// aborts that in-flight fetch before it can land an error in the cache (the
+// actual race); `removeQueries` on top of it clears the now-meaningless
+// cache entry entirely, so nothing stale survives even if a component
+// re-mounts against this id before garbage collection would otherwise clear
+// it. Both run BEFORE the mutation's own promise resolves back to the
+// component, i.e. strictly before `handleDeleteConfirmed`'s own
+// `navigate(...)` call (RunDetail.jsx) - the ordering the fix depends on.
 export function useDeletePipelineRun() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -353,7 +404,11 @@ export function useDeletePipelineRun() {
       await apiClient.delete(`/pipeline-runs/${id}/`);
       return id;
     },
-    onSuccess: () => {
+    onSuccess: async (id) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.pipelineRuns.detail(id) });
+      queryClient.removeQueries({ queryKey: queryKeys.pipelineRuns.detail(id) });
+      await queryClient.cancelQueries({ queryKey: queryKeys.phaseRuns.list({ pipeline_run: id }) });
+      queryClient.removeQueries({ queryKey: queryKeys.phaseRuns.list({ pipeline_run: id }) });
       queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.all });
     },
   });
@@ -386,16 +441,18 @@ export function useExportPipelineRun() {
 
 // Every `PhaseRun` under one repetition (or matching any other `?pipeline_run=
 // &phase=&variant=&status=&experiment=` filter, spec §9) - Run detail's
-// per-phase progress list. First-page only, deliberately: RunDetail always
-// scopes this to one repetition's own `?pipeline_run=`, and one repetition
-// runs at most a handful of phase runs (phase 1 + phase 2/phase 3 per
-// variant) - domain-bounded well under PAGE_SIZE, not merely assumed to be.
-// Same "stop once every row is terminal" polling as every other list of
-// runs in this app.
+// per-phase progress list. FETCH-ALL: RunDetail always scopes this to one
+// repetition's own `?pipeline_run=`, which stays a handful of rows by
+// construction (phase 1 + phase 2/phase 3 per variant) - task 10.1 called
+// that bound enough reason to stay first-page. The 10.2-10.4 review
+// rejected that too: a bound that holds today by construction is still the
+// same "fine because small" assumption, and fetching a handful of rows in
+// full costs nothing extra. Same "stop once every row is terminal" polling
+// as every other list of runs in this app.
 export function usePhaseRuns(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.phaseRuns.list(params),
-    queryFn: () => fetchList('/phase-runs/', params),
+    queryFn: () => fetchAllPagesEnvelope('/phase-runs/', params),
     refetchInterval: (query) => runsRefetchInterval(query.state.data?.results),
     ...options,
   });
@@ -406,6 +463,15 @@ export function usePhaseRuns(params = {}, options = {}) {
 // in-flight run refuses with a 409 carrying its own `code`
 // (`retry_run_cancelled`/`retry_run_in_flight`) - RunDetail shows the API's
 // `detail` for that rather than inventing its own wording.
+//
+// task 10.2's own confirmed finding: this used to invalidate only the
+// PHASE run's own queries, never the PIPELINE run it belongs to - so a
+// terminal repetition's own header (status, progress) stayed stale after a
+// successful retry, because `usePipelineRun` only re-polls a NON-terminal
+// run (`runsRefetchInterval`) and a retry is exactly what can move a
+// repetition off a terminal status. The response body is the retried
+// PhaseRunSerializer row, which carries `pipeline_run` - read straight off
+// it rather than asking the caller to also pass the parent id along.
 export function useRetryPhaseRun() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -413,35 +479,42 @@ export function useRetryPhaseRun() {
       const { data } = await apiClient.post(`/phase-runs/${id}/retry/`);
       return data;
     },
-    onSuccess: (_data, id) => {
+    onSuccess: (data, id) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.detail(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.lists() });
+      if (data?.pipeline_run != null) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.detail(data.pipeline_run) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.lists() });
+      }
     },
   });
 }
 
 // -----------------------------------------------------------------------
-// Taxonomy - read-only over the API (arrives by import command). First-page
-// only: a taxonomy VERSION is created by an offline import command, not by
-// anything a user does repeatedly in this UI - a handful of versions over
-// the project's life, nowhere near PAGE_SIZE.
+// Taxonomy - read-only over the API (arrives by import command). FETCH-ALL:
+// a taxonomy VERSION is created by an offline import command, not by
+// anything a user does repeatedly in this UI, so task 10.1 called this
+// bounded enough to stay first-page. Converted anyway in the 10.2-10.4
+// round - the rule has no size-based exceptions left.
 export function useTaxonomies(options = {}) {
   return useQuery({
     queryKey: queryKeys.taxonomies.list(),
-    queryFn: () => fetchList('/taxonomies/'),
+    queryFn: () => fetchAllPagesEnvelope('/taxonomies/'),
     ...options,
   });
 }
 
-// First-page only, and correct by a hard domain invariant rather than by
-// hope: a taxonomy has exactly the HCV rows imported for it, and spec §5.1/
-// §9's own export description says every taxonomy in scope carries "all 21
-// HCV rows verbatim" - one taxonomy can never itself reach a second page of
-// PAGE_SIZE=50.
+// FETCH-ALL, even though this one is bounded by a hard domain invariant, not
+// merely by hope: a taxonomy has exactly the HCV rows imported for it, and
+// spec §5.1/§9's own export description says every taxonomy in scope
+// carries "all 21 HCV rows verbatim" - one taxonomy can never itself reach
+// a second page of PAGE_SIZE=50. Converted anyway (10.2-10.4 review): a
+// bound that holds today by construction is still an assumption, and
+// fetching ~21 rows in full costs nothing extra over reading page one.
 export function useTaxonomyHcvs(taxonomyId, options = {}) {
   return useQuery({
     queryKey: queryKeys.taxonomies.detailSub(taxonomyId, 'hcvs'),
-    queryFn: () => fetchList(`/taxonomies/${taxonomyId}/hcvs/`),
+    queryFn: () => fetchAllPagesEnvelope(`/taxonomies/${taxonomyId}/hcvs/`),
     enabled: taxonomyId != null,
     ...options,
   });
@@ -490,14 +563,14 @@ export function useUpdateSettings() {
 // The CSRF request interceptor (client.js) doesn't care either way - it
 // only ever touches `X-CSRFToken`, matching on the unsafe HTTP method, so
 // CSRF still applies to this request exactly as it does to a JSON one.
-// First-page only: uploaded once per source document (a taxonomy table, a
-// system prompt, a scenario pack), not generated - realistically a modest,
-// hand-curated set. Not in task 10.1's confirmed findings; same residual
-// risk as `useExperiments` above if this ever grows large.
+// FETCH-ALL: uploaded once per source document (a taxonomy table, a system
+// prompt, a scenario pack) - task 10.1 called this modest enough to stay
+// first-page. Converted in the 10.2-10.4 round along with every other
+// remaining list hook.
 export function useResources(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.resources.list(params),
-    queryFn: () => fetchList('/resources/', params),
+    queryFn: () => fetchAllPagesEnvelope('/resources/', params),
     ...options,
   });
 }
@@ -534,15 +607,14 @@ export function useDeleteResource() {
 // text of whichever side is file-backed is read from the file at RESPONSE
 // time, not stored on the row - callers must render these fields as given,
 // never recompute them from `input_text`/`input_file` client-side.
-// First-page only: hand-paired, one at a time, from an already-modest
-// resources list - not in task 10.1's confirmed findings. RunDetail's own
-// `titleLookup` over this hook can still fall back to a bare id past row
-// 50 if this list ever does grow that large; same residual risk noted on
-// `useResources` above.
+// FETCH-ALL: hand-paired, one at a time, from an already-modest resources
+// list - task 10.1 called this modest enough to stay first-page (and
+// RunDetail's own `titleLookup` over this hook could still have fallen back
+// to a bare id past row 50). Converted in the 10.2-10.4 round.
 export function useFewShots(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.fewshots.list(params),
-    queryFn: () => fetchList('/fewshots/', params),
+    queryFn: () => fetchAllPagesEnvelope('/fewshots/', params),
     ...options,
   });
 }

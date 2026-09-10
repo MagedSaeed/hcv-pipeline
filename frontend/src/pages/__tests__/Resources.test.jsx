@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { paginate } from '../../test/mockApi';
 
 // jsdom's own `File`/`FormData` classes do not survive the trip through
 // msw's Node-side request interception intact: a file appended via jsdom's
@@ -267,5 +268,51 @@ describe('Resources', () => {
     // Not removed, and the rest of the page is still intact - no crash.
     expect(within(resourceListEl).getByText('oldsmar-scenarios')).toBeInTheDocument();
     expect(within(resourceListEl).getByText('hcv-table')).toBeInTheDocument();
+  });
+
+  it('fetches every page of the resources list, not just the first 50 (fails if only page 1 is read)', async () => {
+    // 55 resources - task 10.2-10.4: task 10.1's own "a modest, hand-
+    // curated set, stays first-page" exception for `useResources` was
+    // rejected - the rule has no size-based exceptions left.
+    const fillerResources = Array.from({ length: 55 }, (_, index) => ({
+      id: 100 + index,
+      name: `filler-resource-${index + 1}`,
+      kind: 'other',
+      file: null,
+      text: '',
+      description: '',
+      uploaded_by: 1,
+      created_at: '2026-01-01T00:00:00Z',
+    }));
+    server.use(http.get('/api/resources/', ({ request }) => HttpResponse.json(paginate(fillerResources, request))));
+
+    renderApp({ initialEntries: ['/resources'] });
+
+    const resourceListEl = await resourceList();
+    expect(await within(resourceListEl).findByText('filler-resource-55')).toBeInTheDocument();
+  });
+
+  it('fetches every page of the few-shots list, not just the first 50 (fails if only page 1 is read)', async () => {
+    // 55 few-shots - same reasoning as the resources test above, for
+    // `useFewShots`.
+    const fillerFewshots = Array.from({ length: 55 }, (_, index) => ({
+      id: 200 + index,
+      phase: 2,
+      name: `filler-fewshot-${index + 1}`,
+      input_text: 'in',
+      input_file: null,
+      output_text: 'out',
+      output_file: null,
+      resolved_input: 'in',
+      resolved_output: 'out',
+      order: index + 1,
+      is_active: true,
+    }));
+    server.use(http.get('/api/fewshots/', ({ request }) => HttpResponse.json(paginate(fillerFewshots, request))));
+
+    renderApp({ initialEntries: ['/resources'] });
+
+    const fewshotListEl = await fewshotList();
+    expect(await within(fewshotListEl).findByText('filler-fewshot-55')).toBeInTheDocument();
   });
 });

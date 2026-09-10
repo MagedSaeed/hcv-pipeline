@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { delay, http, HttpResponse } from 'msw';
+import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
+import { apiClient } from '../../api/client';
 
 // The OpenRouter catalogue shape llm/models_api.py's AvailableModelsView
 // actually returns - {count, results}, deliberately NOT the paginated
@@ -230,97 +231,11 @@ describe('ExperimentBuilder', () => {
     expect(screen.getByRole('checkbox', { name: /^variant b$/i })).toBeChecked();
   });
 
-  it('the repetitions field defaults to 1, and its explanation comes from the live API, never a hand-copied string', async () => {
-    const user = userEvent.setup();
-    // A sentinel that could only ever have come from the OPTIONS mock below -
-    // proves the rendered text is SOURCED from the API response, not from
-    // any string baked into the component.
-    const sentinelHelpText = 'SENTINEL — this text exists only in the OPTIONS mock, never hand-copied into the component.';
-    server.use(
-      http.post(
-        '/api/experiments/',
-        guardedExperimentWrite(async ({ request }) => {
-          const body = await request.json();
-          return HttpResponse.json({ id: 77, ...body }, { status: 201 });
-        })
-      ),
-      http.options('/api/experiments/77/run/', () => HttpResponse.json(runOptionsResponse(sentinelHelpText)))
-    );
-    renderApp({ initialEntries: ['/experiments/new'] });
-
-    await screen.findByLabelText(/^name$/i);
-    await fillMinimalValidForm(user);
-    await user.click(screen.getByRole('button', { name: /create experiment/i }));
-
-    const repetitions = await screen.findByLabelText(/^repetitions$/i);
-    expect(repetitions).toHaveValue(1);
-
-    expect(await screen.findByText(sentinelHelpText)).toBeInTheDocument();
-    // The old hand-copied sentence is gone from the SOURCE entirely now
-    // (one source of truth, the live OPTIONS response) - this would only
-    // ever appear again if someone reintroduced a hardcoded fallback.
-    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/\$1\.61/)).not.toBeInTheDocument();
-  });
-
-  it('shows a neutral loading notice for the explanation - never the old hand-copied text - while OPTIONS is in flight', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.post(
-        '/api/experiments/',
-        guardedExperimentWrite(async ({ request }) => {
-          const body = await request.json();
-          return HttpResponse.json({ id: 77, ...body }, { status: 201 });
-        })
-      ),
-      http.options('/api/experiments/77/run/', async () => {
-        await delay(50);
-        return HttpResponse.json(runOptionsResponse('Resolved after the delay.'));
-      })
-    );
-    renderApp({ initialEntries: ['/experiments/new'] });
-
-    await screen.findByLabelText(/^name$/i);
-    await fillMinimalValidForm(user);
-    await user.click(screen.getByRole('button', { name: /create experiment/i }));
-
-    // The field itself works immediately - it is never gated on this query.
-    const repetitions = await screen.findByLabelText(/^repetitions$/i);
-    expect(repetitions).toHaveValue(1);
-    expect(screen.getByText(/loading the explanation/i)).toBeInTheDocument();
-    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
-
-    expect(await screen.findByText('Resolved after the delay.')).toBeInTheDocument();
-  });
-
-  it('still lets repetitions be used if the API explanation fails to load, and never falls back to stale copy', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.post(
-        '/api/experiments/',
-        guardedExperimentWrite(async ({ request }) => {
-          const body = await request.json();
-          return HttpResponse.json({ id: 77, ...body }, { status: 201 });
-        })
-      ),
-      http.options('/api/experiments/77/run/', () => HttpResponse.json({ detail: 'Server error.' }, { status: 500 }))
-    );
-    renderApp({ initialEntries: ['/experiments/new'] });
-
-    await screen.findByLabelText(/^name$/i);
-    await fillMinimalValidForm(user);
-    await user.click(screen.getByRole('button', { name: /create experiment/i }));
-
-    const repetitions = await screen.findByLabelText(/^repetitions$/i);
-    expect(repetitions).toHaveValue(1);
-    await user.clear(repetitions);
-    await user.type(repetitions, '5');
-    expect(repetitions).toHaveValue(5);
-
-    expect(await screen.findByText(/could not load the explanation/i)).toBeInTheDocument();
-    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/\$1\.61/)).not.toBeInTheDocument();
-  });
+  // Task 10.3: launching (repetitions field, OPTIONS help text, the queued-
+  // repetitions result, the missing-key 503 mapping) all moved to the new
+  // Experiment detail screen (ExperimentDetail.test.jsx) - this screen no
+  // longer has an inline "Launch" section at all, so those tests moved with
+  // it rather than staying here against UI that no longer exists.
 
   it("surfaces the API's validation errors field-by-field, never in a generic banner", async () => {
     const user = userEvent.setup();
@@ -402,34 +317,48 @@ describe('ExperimentBuilder', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/broken across the whole configuration/i);
   });
 
-  it('launching shows the queued repetitions and links to them', async () => {
+  it('a successful create navigates straight to the new experiment\'s detail screen, never stranding it', async () => {
     const user = userEvent.setup();
     server.use(
       http.post(
         '/api/experiments/',
         guardedExperimentWrite(async ({ request }) => {
           const body = await request.json();
-          return HttpResponse.json({ id: 77, ...body }, { status: 201 });
+          return HttpResponse.json({ id: 77, ...body, run_count: 0, progress: { done: 0, total: 0, failed: 0, percent: 0 }, created_by: 3, created_at: '2026-09-10T00:00:00Z' }, { status: 201 });
         })
       ),
-      http.post(
-        '/api/experiments/77/run/',
-        guardedExperimentWrite(async ({ request }) => {
-          const body = await request.json();
-          expect(body.n_repetitions).toBe(2);
-          return HttpResponse.json(
-            {
-              runs: [
-                { id: 501, repetition_index: 1 },
-                { id: 502, repetition_index: 2 },
-              ],
-              detail:
-                'Cancelling marks a run dead so it can be deleted; it does NOT interrupt a worker that may already be executing it.',
-            },
-            { status: 202 }
-          );
+      // Whatever ExperimentDetail.jsx itself needs to render past its own
+      // loading state - this test only cares that the builder actually
+      // navigated there, not what that screen shows once it has.
+      http.get('/api/experiments/77/', () =>
+        HttpResponse.json({
+          id: 77,
+          name: 'Baseline comparison',
+          description: '',
+          taxonomy: 2,
+          phase2_model: 'anthropic/claude-sonnet-4',
+          phase2_temperature: 1,
+          phase2_prompt_a: 1,
+          phase2_prompt_b: 2,
+          phase3_model: 'openai/gpt-4o-mini',
+          phase3_temperature: 0,
+          phase3_prompt: 3,
+          seed_systems: [],
+          fewshots: [],
+          generate_systems: true,
+          generate_scenarios: true,
+          target_system: null,
+          n_systems: 3,
+          n_scenarios_per_system: 5,
+          variants: ['A', 'B'],
+          progress: { done: 0, total: 0, failed: 0, percent: 0 },
+          run_count: 0,
+          created_by: 3,
+          created_at: '2026-09-10T00:00:00Z',
         })
-      )
+      ),
+      http.get('/api/pipeline-runs/', () => HttpResponse.json(paginated([]))),
+      http.options('/api/experiments/77/run/', () => HttpResponse.json(runOptionsResponse('help text')))
     );
     renderApp({ initialEntries: ['/experiments/new'] });
 
@@ -437,50 +366,10 @@ describe('ExperimentBuilder', () => {
     await fillMinimalValidForm(user);
     await user.click(screen.getByRole('button', { name: /create experiment/i }));
 
-    const repetitions = await screen.findByLabelText(/^repetitions$/i);
-    await user.clear(repetitions);
-    await user.type(repetitions, '2');
-    await user.click(screen.getByRole('button', { name: /^launch$/i }));
-
-    expect(await screen.findByText(/does not interrupt a worker/i)).toBeInTheDocument();
-    const link1 = await screen.findByRole('link', { name: /repetition 1/i });
-    const link2 = screen.getByRole('link', { name: /repetition 2/i });
-    expect(link1).toHaveAttribute('href', '/pipeline-runs/501');
-    expect(link2).toHaveAttribute('href', '/pipeline-runs/502');
-  });
-
-  it('launching with no API key branches on the 503 code, not the English message', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.post(
-        '/api/experiments/',
-        guardedExperimentWrite(async ({ request }) => {
-          const body = await request.json();
-          return HttpResponse.json({ id: 77, ...body }, { status: 201 });
-        })
-      ),
-      http.post(
-        '/api/experiments/77/run/',
-        guardedExperimentWrite(() =>
-          // Deliberately unusual wording, carrying no "key"/"openrouter"
-          // substring at all - if the UI's extra "configure a key" guidance
-          // only appears because it parsed THIS English sentence, this would
-          // fail; it must appear because `code` is missing_api_key.
-          HttpResponse.json({ detail: 'Cannot proceed right now.', code: 'missing_api_key' }, { status: 503 })
-        )
-      )
-    );
-    renderApp({ initialEntries: ['/experiments/new'] });
-
-    await screen.findByLabelText(/^name$/i);
-    await fillMinimalValidForm(user);
-    await user.click(screen.getByRole('button', { name: /create experiment/i }));
-
-    await screen.findByLabelText(/^repetitions$/i);
-    await user.click(screen.getByRole('button', { name: /^launch$/i }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot proceed right now.');
-    expect(screen.getByRole('link', { name: /go to settings/i })).toHaveAttribute('href', '/settings');
+    // Landed on the detail screen, not left on the builder with nothing
+    // left to do - task 10.3's own acceptance bar.
+    expect(await screen.findByRole('heading', { name: 'Baseline comparison' })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^name$/i)).not.toBeInTheDocument();
   });
 
   it('a non-staff user cannot see the builder form', async () => {
@@ -506,5 +395,106 @@ describe('ExperimentBuilder', () => {
     // 2 essential systems + 55 filler seeds = 57 rows - one page (50)
     // would drop the last 7, `Filler seed 55` among them.
     expect(await screen.findByLabelText(/filler seed 55/i)).toBeInTheDocument();
+  });
+});
+
+// Task 10.3: this SAME form, at `/experiments/:id/edit`, is also the
+// "Edit" action reachable from Experiment detail - `Experiment` stays
+// completely unrestricted to edit at any time (spec §9), so there is no
+// separate read-only state to account for once an experiment has runs.
+describe('ExperimentBuilder editing an existing experiment', () => {
+  const EXISTING_SEED = {
+    id: 42,
+    name: 'Existing comparison',
+    description: 'Already created.',
+    taxonomy: 2,
+    phase2_model: 'anthropic/claude-sonnet-4',
+    phase2_temperature: 0.5,
+    phase2_prompt_a: 1,
+    phase2_prompt_b: 2,
+    phase3_model: 'openai/gpt-4o-mini',
+    phase3_temperature: 0,
+    phase3_prompt: 3,
+    seed_systems: [10],
+    fewshots: [20],
+    generate_systems: true,
+    generate_scenarios: true,
+    target_system: null,
+    n_systems: 3,
+    n_scenarios_per_system: 5,
+    variants: ['A', 'B'],
+    progress: { done: 0, total: 0, failed: 0, percent: 0 },
+    run_count: 0,
+    created_by: 3,
+    created_at: '2026-01-01T00:00:00Z',
+  };
+
+  let currentExperiment;
+
+  beforeEach(() => {
+    currentExperiment = { ...EXISTING_SEED };
+    server.use(
+      http.get('/api/experiments/42/', () => HttpResponse.json(currentExperiment)),
+      http.get('/api/pipeline-runs/', () => HttpResponse.json(paginated([]))),
+      http.options('/api/experiments/42/run/', () => HttpResponse.json(runOptionsResponse('help text')))
+    );
+  });
+
+  it("loads the existing experiment's values into the form, not the blank defaults", async () => {
+    renderApp({ initialEntries: ['/experiments/42/edit'] });
+
+    expect(await screen.findByLabelText(/^name$/i)).toHaveValue('Existing comparison');
+    expect(screen.getByLabelText(/^description$/i)).toHaveValue('Already created.');
+    expect(screen.getByLabelText(/oldsmar water plant/i)).toBeChecked();
+    expect(screen.getByLabelText(/shot-1/i)).toBeChecked();
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument();
+    // Never the create-mode heading/button for an existing experiment.
+    expect(screen.queryByRole('button', { name: /^create experiment$/i })).not.toBeInTheDocument();
+  });
+
+  it('PATCHes (not POSTs) on save, and navigates back to the detail screen', async () => {
+    const user = userEvent.setup();
+    let createCalled = false;
+    server.use(
+      http.post('/api/experiments/', () => {
+        createCalled = true;
+        return HttpResponse.json({ id: 999 }, { status: 201 });
+      }),
+      http.patch(
+        '/api/experiments/42/',
+        guardedExperimentWrite(async ({ request }) => {
+          const body = await request.json();
+          currentExperiment = { ...currentExperiment, ...body, id: 42 };
+          return HttpResponse.json(currentExperiment);
+        })
+      )
+    );
+
+    renderApp({ initialEntries: ['/experiments/42/edit'] });
+    const nameField = await screen.findByLabelText(/^name$/i);
+    await user.clear(nameField);
+    await user.type(nameField, 'Renamed comparison');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    // Landed back on the detail screen, showing the JUST-SAVED name.
+    expect(await screen.findByRole('heading', { name: 'Renamed comparison' })).toBeInTheDocument();
+    expect(createCalled).toBe(false);
+  });
+
+  // `PATCH /api/experiments/{id}/` is staff-only (spec §9) - the UI itself
+  // already keeps a non-staff viewer off this form entirely (`!isStaff`
+  // returns early before any field even renders), so this calls the raw
+  // `apiClient` directly, the same pattern client.test.js's own CSRF/auth
+  // guard tests use, to prove the MOCK's own `requireStaff` guard is
+  // actually wired into this endpoint - not merely present in the file.
+  it('the mock refuses PATCH /api/experiments/{id}/ for a non-staff session (guard actually wired)', async () => {
+    server.use(
+      http.patch('/api/experiments/42/', guardedExperimentWrite(() => HttpResponse.json(currentExperiment)))
+    );
+    authState.currentUserEmail = 'researcher@example.com'; // not staff
+
+    await expect(apiClient.patch('/experiments/42/', { name: 'x' })).rejects.toMatchObject({
+      response: { status: 403 },
+    });
   });
 });

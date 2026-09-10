@@ -198,4 +198,25 @@ describe('Dashboard', () => {
     },
     15000
   );
+
+  it('fetches every page of the experiments list, not just the first 50 (fails if only page 1 is read)', async () => {
+    // 55 experiments - task 10.2-10.4's own finding: `useExperiments` was
+    // left first-page in task 10.1 as "realistically tens, not hundreds,"
+    // which is exactly the "fine because small" assumption the coordinator
+    // rejected - a researcher can pass 50 over months of real use.
+    const experiments = Array.from({ length: 55 }, (_, index) => ({
+      id: index + 1,
+      name: `Experiment ${index + 1}`,
+      run_count: 0,
+      progress: { done: 0, total: 0, failed: 0, percent: 0 },
+    }));
+    server.use(
+      http.get('/api/experiments/', ({ request }) => HttpResponse.json(paginate(experiments, request))),
+      http.get('/api/pipeline-runs/', () => HttpResponse.json(paginated([])))
+    );
+
+    renderApp({ initialEntries: ['/dashboard'] });
+
+    expect(await screen.findByText('Experiment 55')).toBeInTheDocument();
+  });
 });

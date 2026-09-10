@@ -161,10 +161,24 @@ export default function PromptEditor() {
     resetEditorState();
   }
 
+  // Task 10.4's own confirmed bug: this never reset `variant`, so loading a
+  // DIFFERENT template (or a different version of the same one) inherited
+  // whichever variant happened to be selected before - silently, with the
+  // radio still shown as checked. A template only ever meant to run as
+  // variant A, but that references `{{ taxonomy }}`, would then preview
+  // CLEAN under a stale "B" left over from browsing a different template
+  // moments earlier, gate Save open, and get saved - only to be picked for
+  // `phase2_prompt_a` in the builder later, where it fails at launch (or,
+  // before task 10.4's backend half, silently passed through). Resetting to
+  // '' here forces an EXPLICIT re-choice every time a template loads -
+  // `missingRequiredPreviewInputs`/`canPreview`/`canSave` below already key
+  // off `variant === ''`, so this alone is what makes a stale variant
+  // impossible to leave in place, not merely unlikely.
   function loadVersion(template) {
     setSelectedName(template.name);
     setSelectedId(template.id);
     setCreatingNew(false);
+    setVariant('');
     setDraft({
       systemPrompt: template.system_prompt,
       userPrompt: template.user_prompt,
@@ -721,13 +735,22 @@ export default function PromptEditor() {
 
           {previewResult && (
             <div className="space-y-3">
+              {/* Task 10.4: a variant-A preview whose isolation scan did NOT
+                  run is never OK - the real endpoint fails CLOSED with a 400
+                  in exactly that case (`_preview` in
+                  backend/prompts/views.py: "must never be presentable as a
+                  clean 200"), so `previewResult` existing at all already
+                  guarantees `leak_scan_ran` is true whenever phase is 2 and
+                  variant is A. The old third branch here ("isolation scan
+                  did NOT run") was dead code, reachable only because an
+                  earlier mock returned 200 where the real API refuses -
+                  removed rather than left as a state that looks legitimate
+                  but can never actually occur. */}
               <p className="text-sm font-semibold text-green-700">
                 Preview OK
                 {previewResult.leak_scan_ran
                   ? ` — isolation scan ran, guarded by taxonomy #${previewResult.guarded_by}.`
-                  : phase === 2 && variant === 'A'
-                    ? ' — isolation scan did NOT run (no guard taxonomy available).'
-                    : '.'}
+                  : '.'}
               </p>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <CodeBlock title="Rendered system prompt" code={previewResult.system_prompt} />

@@ -4,10 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
-
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
+import { paginate, paginated } from '../../test/mockApi';
 
 function buildHcvs(taxonomyId, count = 21) {
   return Array.from({ length: count }, (_, index) => ({
@@ -86,5 +83,57 @@ describe('Taxonomy', () => {
     renderApp({ initialEntries: ['/taxonomy'] });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Taxonomy service unavailable.');
+  });
+
+  it('fetches every page of the taxonomy-version list, not just the first 50 (fails if only page 1 is read)', async () => {
+    // 55 taxonomy versions - unrealistic (each arrives by a rare offline
+    // import command), but `useTaxonomies` must still follow every page
+    // regardless (task 10.2-10.4: task 10.1's own "a handful of versions,
+    // stays first-page" exception for this hook was rejected - a bound
+    // that holds today by construction is still an assumption).
+    const versions = Array.from({ length: 55 }, (_, index) => ({
+      id: index + 1,
+      vocabulary_id: 'hcv-21',
+      version: String(index + 1),
+      notes: '',
+      is_active: index === 0,
+      hcv_count: 21,
+      created_at: '2026-01-01T00:00:00Z',
+    }));
+    server.use(
+      http.get('/api/taxonomies/', ({ request }) => HttpResponse.json(paginate(versions, request))),
+      http.get('/api/taxonomies/:id/hcvs/', () => HttpResponse.json(paginated([])))
+    );
+
+    renderApp({ initialEntries: ['/taxonomy'] });
+
+    const select = await screen.findByLabelText(/version/i);
+    expect(within(select).getByRole('option', { name: /v55/i })).toBeInTheDocument();
+  });
+
+  it('fetches every page of one taxonomy\'s HCVs, not just the first 50 (fails if only page 1 is read)', async () => {
+    // 55 HCV rows for one taxonomy - unrealistic (the real taxonomy is a
+    // fixed 21, spec §5.1), but `useTaxonomyHcvs` must still follow every
+    // page regardless of how large a given response turns out to be (same
+    // "bound held by construction is still an assumption" reasoning).
+    const hcvs = Array.from({ length: 55 }, (_, index) => ({
+      id: 900 + index,
+      hcv_id: `HCV-${String(index + 1).padStart(2, '0')}`,
+      name: `Filler condition ${index + 1}`,
+      definition: '',
+      condition_classes: [],
+      order: index + 1,
+    }));
+    server.use(
+      http.get('/api/taxonomies/', () => HttpResponse.json(paginated(TAXONOMIES))),
+      http.get('/api/taxonomies/:id/hcvs/', ({ request, params }) => {
+        if (Number(params.id) !== TAXONOMIES[1].id) return HttpResponse.json(paginated([]));
+        return HttpResponse.json(paginate(hcvs, request));
+      })
+    );
+
+    renderApp({ initialEntries: ['/taxonomy'] });
+
+    expect(await screen.findByText(/HCV-55 — Filler condition 55/)).toBeInTheDocument();
   });
 });

@@ -1,15 +1,15 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
   useCreateExperiment,
+  useExperiment,
   useFewShots,
   useModels,
   usePromptTemplates,
-  useRunExperiment,
-  useRunOptions,
   useSystemDescriptions,
   useTaxonomies,
+  useUpdateExperiment,
 } from '../api/queries';
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
@@ -47,6 +47,36 @@ const emptyForm = {
   variantA: true,
   variantB: true,
 };
+
+// Task 10.3: this form is now reused for BOTH creating (`/experiments/new`,
+// no `id`) and editing (`/experiments/:id/edit`, PATCHes in place) - an
+// Experiment stays freely editable at any time (spec §9), so there is no
+// separate "read-only once launched" state to account for. Turns an
+// Experiment row (ExperimentSerializer's own field names) into this form's
+// own string-keyed shape - the inverse of `handleSave`'s payload below.
+function formFromExperiment(experiment) {
+  return {
+    name: experiment.name ?? '',
+    description: experiment.description ?? '',
+    taxonomy: experiment.taxonomy != null ? String(experiment.taxonomy) : '',
+    phase2Model: experiment.phase2_model ?? '',
+    phase2Temperature: String(experiment.phase2_temperature ?? '1'),
+    phase2PromptA: experiment.phase2_prompt_a != null ? String(experiment.phase2_prompt_a) : '',
+    phase2PromptB: experiment.phase2_prompt_b != null ? String(experiment.phase2_prompt_b) : '',
+    phase3Model: experiment.phase3_model ?? '',
+    phase3Temperature: String(experiment.phase3_temperature ?? '0'),
+    phase3Prompt: experiment.phase3_prompt != null ? String(experiment.phase3_prompt) : '',
+    seedSystemIds: (experiment.seed_systems ?? []).map(String),
+    fewshotIds: (experiment.fewshots ?? []).map(String),
+    generateSystems: experiment.generate_systems ?? true,
+    generateScenarios: experiment.generate_scenarios ?? true,
+    targetSystem: experiment.target_system != null ? String(experiment.target_system) : '',
+    nSystems: String(experiment.n_systems ?? '3'),
+    nScenariosPerSystem: String(experiment.n_scenarios_per_system ?? '5'),
+    variantA: (experiment.variants ?? ['A', 'B']).includes('A'),
+    variantB: (experiment.variants ?? ['A', 'B']).includes('B'),
+  };
+}
 
 function ModelField({ id, label, value, onChange, modelsQuery, models, fieldError }) {
   return (
@@ -93,11 +123,32 @@ function ModelField({ id, label, value, onChange, modelsQuery, models, fieldErro
 
 export default function ExperimentBuilder() {
   const { isStaff } = useAuth();
+  const navigate = useNavigate();
+  // Present only at `/experiments/:id/edit` - `/experiments/new` renders
+  // this same component with no `id` at all, i.e. create mode.
+  const { id } = useParams();
+  const isEditing = id != null;
 
   const [form, setForm] = useState(emptyForm);
-  const [savedExperiment, setSavedExperiment] = useState(null);
-  const [nRepetitions, setNRepetitions] = useState('1');
-  const [launchResult, setLaunchResult] = useState(null);
+  // Edit mode only: the form starts empty and is filled in once the
+  // existing experiment has loaded - `loadedId` tracks WHICH experiment's
+  // values are currently in the form, so navigating from editing one
+  // experiment straight to editing another (unlikely, but not impossible)
+  // re-seeds the form instead of leaving the previous one's values behind.
+  const [loadedId, setLoadedId] = useState(null);
+
+  const existingExperimentQuery = useExperiment(id, { enabled: isEditing });
+
+  // React's own "adjust state when a prop changes" pattern - setState
+  // called directly in the render body (never inside a useEffect: that
+  // would run this AFTER an already-committed render showed the stale
+  // `emptyForm` defaults for one frame, and cascades into a second
+  // unnecessary render besides). Guarded by `loadedId !== id` so this only
+  // fires once per experiment actually loaded, not on every render.
+  if (isEditing && existingExperimentQuery.data && loadedId !== id) {
+    setForm(formFromExperiment(existingExperimentQuery.data));
+    setLoadedId(id);
+  }
 
   const modelsQuery = useModels({ enabled: isStaff });
   const taxonomiesQuery = useTaxonomies({ enabled: isStaff });
@@ -107,21 +158,27 @@ export default function ExperimentBuilder() {
   const fewshotsQuery = useFewShots({}, { enabled: isStaff });
 
   const createExperiment = useCreateExperiment();
-  const runExperiment = useRunExperiment();
-  // Only meaningful once an experiment exists - `OPTIONS
-  // /api/experiments/{id}/run/` is a DETAIL route and needs a real id;
-  // `enabled` below keeps this from ever firing against a placeholder.
-  const runOptionsQuery = useRunOptions(savedExperiment?.id, { enabled: savedExperiment != null });
+  const updateExperiment = useUpdateExperiment();
+  const saveExperiment = isEditing ? updateExperiment : createExperiment;
 
   if (!isStaff) {
     return (
       <div className="space-y-2">
-        <h1 className="text-2xl font-semibold text-gray-900">New experiment</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">{isEditing ? 'Edit experiment' : 'New experiment'}</h1>
         <p role="status" className="text-sm text-gray-500">
-          Only staff can create or launch an experiment.
+          Only staff can create or edit an experiment.
         </p>
       </div>
     );
+  }
+
+  // Edit mode: hold the form until the real values have loaded, rather
+  // than briefly rendering the blank `emptyForm` defaults (which would
+  // otherwise flash, and could even be submitted if a click landed in that
+  // window).
+  if (isEditing && (existingExperimentQuery.isLoading || loadedId !== id)) {
+    if (existingExperimentQuery.isError) return <ErrorBanner error={existingExperimentQuery.error} />;
+    return <p className="text-sm text-gray-500">Loading experiment…</p>;
   }
 
   const models = modelsQuery.data?.results ?? [];
@@ -134,17 +191,16 @@ export default function ExperimentBuilder() {
   // Task 6's own acceptance bar: map every field-shaped DRF error onto the
   // field it names; fall back to ErrorBanner only for what's left
   // (`detail`/`non_field_errors`) — never both for the same body.
-  const fieldErrors = extractFieldErrors(createExperiment.error);
-  const showCreateBanner = createExperiment.isError && hasNonFieldError(createExperiment.error);
-  const launchErrorCode = runExperiment.error?.response?.data?.code;
+  const fieldErrors = extractFieldErrors(saveExperiment.error);
+  const showSaveBanner = saveExperiment.isError && hasNonFieldError(saveExperiment.error);
 
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function toggleInList(field, id) {
+  function toggleInList(field, itemId) {
     setForm((current) => {
-      const idStr = String(id);
+      const idStr = String(itemId);
       const list = current[field];
       return {
         ...current,
@@ -153,7 +209,7 @@ export default function ExperimentBuilder() {
     });
   }
 
-  async function handleCreate(event) {
+  async function handleSave(event) {
     event.preventDefault();
     const variants = [...(form.variantA ? ['A'] : []), ...(form.variantB ? ['B'] : [])];
     const payload = {
@@ -177,31 +233,26 @@ export default function ExperimentBuilder() {
       variants,
     };
     try {
-      const created = await createExperiment.mutateAsync(payload);
-      setSavedExperiment(created);
-      setLaunchResult(null);
+      const saved = isEditing
+        ? await updateExperiment.mutateAsync({ id, ...payload })
+        : await createExperiment.mutateAsync(payload);
+      // Task 10.3: launching (and everything else about an already-created
+      // experiment) now lives on its own detail screen, not inline here -
+      // landing there straight after create is what keeps a freshly-made
+      // experiment from ever being stranded (the old inline "Launch"
+      // section only existed for the one render right after `handleSave`
+      // resolved; navigating away, or a launch attempt's own 503 hint
+      // unmounting it, lost it for good with no route back).
+      navigate(`/experiments/${saved.id}`);
     } catch {
-      // Surfaced below via createExperiment.error/fieldErrors.
-    }
-  }
-
-  async function handleLaunch(event) {
-    event.preventDefault();
-    try {
-      const result = await runExperiment.mutateAsync({
-        id: savedExperiment.id,
-        n_repetitions: Number(nRepetitions || 1),
-      });
-      setLaunchResult(result);
-    } catch {
-      // Surfaced below via runExperiment.error - branch on .code, below.
+      // Surfaced below via saveExperiment.error/fieldErrors.
     }
   }
 
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">New experiment</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">{isEditing ? 'Edit experiment' : 'New experiment'}</h1>
         <p className="mt-1 text-sm text-gray-500">
           Pin the models, prompts, taxonomy and inputs this comparison will use. The experiment
           stays freely editable afterward — each launched repetition pins its own snapshot of the
@@ -210,7 +261,7 @@ export default function ExperimentBuilder() {
         </p>
       </div>
 
-      <form onSubmit={handleCreate} className="space-y-6 rounded-lg border border-gray-200 bg-white p-4">
+      <form onSubmit={handleSave} className="space-y-6 rounded-lg border border-gray-200 bg-white p-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label htmlFor="name" className="block text-xs font-medium text-gray-700">
@@ -517,99 +568,16 @@ export default function ExperimentBuilder() {
           <FieldError message={fieldErrors.variants} />
         </fieldset>
 
-        {showCreateBanner && <ErrorBanner error={createExperiment.error} />}
+        {showSaveBanner && <ErrorBanner error={saveExperiment.error} />}
 
         <button
           type="submit"
-          disabled={createExperiment.isPending}
+          disabled={saveExperiment.isPending}
           className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {createExperiment.isPending ? 'Creating…' : 'Create experiment'}
+          {saveExperiment.isPending ? 'Saving…' : isEditing ? 'Save changes' : 'Create experiment'}
         </button>
       </form>
-
-      {savedExperiment && (
-        <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
-          <h2 className="text-lg font-medium text-gray-900">Launch “{savedExperiment.name}”</h2>
-          <form onSubmit={handleLaunch} className="space-y-3">
-            <div>
-              <label htmlFor="repetitions" className="block text-xs font-medium text-gray-700">
-                Repetitions
-              </label>
-              <input
-                id="repetitions"
-                type="number"
-                min="1"
-                max="100"
-                value={nRepetitions}
-                onChange={(event) => setNRepetitions(event.target.value)}
-                className="mt-1 block w-32 rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              />
-              {/* Sourced live from `OPTIONS /api/experiments/{id}/run/`'s
-                  `actions.POST.n_repetitions.help_text` (backend commit
-                  6f8e9a0) - the one place this text lives now, so the API's
-                  own wording and this screen can never drift apart. The
-                  field itself (above) works regardless of this query's
-                  state - it is never gated on runOptionsQuery, only its own
-                  `nRepetitions` state (defaulted to '1'). Deliberately NEVER
-                  falls back to a hand-copied string while loading or on
-                  failure - a stale copy showing during an outage is exactly
-                  the drift this change was meant to remove; a neutral,
-                  fact-free notice is safer than a possibly-wrong one. */}
-              {runOptionsQuery.isError ? (
-                <p className="mt-1 max-w-2xl text-xs text-amber-700">
-                  Could not load the explanation for this field from the server right now — this
-                  does not affect the field itself, which still defaults to 1 and works normally.
-                </p>
-              ) : runOptionsQuery.isSuccess ? (
-                <p className="mt-1 max-w-2xl text-xs text-gray-500">
-                  {runOptionsQuery.data?.actions?.POST?.n_repetitions?.help_text}
-                </p>
-              ) : (
-                <p className="mt-1 max-w-2xl text-xs text-gray-500">
-                  Loading the explanation for this field…
-                </p>
-              )}
-            </div>
-            <button
-              type="submit"
-              disabled={runExperiment.isPending}
-              className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {runExperiment.isPending ? 'Launching…' : 'Launch'}
-            </button>
-          </form>
-
-          {runExperiment.isError && (
-            <div className="space-y-2">
-              <ErrorBanner error={runExperiment.error} />
-              {launchErrorCode === 'missing_api_key' && (
-                <p className="text-sm text-amber-800">
-                  <Link to="/settings" className="font-medium underline">
-                    Go to Settings
-                  </Link>{' '}
-                  to configure an OpenRouter key before launching.
-                </p>
-              )}
-            </div>
-          )}
-
-          {launchResult && (
-            <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3">
-              <p className="text-sm text-amber-800">{launchResult.detail}</p>
-              <ul className="list-disc space-y-1 pl-5 text-sm">
-                {launchResult.runs.map((run) => (
-                  <li key={run.id}>
-                    <Link to={`/pipeline-runs/${run.id}`} className="font-medium text-brand-700 underline">
-                      Repetition {run.repetition_index}
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </section>
-      )}
     </div>
   );
 }

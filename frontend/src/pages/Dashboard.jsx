@@ -76,12 +76,17 @@ export default function Dashboard() {
           <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
             {experiments.map((experiment) => (
               <li key={experiment.id} className="flex items-center justify-between gap-6 px-4 py-3">
-                <div className="min-w-0 flex-1">
+                {/* task 10.3: rows used to be plain text - the ONLY way
+                    back to an experiment already created (to launch it, or
+                    even just to look at it again) was re-typing its name
+                    into a new builder form, which `Experiment.name`'s own
+                    uniqueness constraint refuses. */}
+                <Link to={`/experiments/${experiment.id}`} className="min-w-0 flex-1 hover:underline">
                   <p className="truncate text-sm font-medium text-gray-900">{experiment.name}</p>
                   <p className="text-xs text-gray-500">
                     {experiment.run_count} {experiment.run_count === 1 ? 'run' : 'runs'}
                   </p>
-                </div>
+                </Link>
                 <div className="w-48 shrink-0">
                   <ProgressBar progress={experiment.progress} />
                 </div>

@@ -491,4 +491,87 @@ describe('Labels', () => {
     expect(within(matrix).getAllByRole('row')).toHaveLength(1 + 55); // header + 55 scenarios
     expect(within(matrix).getByRole('rowheader', { name: /System Alpha \/ row_55/ })).toBeInTheDocument();
   });
+
+  it("preselects the run from a URL param, the way Run detail's own link arrives", async () => {
+    renderApp({ initialEntries: ['/labels?run=101'] });
+
+    // No "Apply filters" click needed - the matrices render straight away.
+    expect(await screen.findByRole('rowheader', { name: /System Alpha \/ sc_01/ })).toBeInTheDocument();
+    expect(screen.getByLabelText(/run \(repetition id\)/i)).toHaveValue(101);
+  });
+
+  it("uses each variant's own PINNED taxonomy for its columns, not the currently active one", async () => {
+    const user = userEvent.setup();
+    // TAXONOMY (id 9) is what every phase run in this file actually pins -
+    // deactivate it and make a DIFFERENT taxonomy (id 20, a later version)
+    // active instead. Before task 10.2, this screen read its columns from
+    // whichever taxonomy is ACTIVE - it would have silently rendered
+    // variant A's real, pinned-taxonomy-9 labels under taxonomy 20's own
+    // HCV set instead (dropping any label on an HCV taxonomy 20 doesn't
+    // contain).
+    const activeButUnused = {
+      id: 20,
+      vocabulary_id: 'hcv-21',
+      version: '2',
+      notes: '',
+      is_active: true,
+      hcv_count: 21,
+      created_at: '2026-03-01T00:00:00Z',
+    };
+    server.use(
+      http.get('/api/taxonomies/', () => HttpResponse.json(paginated([{ ...TAXONOMY, is_active: false }, activeButUnused]))),
+      http.get('/api/taxonomies/:id/hcvs/', ({ params }) => {
+        if (Number(params.id) !== TAXONOMY.id) return HttpResponse.json(paginated([]));
+        return HttpResponse.json(paginated(HCVS));
+      })
+    );
+
+    renderApp({ initialEntries: ['/labels'] });
+    await applyRunFilter(user, { run: 101, variant: 'A' });
+
+    const matrix = await screen.findByTestId('variant-A-matrix');
+    // Still the PINNED taxonomy's own columns and labels - unaffected by
+    // which one is active.
+    expect(within(matrix).getByText('HCV-01')).toBeInTheDocument();
+    expect(within(within(matrix).getByTestId('cell-1001-HCV-01')).getByRole('button')).toBeInTheDocument();
+    // And it says so plainly, rather than silently using taxonomy 20.
+    expect(within(matrix).getByText(/hcv-21 v1/i)).toBeInTheDocument();
+    expect(within(matrix).getByText(/not the currently active hcv-21 v2/i)).toBeInTheDocument();
+  });
+
+  it("says plainly when a variant's own phase runs pinned different taxonomies, rather than merging them", async () => {
+    const user = userEvent.setup();
+    const mismatchScenario = scenarioRow({
+      id: 8501,
+      system_description: 11,
+      scenario_id: 'mismatch_01',
+      _variant: 'A',
+      _pipelineRunId: 603,
+    });
+    const mismatchPhaseRuns = [
+      { id: 801, pipeline_run: 603, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 210, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+      { id: 802, pipeline_run: 603, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 21, source_phase_run: 211, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [21], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+    ];
+    server.use(
+      http.get('/api/scenarios/', ({ request }) => {
+        const url = new URL(request.url);
+        return HttpResponse.json(
+          paginate(applyScenarioFilters([...SCENARIOS, mismatchScenario], url).map(toScenarioWire), url)
+        );
+      }),
+      http.get('/api/phase-runs/', ({ request }) => {
+        const url = new URL(request.url);
+        return HttpResponse.json(paginate(applyPhaseRunFilters([...PHASE_RUNS, ...mismatchPhaseRuns], url), url));
+      })
+    );
+
+    renderApp({ initialEntries: ['/labels'] });
+    await applyRunFilter(user, { run: 603, variant: 'A' });
+
+    const matrix = await screen.findByTestId('variant-A-matrix');
+    expect(within(matrix).getByText(/pinned more than one taxonomy/i)).toBeInTheDocument();
+    expect(within(matrix).getByText(/9, 21/)).toBeInTheDocument();
+    // Nothing merged - no table at all for this variant.
+    expect(within(matrix).queryByRole('table')).not.toBeInTheDocument();
+  });
 });

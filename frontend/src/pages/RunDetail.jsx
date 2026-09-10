@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
   isTerminalRunStatus,
@@ -336,6 +336,17 @@ export default function RunDetail() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
+        {/* task 10.2: before this link, the run id had to be typed by hand
+            on the Labels screen - the walkthrough's own screenshot showed
+            exactly that. `?run=` is read once at mount there as the
+            initial filter, so the matrices for THIS repetition render
+            immediately, no separate "Apply filters" click needed. */}
+        <Link
+          to={`/labels?run=${runId}`}
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+        >
+          View labels
+        </Link>
         <button
           type="button"
           onClick={() => handleExport('json')}
