@@ -1,13 +1,36 @@
+import axios from 'axios';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { authState, server } from '../../test/server';
+import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { requireCsrf, requireStaff } from '../../test/mockApi';
 
 beforeEach(() => {
   authState.currentUserEmail = null;
 });
+
+// Coordinator review (final polish, item 4): none of this file's five
+// PATCH handlers enforced staff/CSRF before now - `AppSettingsView` is
+// `IsAdminUser` AND, like every other unsafe method in this app, CSRF-
+// checked, but every test here installed its own bare resolver with
+// neither guard. A regression that stopped sending `X-CSRFToken` on a
+// settings PATCH (or that let a non-staff session reach this view) would
+// still have passed all 5. Matches `ExperimentBuilder.test.jsx`'s
+// `guardedExperimentWrite`/`ExperimentDetail.test.jsx`'s `guardedRunWrite` -
+// each test installs its OWN resolver (the response body differs per
+// test), so the guard wraps each one rather than living in a separate
+// layered handler an msw request would never actually reach.
+function guardedSettingsWrite(resolver) {
+  return async (info) => {
+    const staffRefusal = requireStaff(currentUser());
+    if (staffRefusal) return staffRefusal;
+    const csrfRefusal = requireCsrf(info.request);
+    if (csrfRefusal) return csrfRefusal;
+    return resolver(info);
+  };
+}
 
 describe('Settings', () => {
   it('shows the masked key and which source is in effect for a staff user', async () => {
@@ -37,15 +60,18 @@ describe('Settings', () => {
       http.get('/api/settings/', () =>
         HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-01T00:00:00Z' })
       ),
-      http.patch('/api/settings/', async ({ request }) => {
-        const body = await request.json();
-        receivedKey = body.openrouter_key;
-        return HttpResponse.json({
-          openrouter_key_masked: 'sk-o...9999',
-          key_source: 'settings',
-          updated_at: '2026-09-05T00:00:00Z',
-        });
-      })
+      http.patch(
+        '/api/settings/',
+        guardedSettingsWrite(async ({ request }) => {
+          const body = await request.json();
+          receivedKey = body.openrouter_key;
+          return HttpResponse.json({
+            openrouter_key_masked: 'sk-o...9999',
+            key_source: 'settings',
+            updated_at: '2026-09-05T00:00:00Z',
+          });
+        })
+      )
     );
 
     const user = userEvent.setup();
@@ -88,8 +114,11 @@ describe('Settings', () => {
       http.get('/api/settings/', () =>
         HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-01T00:00:00Z' })
       ),
-      http.patch('/api/settings/', () =>
-        HttpResponse.json({ openrouter_key: ['This field may not be blank.'] }, { status: 400 })
+      http.patch(
+        '/api/settings/',
+        guardedSettingsWrite(() =>
+          HttpResponse.json({ openrouter_key: ['This field may not be blank.'] }, { status: 400 })
+        )
       )
     );
 
@@ -131,14 +160,17 @@ describe('Settings', () => {
         http.get('/api/settings/', () =>
           HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
         ),
-        http.patch('/api/settings/', async ({ request }) => {
-          receivedBody = await request.json();
-          return HttpResponse.json({
-            openrouter_key_masked: 'sk-e...nv01',
-            key_source: 'environment',
-            updated_at: '2026-09-06T00:00:00Z',
-          });
-        })
+        http.patch(
+          '/api/settings/',
+          guardedSettingsWrite(async ({ request }) => {
+            receivedBody = await request.json();
+            return HttpResponse.json({
+              openrouter_key_masked: 'sk-e...nv01',
+              key_source: 'environment',
+              updated_at: '2026-09-06T00:00:00Z',
+            });
+          })
+        )
       );
 
       const user = userEvent.setup();
@@ -175,10 +207,13 @@ describe('Settings', () => {
         http.get('/api/settings/', () =>
           HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
         ),
-        http.patch('/api/settings/', () => {
-          patchCalled = true;
-          return HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-06T00:00:00Z' });
-        })
+        http.patch(
+          '/api/settings/',
+          guardedSettingsWrite(() => {
+            patchCalled = true;
+            return HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-06T00:00:00Z' });
+          })
+        )
       );
 
       const user = userEvent.setup();
@@ -198,8 +233,11 @@ describe('Settings', () => {
         http.get('/api/settings/', () =>
           HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
         ),
-        http.patch('/api/settings/', () =>
-          HttpResponse.json({ detail: 'Something went wrong clearing the key.' }, { status: 500 })
+        http.patch(
+          '/api/settings/',
+          guardedSettingsWrite(() =>
+            HttpResponse.json({ detail: 'Something went wrong clearing the key.' }, { status: 500 })
+          )
         )
       );
 
@@ -211,6 +249,25 @@ describe('Settings', () => {
       await user.click(screen.getByRole('button', { name: /^confirm$/i }));
 
       expect(await screen.findByRole('alert')).toHaveTextContent(/something went wrong clearing the key/i);
+    });
+  });
+
+  // Coordinator review (final polish, item 4): proves the guard just wired
+  // into this file's own PATCH handlers actually refuses a write with no
+  // `X-CSRFToken` header - not merely present in the file, unreachable. A
+  // fresh axios instance (no interceptors, unlike `apiClient`, which always
+  // attaches the header correctly and so could never exercise this) talks
+  // to the SAME mock server msw intercepts regardless of which client made
+  // the request.
+  it('the mock refuses a PATCH to /api/settings/ with no CSRF header (guard actually wired)', async () => {
+    authState.currentUserEmail = 'admin@example.com';
+    server.use(
+      http.patch('/api/settings/', guardedSettingsWrite(() => HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-01T00:00:00Z' })))
+    );
+    const rawClient = axios.create({ baseURL: '/api', withCredentials: true });
+
+    await expect(rawClient.patch('/settings/', { openrouter_key: 'sk-or-shouldnotwork' })).rejects.toMatchObject({
+      response: { status: 403 },
     });
   });
 });

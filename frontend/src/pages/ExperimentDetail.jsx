@@ -55,6 +55,21 @@ function FieldNote({ message }) {
   return <p className="mt-1 text-xs text-red-700">{message}</p>;
 }
 
+// Coordinator review (final polish, item 1): the only launch-refusal fields
+// this screen has an inline slot for at all - the two `<FieldNote>`s next
+// to Phase 2 prompt A/B above. `RunRequestSerializer`/`Experiment.clean()`
+// (backend/pipeline/views.py's `run` action, ~line 337) can refuse a launch
+// keyed on plenty of OTHER fields too (`seed_systems`, `target_system`,
+// `taxonomy`, `generate_systems`, `n_repetitions`, ...), or with no field at
+// all (`non_field_errors`/a bare `detail`). Before this, `showLaunchBanner`
+// only fired for the latter shape (`hasNonFieldError`, shared with
+// ExperimentBuilder.jsx, which assumes every field error already has an
+// inline slot somewhere in a FULL FORM - true there, false here: this
+// screen is a read-only config summary with exactly two inline slots). A
+// refusal on `seed_systems` landed in neither an inline note nor the
+// banner - it simply vanished, and Launch appeared to silently do nothing.
+const INLINE_LAUNCH_FIELDS = new Set(['phase2_prompt_a', 'phase2_prompt_b']);
+
 export default function ExperimentDetail() {
   const { id } = useParams();
   const experimentId = Number(id);
@@ -104,13 +119,35 @@ export default function ExperimentDetail() {
   // field the create/edit form itself uses, even though this error arrived
   // from the LAUNCH action, not a save.
   const launchFieldErrors = extractFieldErrors(runExperiment.error);
-  const showLaunchBanner = runExperiment.isError && hasNonFieldError(runExperiment.error);
+  // Every field error THIS SCREEN has no inline slot for - falls back to a
+  // visible banner naming the field, rather than disappearing the way
+  // `hasNonFieldError` alone let it (see `INLINE_LAUNCH_FIELDS`'s own
+  // comment above).
+  const uncoveredLaunchFieldErrors = Object.entries(launchFieldErrors).filter(
+    ([field]) => !INLINE_LAUNCH_FIELDS.has(field)
+  );
+  const showLaunchBanner =
+    runExperiment.isError && (hasNonFieldError(runExperiment.error) || uncoveredLaunchFieldErrors.length > 0);
   const launchErrorCode = runExperiment.error?.response?.data?.code;
+
+  // Coordinator review (final polish, item 1): `OPTIONS .../run/` reports
+  // `n_repetitions` as 1-100 (`RunRequestSerializer`), but nothing here
+  // ever enforced that client-side - the field was a bare, unclamped
+  // string, and the API's own out-of-range 400 fell into exactly the
+  // silent-failure gap above. Fixed in both directions: constrained here so
+  // a normal user can never submit an out-of-range value through this UI at
+  // all, AND `uncoveredLaunchFieldErrors` above still surfaces an
+  // `n_repetitions` refusal if the API ever sends one anyway (a stale tab,
+  // a future backend rule this screen doesn't know about yet).
+  const parsedRepetitions = Number(nRepetitions);
+  const repetitionsInvalid =
+    nRepetitions.trim() === '' || !Number.isInteger(parsedRepetitions) || parsedRepetitions < 1 || parsedRepetitions > 100;
 
   async function handleLaunch(event) {
     event.preventDefault();
+    if (repetitionsInvalid) return;
     try {
-      const result = await runExperiment.mutateAsync({ id: experimentId, n_repetitions: Number(nRepetitions || 1) });
+      const result = await runExperiment.mutateAsync({ id: experimentId, n_repetitions: parsedRepetitions });
       setLaunchResult(result);
     } catch {
       // Surfaced below via runExperiment.error/launchFieldErrors.
@@ -257,10 +294,13 @@ export default function ExperimentDetail() {
               ) : (
                 <p className="mt-1 max-w-2xl text-xs text-gray-500">Loading the explanation for this field…</p>
               )}
+              {repetitionsInvalid && (
+                <p className="mt-1 text-xs text-red-700">Enter a whole number between 1 and 100.</p>
+              )}
             </div>
             <button
               type="submit"
-              disabled={runExperiment.isPending}
+              disabled={runExperiment.isPending || repetitionsInvalid}
               className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {runExperiment.isPending ? 'Launching…' : 'Launch'}
@@ -269,7 +309,16 @@ export default function ExperimentDetail() {
 
           {showLaunchBanner && (
             <div className="space-y-2">
-              <ErrorBanner error={runExperiment.error} />
+              {hasNonFieldError(runExperiment.error) && <ErrorBanner error={runExperiment.error} />}
+              {uncoveredLaunchFieldErrors.length > 0 && (
+                <div role="alert" className="space-y-1 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {uncoveredLaunchFieldErrors.map(([field, message]) => (
+                    <p key={field}>
+                      <span className="font-semibold">{field}:</span> {message}
+                    </p>
+                  ))}
+                </div>
+              )}
               {launchErrorCode === 'missing_api_key' && (
                 <p className="text-sm text-amber-800">
                   <Link to="/settings" className="font-medium underline">

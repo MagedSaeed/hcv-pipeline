@@ -823,6 +823,36 @@ describe('PromptEditor', () => {
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
   });
 
+  // Coordinator review (final polish, item 2): a probe found the Save-gate
+  // key (`computeAttemptKey`, `forVariant`) correctly disables Save the
+  // moment the variant radio is switched, WITHOUT touching the template
+  // (unlike the test above, which switches to a whole different template -
+  // `loadVersion` resetting `variant` to '' would mask a bug here). Nothing
+  // guarded this: `forVariant` could be dropped from the key entirely and
+  // every other test in this file would still pass, since none of them
+  // switch variant on the SAME already-previewed template. `phase2-safe`
+  // never references `{{ taxonomy }}`, so it genuinely previews clean under
+  // BOTH variants - the only way to prove this is "not yet re-validated for
+  // THIS variant", not "would fail under A anyway".
+  it('switching the variant radio on an already-previewed template disables Save again, even though the body never changed', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    await selectTemplate(user, 'phase2-safe');
+    await user.click(screen.getByLabelText(/variant b/i));
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
+    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
+
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    expect(saveButton).toBeEnabled();
+
+    // Same template, same draft body - only the variant choice changes.
+    await user.click(screen.getByLabelText(/variant a/i));
+
+    expect(saveButton).toBeDisabled();
+    expect(screen.getByText(/preview this exact content successfully/i)).toBeInTheDocument();
+  });
+
   // Task 10.4: the real endpoint fails CLOSED (400) for a variant-A preview
   // whose isolation scan could not actually run - never a clean 200 with
   // `leak_scan_ran: false`. Before this task, the mock always returned 200

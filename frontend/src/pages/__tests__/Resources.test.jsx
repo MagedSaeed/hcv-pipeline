@@ -1,12 +1,13 @@
 import { File as NodeFile } from 'node:buffer';
 import { FormData as UndiciFormData } from 'undici';
+import axios from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
-import { paginate } from '../../test/mockApi';
+import { paginate, requireCsrf } from '../../test/mockApi';
 
 // jsdom's own `File`/`FormData` classes do not survive the trip through
 // msw's Node-side request interception intact: a file appended via jsdom's
@@ -76,7 +77,18 @@ beforeEach(() => {
   server.use(
     http.get('/api/resources/', () => HttpResponse.json(paginated(resources))),
 
+    // Coordinator review (final polish, item 4): none of this file's three
+    // write handlers enforced CSRF before now - every OTHER screen's
+    // handlers do (see Corpus.test.jsx/PromptEditor.test.jsx), but these
+    // three were left as one of the last two permissive spots, so a client
+    // regression that stopped sending `X-CSRFToken` on a resource/few-shot
+    // write would still pass every test in this file. `/api/resources/` and
+    // `/api/fewshots/` carry no extra staff restriction (spec §9's CRUD
+    // routes for both), so only `requireCsrf` applies here - never
+    // `requireStaff`.
     http.post('/api/resources/', async ({ request }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const formData = await request.formData();
       const file = formData.get('file');
       const text = file && typeof file !== 'string' ? await file.text() : formData.get('text') || '';
@@ -94,7 +106,9 @@ beforeEach(() => {
       return HttpResponse.json(created, { status: 201 });
     }),
 
-    http.delete('/api/resources/:id/', ({ params }) => {
+    http.delete('/api/resources/:id/', ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const id = Number(params.id);
       const referencing = fewshots.find(
         (fewshot) => fewshot.input_file === id || fewshot.output_file === id
@@ -118,6 +132,8 @@ beforeEach(() => {
     http.get('/api/fewshots/', () => HttpResponse.json(paginated(fewshots.map(toFewShotResponse)))),
 
     http.post('/api/fewshots/', async ({ request }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const body = await request.json();
       const created = {
         id: nextFewShotId++,
@@ -314,5 +330,25 @@ describe('Resources', () => {
 
     const fewshotListEl = await fewshotList();
     expect(await within(fewshotListEl).findByText('filler-fewshot-55')).toBeInTheDocument();
+  });
+
+  // Coordinator review (final polish, item 4): proves the CSRF guard just
+  // wired into this file's own handlers actually refuses a write with no
+  // `X-CSRFToken` header - not merely present in the file, unreachable. A
+  // fresh axios instance (no interceptors at all, unlike `apiClient`, which
+  // always attaches the header correctly and so could never exercise this)
+  // talks to the SAME mock server msw intercepts regardless of which client
+  // made the request - the same "call the raw client directly" pattern
+  // ExperimentBuilder.test.jsx/ExperimentDetail.test.jsx use to prove their
+  // own staff guards are wired, applied here to CSRF instead.
+  it('the mock refuses a write to /api/fewshots/ with no CSRF header (guard actually wired)', async () => {
+    const rawClient = axios.create({ baseURL: '/api', withCredentials: true });
+
+    await expect(rawClient.post('/fewshots/', { phase: 2, name: 'no-csrf-header' })).rejects.toMatchObject({
+      response: { status: 403 },
+    });
+    // Nothing was created - the refusal happened before the handler's own
+    // body ever ran.
+    expect(fewshots).toHaveLength(0);
   });
 });
