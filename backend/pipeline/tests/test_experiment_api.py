@@ -455,3 +455,24 @@ def test_n_repetitions_help_text_explains_why_the_number_exists_and_stays_defaul
     assert "1 repetition still takes about 23 minutes" in help_text
     assert "divided by 2" not in help_text
     assert "noise" in help_text or "stochastic" in help_text
+
+
+@pytest.mark.django_db
+def test_options_on_run_describes_n_repetitions_help_text(api_client, staff, experiment):
+    """Frontend gap: OPTIONS /api/experiments/{id}/run/ must describe
+    RunRequestSerializer, the shape POST actually reads (see `run`, above) —
+    not ExperimentSerializer, which is all DRF reports by default for every
+    action's OPTIONS alike. Without this, the frontend has to hand-copy
+    n_repetitions' help_text (see the test above for what it says and why),
+    and the API text and the UI's copy can drift apart."""
+    from pipeline.serializers import RunRequestSerializer
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.options(f"/api/experiments/{experiment.id}/run/")
+
+    assert response.status_code == 200
+    fields = response.json()["actions"]["POST"]
+    assert set(fields) == {"n_repetitions"}
+    assert fields["n_repetitions"]["help_text"] == RunRequestSerializer().fields[
+        "n_repetitions"
+    ].help_text

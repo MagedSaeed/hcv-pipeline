@@ -10,6 +10,7 @@ from core.permissions import StaffWrites as BaseStaffWrites
 from corpus.models import FewShotExample, Scenario, SystemDescription
 from prompts.models import PromptTemplate
 from prompts.rendering import (
+    VARIANT_UNBIASED,
     PromptRenderError,
     TaxonomyLeak,
     build_phase2_context,
@@ -170,6 +171,33 @@ class PromptTemplateViewSet(
         except (TaxonomyLeak, PromptRenderError) as error:
             raise ValidationError({"detail": str(error)}) from error
 
+        # Fail CLOSED, mirroring `assert_request_not_leaking_taxonomy` (the
+        # final choke point a real run passes through immediately before the
+        # HTTP call): a variant-A render for which the backstop could not
+        # actually run — no `guard_taxonomy` supplied and no active Taxonomy,
+        # or a guard taxonomy with no scannable rows — must never be
+        # presentable as a clean 200. Coordinator review: an unbound
+        # `guard_taxonomy` (or none at all) previously still returned 200
+        # with `leak_scan_ran: false`, which read as "checked, and clean" to
+        # anyone who didn't read that field closely — the same defect shape
+        # `pipeline.models.unbound_guard_taxonomy_error` took four rounds to
+        # close on the run path, now reachable again in a single stateless
+        # preview request. `rendered.leak_scan_ran` already carries exactly
+        # the fact needed: True only when `assert_no_taxonomy_leak` genuinely
+        # compared the render against real HCV content. Scoped to variant-A
+        # GENERATION contexts specifically (`context["_variant"]`, never set
+        # for phase 3 labelling, which always legitimately sees the taxonomy
+        # and has nothing to scan for) rather than to the flag alone.
+        if context.get("_variant") == VARIANT_UNBIASED and not rendered.leak_scan_ran:
+            raise ValidationError(
+                {
+                    "detail": "No taxonomy to check this variant-A preview against, "
+                    "so the isolation backstop could not run. Pass guard_taxonomy=, "
+                    "or activate a Taxonomy, before previewing — a preview that "
+                    "proved nothing must not be shown as clean."
+                }
+            )
+
         return Response(
             {
                 "system_prompt": rendered.system,
@@ -197,22 +225,26 @@ class PromptTemplateViewSet(
         persisted" true by construction rather than by a cleanup step that
         could be forgotten on some error path.
 
-        A draft is signalled by `user_prompt` being present, not merely any
-        of the three DRAFT_FIELDS: it is the one field a real PromptTemplate
-        actually requires (`system_prompt`/`output_schema` both have model
-        defaults), so a request that supplies one of those two WITHOUT
-        `user_prompt` is refused rather than silently rendering a hybrid of
-        "half draft, half whatever the stored row happens to have" that
-        nobody asked for and the editor never sends.
+        A PARTIAL draft — say, only `system_prompt` edited — falls back to
+        the PERSISTED row's own stored value for whichever of the three
+        fields it does not supply, never to a bare default of `""`/`{}`.
+        Coordinator review: a draft that edited only `user_prompt` used to
+        drop the stored `output_schema` to `{}` in the process, so a template
+        whose real, saved schema enumerates HCV ids previewed as a clean 200
+        under variant A — the endpoint's own promise ("exactly as a run
+        would") broken in exactly the direction that matters least safely.
+        Falling back to the STORED value for every field a draft omits is
+        what keeps that promise true for a partial edit, not just a full
+        one — a draft always previews against "the stored row, with these
+        specific edits applied", the same shape `new_version()`/`PATCH`
+        already treat as an edit (`PromptTemplate.COPIED_FIELDS`).
+
+        There is nothing to fall back to for a template with no id at all —
+        `user_prompt` is REQUIRED there (the one field the model itself
+        requires; `system_prompt`/`output_schema` still default to `""`/`{}`,
+        the same defaults a freshly-created row would get).
         """
         overrides = {field: config[field] for field in self.DRAFT_FIELDS if field in config}
-        if overrides and "user_prompt" not in overrides:
-            raise ValidationError(
-                {
-                    "user_prompt": "A draft preview needs user_prompt alongside "
-                    "system_prompt/output_schema, not just one of them."
-                }
-            )
         if template is None and "user_prompt" not in overrides:
             raise ValidationError(
                 {"user_prompt": "Previewing a template with no id requires user_prompt."}
@@ -228,16 +260,22 @@ class PromptTemplateViewSet(
                     {"phase": "Previewing a template with no id requires phase."}
                 )
             phase, name = config["phase"], ""
+            system_prompt = overrides.get("system_prompt", "")
+            user_prompt = overrides["user_prompt"]
+            output_schema = overrides.get("output_schema", {})
         else:
             phase, name = template.phase, template.name
+            system_prompt = overrides.get("system_prompt", template.system_prompt)
+            user_prompt = overrides.get("user_prompt", template.user_prompt)
+            output_schema = overrides.get("output_schema", template.output_schema)
 
         return PromptTemplate(
             phase=phase,
             name=name,
             version=0,
-            system_prompt=overrides.get("system_prompt", ""),
-            user_prompt=overrides["user_prompt"],
-            output_schema=overrides.get("output_schema", {}),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_schema=output_schema,
         )
 
     def _context(self, template, config, taxonomy):

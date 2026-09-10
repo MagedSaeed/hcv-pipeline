@@ -412,6 +412,49 @@ def test_an_empty_output_schema_does_not_disturb_a_variant_a_render(taxonomy):
     assert render(make("Generate."), base("A")).user == "Generate."
 
 
+@pytest.fixture
+def taxonomy_with_escapable_names(db):
+    """Same shape as `test_rendering.py`'s fixture of the same name: HCV
+    names each embedding a character JSON escaping treats specially — a
+    double quote, a backslash, a real newline. Local to this file (no shared
+    conftest fixture) so this test pins the SAME class of bug in `render()`'s
+    OWN output_schema scan that the other fixture's tests already pin for
+    `assert_request_not_leaking_taxonomy`."""
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-ESCAPE-SCHEMA", version="1.0", is_active=True)
+    names = [
+        'Say "Hello" Attack',
+        "Path\\Traversal Concept",
+        "Multi\nLine Concept",
+    ]
+    for index, name in enumerate(names, start=1):
+        HCV.objects.create(taxonomy=tax, hcv_id=f"ESCS-{index}", name=name, order=index)
+    return tax
+
+
+@pytest.mark.django_db
+def test_output_schema_scan_catches_names_with_json_escapable_characters(
+    taxonomy_with_escapable_names,
+):
+    """Round 4's fourth leak route (output_schema), re-checked against the
+    SAME escaping gap round 4's OTHER scan (`assert_request_not_leaking_
+    taxonomy`) was already fixed for: comparing against a `json.dumps`'d
+    blob HIDES a name containing a quote/backslash/newline from a raw
+    substring search, because `json.dumps` escapes exactly those characters
+    (a literal `"` becomes the two characters `\\"`, a real newline becomes
+    the two characters `\\n`). `render()`'s own output_schema scan must walk
+    the schema's RAW text instead — the same way the final request scan
+    does — or the two scans can disagree about content embedded with one of
+    these characters."""
+    names = [row.name for row in taxonomy_with_escapable_names.hcvs.all()]
+    leaked_text = " and also: ".join(names)
+    template = make(
+        "Generate.",
+        output_schema={"type": "object", "properties": {"labels": {"description": leaked_text}}},
+    )
+    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+        render(template, base("A", guard_taxonomy=taxonomy_with_escapable_names))
+
+
 # --- Round 4: the render record (I4) and the fail-closed variant marker (I5) ----
 
 

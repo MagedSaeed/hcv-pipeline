@@ -69,7 +69,6 @@ for the test pinning this fail-closed behaviour as a checked guarantee
 rather than advice someone has to remember.
 """
 
-import json
 import warnings
 from dataclasses import dataclass, replace
 
@@ -623,11 +622,29 @@ def render(template, context):
         return rendered
 
     guard = context.get("_guard_taxonomy")
+    try:
+        schema_text = "\n".join(_iter_request_text(template.output_schema))
+    except (TypeError, ValueError) as error:
+        raise PromptRenderError(
+            f"output_schema could not be scanned for a taxonomy leak ({error})."
+        ) from error
     scanned = assert_no_taxonomy_leak(
         guard,
         rendered,
-        # The schema is part of the request body, so it is part of what is scanned.
-        extra=json.dumps(template.output_schema, ensure_ascii=False),
+        # The schema is part of the request body, so it is part of what is
+        # scanned — walked with `_iter_request_text`, the SAME raw-string walk
+        # `assert_request_not_leaking_taxonomy` uses for the final request
+        # scan, NOT `json.dumps`. Coordinator review: `json.dumps` escapes a
+        # literal `"`, backslash, newline or tab inside a string value (`"`
+        # becomes `\"`, a real newline becomes the two characters `\n`, and
+        # so on), so a taxonomy name or definition containing one of those
+        # characters, embedded verbatim in the schema, stopped being a
+        # literal substring of the dumped blob even though it IS one of the
+        # raw schema text — exactly the gap `_iter_request_text`'s own
+        # docstring describes, now closed here too so this scan can never
+        # again disagree with the final request scan about what "the same
+        # content" means.
+        extra=schema_text,
     )
     return replace(
         rendered,

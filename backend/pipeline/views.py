@@ -165,6 +165,34 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
     serializer_class = ExperimentSerializer
     permission_classes = [IsAuthenticated, StaffWrites]
 
+    def get_serializer_class(self):
+        """`run` reads `RunRequestSerializer` directly (see that action,
+        below) rather than through `self.get_serializer()`, so this override
+        exists for exactly one caller: DRF's `OPTIONS` metadata, which is how
+        a frontend discovers `n_repetitions`' `help_text` — the $1.61/23-
+        minute cost explanation — without hand-copying it and risking drift.
+
+        `self.action` is **not** enough here. `ViewSetMixin.initialize_request`
+        hardcodes `self.action = "metadata"` for every `OPTIONS` request,
+        whatever URL it targets — so a plain `if self.action == "run": ...`
+        (the pattern `PhaseRunViewSet.get_serializer_class` uses below, which
+        works because a real POST to `/create/` genuinely sets
+        `self.action = "create"`) would never fire for `OPTIONS
+        /api/experiments/{id}/run/`, and this method would keep reporting
+        `ExperimentSerializer`'s fields for every action alike.
+        `self.action_map` is what survives that: it is set once, from the
+        URL's own routing, before `self.action` gets overwritten, and DRF's
+        `SimpleMetadata.determine_actions` clones the probed request onto
+        `self.request` with `method` set to `"POST"` before calling
+        `get_serializer()` — so `self.action_map.get(self.request.method.
+        lower())` resolves to `"run"` correctly whether this runs during a
+        real POST (where it agrees with `self.action` anyway) or during
+        `OPTIONS`'s metadata probe (where `self.action` alone cannot tell).
+        """
+        if self.action_map.get(self.request.method.lower()) == "run":
+            return RunRequestSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         """Annotate the roll-ups the serializer needs, once, for the whole page.
 

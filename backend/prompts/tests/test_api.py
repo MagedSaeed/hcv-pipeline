@@ -99,12 +99,18 @@ def test_bad_phase_filter_is_a_400(api_client, member, template):
 
 
 @pytest.mark.django_db
-def test_preview_returns_the_exact_rendered_strings(api_client, staff, template):
+def test_preview_returns_the_exact_rendered_strings(api_client, staff, template, taxonomy):
     system = SystemDescription.objects.create(title="Oldsmar", body="A plant.", origin=Origin.SEED)
     api_client.force_authenticate(user=staff)
     response = api_client.post(
         f"/api/prompts/{template.id}/preview/",
-        {"variant": "A", "n_systems": 4, "n_scenarios_per_system": 5, "seed_systems": [system.id]},
+        {
+            "variant": "A",
+            "guard_taxonomy": taxonomy.id,
+            "n_systems": 4,
+            "n_scenarios_per_system": 5,
+            "seed_systems": [system.id],
+        },
         format="json",
     )
     assert response.status_code == 200
@@ -308,12 +314,16 @@ def schema_with_ids():
 
 
 @pytest.mark.django_db
-def test_preview_reports_that_nothing_was_scanned_when_there_is_no_guard(
-    api_client, staff, template
-):
-    """With no active taxonomy and no guard supplied, the backstop cannot run.
-    A bare 200 would read as proof of isolation, so the response says outright
-    that nothing was checked."""
+def test_preview_refuses_when_there_is_no_guard_to_scan_against(api_client, staff, template):
+    """With no active taxonomy and no guard supplied, the backstop cannot run
+    at all. Coordinator review: this used to return a bare 200 with
+    `leak_scan_ran: false`, which read as "checked, and clean" to anyone who
+    didn't read that field closely — reachable in a single stateless preview
+    request, the same defect shape `pipeline.models.unbound_guard_taxonomy_
+    error` took four review rounds to close on the run path. A variant-A
+    preview that cannot actually scan must fail CLOSED, mirroring
+    `assert_request_not_leaking_taxonomy`, rather than be presentable as
+    clean."""
     assert Taxonomy.objects.filter(is_active=True).count() == 0
     api_client.force_authenticate(user=staff)
     response = api_client.post(
@@ -322,9 +332,8 @@ def test_preview_reports_that_nothing_was_scanned_when_there_is_no_guard(
         format="json",
     )
 
-    assert response.status_code == 200
-    assert response.json()["leak_scan_ran"] is False
-    assert response.json()["guarded_by"] is None
+    assert response.status_code == 400
+    assert "backstop could not run" in str(response.json())
 
 
 @pytest.mark.django_db
@@ -615,7 +624,7 @@ def test_draft_preview_with_a_fewshot_referencing_a_taxonomy_resource_is_refused
 
 
 @pytest.mark.django_db
-def test_draft_preview_of_a_brand_new_template_with_no_id_works(api_client, staff):
+def test_draft_preview_of_a_brand_new_template_with_no_id_works(api_client, staff, taxonomy):
     """The other half of the gap: a template that has never been saved at all
     has no id to preview against via the detail route."""
     api_client.force_authenticate(user=staff)
@@ -626,6 +635,7 @@ def test_draft_preview_of_a_brand_new_template_with_no_id_works(api_client, staf
         {
             "phase": 2,
             "variant": "A",
+            "guard_taxonomy": taxonomy.id,
             "user_prompt": "Make {{ n_systems }} systems.",
             "n_systems": 3,
             "n_scenarios_per_system": 1,
@@ -687,27 +697,76 @@ def test_draft_preview_of_a_brand_new_template_without_a_body_is_a_400(api_clien
 
 
 @pytest.mark.django_db
-def test_a_partial_draft_body_without_user_prompt_is_refused(api_client, staff, template):
-    """system_prompt/output_schema alone, without user_prompt, must not fall
-    back to a hybrid of "draft here, stored template there"."""
+def test_a_partial_draft_falls_back_to_the_stored_user_prompt(
+    api_client, staff, template, taxonomy
+):
+    """A draft that edits only system_prompt must still render this
+    template's real, STORED user_prompt — not an empty one — and the draft
+    system_prompt must actually reach the render, not be silently dropped."""
     api_client.force_authenticate(user=staff)
     response = api_client.post(
         f"/api/prompts/{template.id}/preview/",
         {
             "variant": "A",
+            "guard_taxonomy": taxonomy.id,
             "system_prompt": "You are helpful.",
+            "n_systems": 4,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 200
+    assert response.json()["system_prompt"] == "You are helpful."
+    assert response.json()["user_prompt"] == "Make 4 systems."
+
+
+@pytest.mark.django_db
+def test_a_partial_draft_falls_back_to_the_stored_output_schema_and_is_refused_like_a_real_run(
+    api_client, staff, taxonomy
+):
+    """The most important regression: a draft that edits only user_prompt
+    must NOT silently drop the stored output_schema to `{}`. Coordinator
+    review: previously it did, so a template whose real, SAVED schema
+    enumerates HCV ids previewed as a clean 200 under variant A — a persisted
+    preview of the identical row correctly returns 400, and a draft touching
+    only the prompt text must be refused exactly the same way, because a
+    real run against this row would send that same leaking schema."""
+    leaky = PromptTemplate.objects.create_version(
+        phase=2, name="leaky-schema-draft", user_prompt="Generate.", output_schema=schema_with_ids()
+    )
+    api_client.force_authenticate(user=staff)
+
+    persisted = api_client.post(
+        f"/api/prompts/{leaky.id}/preview/",
+        {
+            "variant": "A",
+            "guard_taxonomy": taxonomy.id,
             "n_systems": 1,
             "n_scenarios_per_system": 1,
         },
         format="json",
     )
-    assert response.status_code == 400
-    assert "user_prompt" in response.json()
+    assert persisted.status_code == 400
+    assert "HCV-07" in str(persisted.json())
+
+    draft = api_client.post(
+        f"/api/prompts/{leaky.id}/preview/",
+        {
+            "variant": "A",
+            "guard_taxonomy": taxonomy.id,
+            "user_prompt": "Generate something else entirely.",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert draft.status_code == 400
+    assert "HCV-07" in str(draft.json())
 
 
 @pytest.mark.django_db
 def test_draft_preview_returns_the_draft_output_schema_not_the_stored_one(
-    api_client, staff, template
+    api_client, staff, template, taxonomy
 ):
     api_client.force_authenticate(user=staff)
     draft_schema = {"type": "object", "properties": {"x": {"type": "string"}}}
@@ -715,6 +774,7 @@ def test_draft_preview_returns_the_draft_output_schema_not_the_stored_one(
         f"/api/prompts/{template.id}/preview/",
         {
             "variant": "A",
+            "guard_taxonomy": taxonomy.id,
             "user_prompt": "Generate.",
             "output_schema": draft_schema,
             "n_systems": 1,
@@ -726,6 +786,48 @@ def test_draft_preview_returns_the_draft_output_schema_not_the_stored_one(
     assert response.json()["output_schema"] == draft_schema
     template.refresh_from_db()
     assert template.output_schema == {}
+
+
+@pytest.mark.django_db
+def test_a_draft_output_schema_that_is_not_an_object_is_rejected(api_client, staff, template):
+    """PreviewSerializer.validate_output_schema (shared with
+    PromptTemplateSerializer's own check via _require_json_object) must
+    actually run on the preview half too, not just the save half."""
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "user_prompt": "Generate.",
+            "output_schema": ["not", "a", "schema"],
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "output_schema" in response.json()
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_rejects_an_invalid_phase(api_client, staff):
+    """`phase` is a ChoiceField restricted to PromptTemplate.PHASE_CHOICES
+    (2 or 3), not a bare integer — a preview naming a phase that doesn't
+    exist must be refused here, not reach _context() and behave oddly."""
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 99,
+            "variant": "A",
+            "user_prompt": "Generate.",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "phase" in response.json()
 
 
 @pytest.mark.django_db
