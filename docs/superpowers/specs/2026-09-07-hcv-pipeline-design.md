@@ -878,20 +878,62 @@ are unaffected.
 
 ## 10. Screens
 
-*This section is under revision and does not yet reflect the current backend.*
+Ten screens. The researcher's day is two loops: tune a prompt until the output is
+worth running, then launch, watch, and read the result. The layout follows those
+loops rather than the data model.
 
 | Screen | Purpose |
 |---|---|
-| Login | email + password; forced change on first login |
+| Login | email + password; fetches `GET /api/auth/csrf/` first; forced change on first login |
 | Settings | staff only: OpenRouter key, masked, with which source is currently in effect |
-| Dashboard | experiments and recent runs with status |
+| Dashboard | experiments and recent runs with status and progress |
 | Resources | upload text files, view extracted text, pair them into few-shots |
-| Taxonomy | the 21 HCVs, read-only, with version selector |
-| Corpus | system descriptions and scenarios; filter by origin, run, variant; seed and manual rows editable, generated rows read-only and marked as such |
-| Prompt editor | Jinja2 editor, version history, live preview of the exact rendered prompt |
-| Experiment builder | models, prompts, taxonomy, seeds, few-shots, the two toggles, counts, variants, N |
-| Run detail | live status, per-scenario progress, retry; call inspector listing every call with the full rendered prompt beside the verbatim response, copyable, never truncated |
-| Labels | scenario × HCV matrix with evidence and rationale on hover |
+| Taxonomy | the 21 HCVs, read-only, with version selector; the active taxonomy is marked |
+| Corpus | system descriptions and scenarios; filter by origin, run and variant; seed and manual rows editable, generated rows read-only and marked as such |
+| Prompt editor | Jinja2 editor, version history, per-variant preview, and the iterate panel below |
+| Experiment builder | models, a phase-2 prompt **per variant**, phase-3 prompt, taxonomy, seeds, few-shots, the two toggles, counts, variants, repetitions |
+| Run detail | live progress, cancel, retry, per-run export, the pinned config, isolation evidence, and the call inspector |
+| Labels | per-variant scenario x HCV matrix, evidence and rationale on hover |
+
+### Prompt editor and the iterate loop
+
+Phase 2 has two independent templates (§5.3), so the editor edits one variant's
+template at a time and says plainly which variant it is. Preview renders against
+that variant's real context — meaning variant A's preview has no `taxonomy` in
+scope at all, so a stray reference fails there rather than in a paid run.
+
+A template is validated against its own variant before it can be saved. This is
+not a nicety: templates render under `StrictUndefined`, so a mistake in the A
+template fails only the A run while B succeeds, which is the most confusing
+symptom the system can produce.
+
+The iterate panel sits beneath the editor and drives `POST /api/phase-runs/`:
+pick an experiment to borrow inputs from, override the counts down to one system
+and one scenario, run, and read the output beside the template that produced it.
+The panel must state that these runs are scratch — they are never archived and
+never appear in an export bundle (§9).
+
+### Run detail
+
+Beyond live progress and the call inspector, this screen carries the things that
+make a run interpretable after the fact: the configuration **pinned** to that
+repetition (not the experiment's current configuration, which may have moved
+on), and the isolation evidence — `leak_scan_ran` and `guarded_by` per call — so
+that variant A can be confirmed clean without leaving the page. Cancel is
+available while a run is pending, queued or running, and the screen must repeat
+the caveat that cancelling marks a run dead but does not interrupt a worker
+already mid-call.
+
+The call inspector lists every call with the full rendered prompt beside the
+verbatim response, copyable, never truncated.
+
+### Labels
+
+Variants A and B generate **different** scenarios, so there is no row-by-row
+comparison to draw; the screen shows one scenario x HCV matrix per variant, with
+evidence and rationale on hover. Reading the two side by side is how coverage is
+compared. No statistics are computed — metrics are deferred (§11), and a
+difference at low repetition counts is not yet a finding.
 
 ## 11. Deferred
 
