@@ -86,6 +86,7 @@ export default function ExperimentDetail() {
   // without a manual refresh.
   const runsQuery = usePipelineRuns({ experiment: experimentId });
   const runOptionsQuery = useRunOptions(experimentId);
+  const repetitionsHelpText = runOptionsQuery.data?.actions?.POST?.n_repetitions?.help_text;
   const runExperiment = useRunExperiment();
 
   const systemsQuery = useSystemDescriptions();
@@ -281,18 +282,18 @@ export default function ExperimentDetail() {
                   `actions.POST.n_repetitions.help_text`, exactly as the
                   builder's own inline launch section used to read it -
                   deliberately never a hand-copied fallback string (a stale
-                  copy during an outage is worse than a neutral notice). */}
-              {runOptionsQuery.isError ? (
+                  copy during an outage is worse than a neutral notice). A
+                  reply without the text gets that same notice, never a
+                  blank line. */}
+              {runOptionsQuery.isPending ? (
+                <p className="mt-1 max-w-2xl text-xs text-gray-500">Loading the explanation for this field…</p>
+              ) : repetitionsHelpText ? (
+                <p className="mt-1 max-w-2xl text-xs text-gray-500">{repetitionsHelpText}</p>
+              ) : (
                 <p className="mt-1 max-w-2xl text-xs text-amber-700">
                   Could not load the explanation for this field from the server right now — this
                   does not affect the field itself, which still defaults to 1 and works normally.
                 </p>
-              ) : runOptionsQuery.isSuccess ? (
-                <p className="mt-1 max-w-2xl text-xs text-gray-500">
-                  {runOptionsQuery.data?.actions?.POST?.n_repetitions?.help_text}
-                </p>
-              ) : (
-                <p className="mt-1 max-w-2xl text-xs text-gray-500">Loading the explanation for this field…</p>
               )}
               {repetitionsInvalid && (
                 <p className="mt-1 text-xs text-red-700">Enter a whole number between 1 and 100.</p>

@@ -192,6 +192,17 @@ describe('ExperimentDetail', () => {
     expect(await screen.findByText(/could not load the explanation/i)).toBeInTheDocument();
   });
 
+  it('treats an OPTIONS reply without the help text as a failure, not as an empty explanation', async () => {
+    // A bare 204 is what the Vite dev server used to send in Django's place;
+    // rendering it as a blank line hid that the explanation never arrived.
+    server.use(http.options('/api/experiments/77/run/', () => new HttpResponse(null, { status: 204 })));
+
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    await screen.findByLabelText(/^repetitions$/i);
+    expect(await screen.findByText(/could not load the explanation/i)).toBeInTheDocument();
+  });
+
   it('launching shows the queued repetitions and links to them', async () => {
     const user = userEvent.setup();
     server.use(
