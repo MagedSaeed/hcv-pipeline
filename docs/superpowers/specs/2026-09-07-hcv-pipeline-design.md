@@ -54,6 +54,9 @@ LTS concept, so those are pinned to current stable and noted as such.
 | API | djangorestframework | 3.18.0 | current stable |
 | Queue | django-q2 | 1.11.1 | current stable |
 | Broker/cache | redis / django-redis | 8.1.0 / 7.0.0 | current stable |
+| Middleware | django-cors-headers | 4.9.0 | current stable; CORS for the Vite dev server |
+| DB driver | psycopg[binary] | 3.3.5 | current stable; the PostgreSQL driver |
+| Config | python-decouple / dj-database-url | 3.8 / 3.1.2 | current stable; environment-driven settings (`DATABASE_URL`, etc.) |
 | LLM client | openai | 3.8.0 | OpenAI-compatible; targets OpenRouter |
 | Templating | Jinja2 | 3.1.6 | current stable |
 | Validation | pydantic | 2.13.5 | current stable |
@@ -67,8 +70,17 @@ LTS concept, so those are pinned to current stable and noted as such.
 | Data fetching | @tanstack/react-query | 5.102.8 | no LTS track |
 | HTTP | axios | 1.20.0 | no LTS track |
 
+The backend rows above are pinned versions verified against the running code
+(`backend/pyproject.toml`). The frontend rows are not yet verifiable against
+anything: no `frontend/` directory and no `package.json` exist in the
+repository yet. Those versions are pinned in advance, for when that work
+starts — aspirational, not descriptive, until a frontend actually exists.
+
 SQLite in development, PostgreSQL in production. Redis is required in both,
-since Django-Q2 uses it as broker; `docker-compose.yml` provides it.
+since Django-Q2 uses it as broker. `docker-compose.yml` provisions Redis and
+PostgreSQL for local development only — it runs no Django, `qcluster`, or
+frontend service of its own; those are started directly on the host in this
+build, not containerized.
 
 The architecture follows CoReview (Django + DRF + React SPA) with two deliberate
 departures:
@@ -87,9 +99,11 @@ backend/
   core/              User, AppSettings, auth views, admin bootstrap commands
   taxonomy/          Taxonomy, HCV, import command
   corpus/            SystemDescription, Scenario, ResourceFile, FewShotExample
-  prompts/           PromptTemplate, sandboxed Jinja2 rendering
-  pipeline/          Experiment, PipelineRun, PhaseRun, LLMCall, Label, tasks, llm client
-frontend/
+  prompts/           PromptTemplate, sandboxed Jinja2 rendering, isolation guards
+  llm/               OpenRouter client, fake client, response schemas, model catalogue
+  pipeline/          Experiment, PipelineRun, PhaseRun, LLMCall, Label, orchestration,
+                     execution_config, generation, labelling, export, redaction, tasks
+frontend/            not built yet — see §10
   src/{pages,components,contexts,api}
 resources/           static research inputs (see resources/README.md)
 scripts/             extract_docx.py
@@ -102,8 +116,14 @@ docs/superpowers/    specs and plans
 
 ```
 Taxonomy(vocabulary_id, version, notes, is_active, source_json, created_at)
+    unique_together (vocabulary_id, version)
+    at most one row may carry is_active=True — a partial database constraint,
+    not a save() override, so it holds against .update(), bulk writes and
+    data migrations too
+    ordered by (vocabulary_id, version)
 HCV(taxonomy→, hcv_id, name, definition, condition_classes: JSON, order)
     unique_together (taxonomy, hcv_id)
+    ordered by (order, hcv_id)
 ```
 
 Seeded from `resources/taxonomy/hcv21_v1.1.json` by a management command.
@@ -112,7 +132,21 @@ row. Runs pin a `Taxonomy`, so a label always resolves against the exact list th
 model saw.
 
 4 of the 21 rows carry an empty `condition_classes` list by design (HCV-09,
-HCV-14, HCV-19, HCV-20). They remain valid labels.
+HCV-14, HCV-19, HCV-20). They remain valid labels (`HCV.has_condition_class`
+is a plain `bool(condition_classes)` convenience for the UI).
+
+`Taxonomy.active()` returns the one active taxonomy, or `None`. It fails
+closed — raising `MultipleActiveTaxonomies` — rather than silently picking
+one, if the constraint above is ever somehow violated anyway (raw SQL, a
+restored dump predating it). This matters beyond tidiness: with no experiment
+borrowed, an ad-hoc variant-A run's guard taxonomy — the list its leak
+backstop scans against, §5.3 — *is* `Taxonomy.active()`. An earlier
+implementation simply took the newest active row, which let a freshly
+imported decoy taxonomy silently re-bind every unborrowed Run A's guard to
+the wrong list: the scan still ran, still found nothing, and still archived
+`leak_scan_ran=True` as proof — against content that had nothing to do with
+what was actually sent. Raising instead of guessing means a violated
+invariant fails the run, not the evidence.
 
 ### 5.2 `corpus`
 
@@ -133,16 +167,22 @@ Scenario(
     origin: seed | generated | manual,
     generation_run→ PhaseRun (null),
     order, created_by→ (null), created_at, updated_at)
+    unique_together (system_description, generation_run, scenario_id), and,
+    scoped to generation_run IS NULL only, unique_together
+    (system_description, scenario_id)
 
 ResourceFile(
     name, kind: system_description | scenarios | vocabulary | taxonomy | other,
     file: upload, text: text, description, uploaded_by→, created_at)
+    ordered by name
 
 FewShotExample(
     phase: 2 | 3, name,
     input_text: text (blank),  input_file→ ResourceFile (null),
     output_text: text (blank), output_file→ ResourceFile (null),
     order, is_active)
+    unique_together (phase, name)
+    ordered by (phase, order, name)
 ```
 
 Notes on the shape:
@@ -169,6 +209,14 @@ Notes on the shape:
   `output_text`/`output_file`, so a few-shot can never render half-empty.
 - **`abox` is a nullable field, not a table.** It costs nothing now and means an
   encoding phase can be added later without restructuring.
+- **`Scenario` needs two uniqueness constraints, not one.** A generated row's
+  `generation_run` is set; a seed or manual row's is `NULL`, and NULLs never
+  compare equal, so one `unique_together (system_description, generation_run,
+  scenario_id)` alone would not stop two hand-created rows from colliding on
+  the same `scenario_id`. A second constraint, scoped to `generation_run IS
+  NULL`, closes that gap for seed and manual rows specifically.
+- `FewShotExample` additionally enforces a unique `(phase, name)` pair, since a
+  few-shot is referred to by name, not just by id.
 
 ### 5.3 `prompts`
 
@@ -180,6 +228,8 @@ PromptTemplate(
     output_schema: JSON,   # JSON Schema pinned into the request
     is_active, created_by→, created_at)
     unique_together (phase, name, version)
+    ordered by (phase, name, -version) — the latest version of a named
+    template sorts first
 ```
 
 **Editing creates a new version rather than mutating a row.** A run pins a
@@ -209,7 +259,60 @@ Template context, Phase 3: `scenario`, `system_description`, `taxonomy`
 
 The Run A template is authored without any taxonomy reference, and the renderer
 refuses to bind `taxonomy` for a variant-A run. Variant isolation is enforced
-at the context-construction layer, not left to prompt discipline.
+at the context-construction layer, not left to prompt discipline — and, since
+one guard can always be missed or bypassed by a route nobody has thought of
+yet, it is enforced in layers, not by a single check:
+
+- **the context has no `taxonomy` key at all for variant A** — not `None`,
+  not an empty list, genuinely absent from the dict handed to the renderer,
+  which is what makes `StrictUndefined` (above) load-bearing rather than
+  decorative (see the closing paragraphs of this subsection for why that
+  matters);
+- **a taxonomy-kind resource is refused for variant A**, whether reached via
+  the `resource()` template function or via a few-shot example's input/output
+  file — the two known routes that could otherwise carry taxonomy content into
+  a Run A prompt without ever touching the `taxonomy` context variable;
+- **a generated-origin system may never seed or target a run** (§5.4). Its
+  prose is taxonomy-*derived* — written by a model that saw the taxonomy on
+  some earlier run — not a literal quote of it, so none of the text-scanning
+  layers below can catch it; refusing the origin outright, before a single
+  call is made, is the only thing that closes this route;
+- **a run's pinned configuration snapshot validates fail-closed before
+  anything renders against it** (`PipelineRun.config`, §5.4): a field a guard
+  depends on — whether a few-shot's file was taxonomy-kind, say — must be
+  genuinely present and of the right shape, or the run refuses to execute
+  rather than guessing a default;
+- **the two rendered prompt strings, plus the template's `output_schema`, are
+  scanned** as a backstop once rendering finishes, against the pinned
+  taxonomy's identifiers, names, and definitions — any single identifier
+  match fails outright; three or more distinct name/definition matches
+  combined is treated as a dumped list rather than incidental English. The
+  schema is included because it ships in the same request body as the two
+  prompts, so a forked or renamed template could carry Run B's schema — an
+  enum of every `hcv_id`, definitions in its descriptions — into a Run A
+  template whose prompts look entirely innocent;
+- **a final scan walks the complete, serialised request dict immediately
+  before the HTTP call** — after every other piece of request construction,
+  including anything added to the body *after* rendering. This is the one
+  layer that can catch a field a later refactor copies straight into the
+  request (an `output_schema` added outside the template, say), which none of
+  the layers above can see no matter how thorough they are —
+  `assert_request_not_leaking_taxonomy`, wired into the LLM client as a
+  `preflight` callable invoked on every phase-2 call, both variants, so
+  nobody has to remember to attach it only for Run A (§6).
+
+Whether the render-time scan actually ran, and against which taxonomy, is
+recorded on the render result and then on the `LLMCall` itself
+(`leak_scan_ran`, `guarded_by` — §5.4): for a claim as central as "Run A never
+saw the taxonomy," the evidence belongs archived next to the material it
+vouches for, not asserted in a comment. The taxonomy a run's guard scans
+against is always **derived**, never a value a caller can choose freely — the
+experiment's own pinned taxonomy for an orchestrated or borrowed run, or, with
+none borrowed, whichever taxonomy is currently active (§5.4). A caller-chosen
+guard taxonomy was a real, closed defect: a decoy taxonomy sharing no content
+with the real one let the scans run, find nothing, and archive
+`leak_scan_ran=True` as proof of an isolation check that had actually verified
+nothing at all.
 
 **Each variant gets its own, fully independent `PromptTemplate`**
 (`Experiment.phase2_prompt_a` and `Experiment.phase2_prompt_b`, two separate
@@ -220,6 +323,20 @@ authored WITHOUT any `taxonomy` reference at all, and variant B's is authored
 assuming `taxonomy` is always present. Phase 3 is unchanged — one
 `phase3_prompt` still serves both variants, because phase 3 always receives
 the taxonomy regardless of which variant it is labelling.
+
+The researcher was shown the alternative before choosing this: a single
+shared phase-2 template, branching only around the taxonomy block, would
+*guarantee* that everything else in the prompt — instructions, framing,
+formatting — is identical between variants, so any measured difference in
+what the model produces could only be attributed to the taxonomy itself.
+Two fully independent templates give up that guarantee. Nothing stops them
+from drifting apart in wording, structure, or instructions beyond the
+taxonomy block, and a difference in results could then be a confound of
+prompt drift rather than of the taxonomy — a risk the researcher weighed and
+accepted in exchange for not having to write phase-2 prompts that
+conditionally branch on variant. Keeping two independent templates
+textually close, where that matters to the comparison, is therefore an
+authoring discipline, not something the system enforces.
 
 `StrictUndefined` (above) still matters for phase 2, even so. `taxonomy` is
 *absent from the context entirely* under Run A — not `None`, not an empty
@@ -249,7 +366,10 @@ Experiment(
     variants: JSON list, e.g. ["A", "B"],
     created_by→, created_at)
 
-PipelineRun(experiment→, repetition_index, status, started_at, finished_at)
+PipelineRun(
+    experiment→, repetition_index, status,
+    config: JSON,                 # this repetition's own pinned inputs — see below
+    started_at, finished_at)
 
 PhaseRun(
     pipeline_run→ (null),        # null for ad-hoc iterate-mode runs
@@ -258,16 +378,22 @@ PhaseRun(
     prompt_template→,            # pinned version
     taxonomy→,                   # pinned always; injected into the prompt only for B
     source_phase_run→ (null),    # phase 3 records which phase-2 run it labels
+    experiment→ (null),          # iterate mode only: borrow this experiment's LIVE inputs
+    n_systems (null), n_scenarios_per_system (null),  # iterate-mode per-run overrides
     status: pending | queued | running | completed | failed | cancelled,
-    error, started_at, finished_at, created_by→)
+    error, total_children, completed_children, failed_children,
+    started_at, finished_at, created_by→)
 
 LLMCall(
     phase_run→, sequence, scenario→ (null),   # which scenario, for phase 3
     rendered_system_prompt: text, rendered_user_prompt: text,
+    leak_scan_ran: bool, guarded_by→ Taxonomy (null),  # isolation evidence — §5.3
     request_json: JSON,          # the complete body sent to OpenRouter
     response_json: JSON,         # the complete OpenRouter response, verbatim
     raw_response: text,          # assistant content, from response_json
     parsed_ok: bool, parse_error: text,
+    unknown_hcv_ids: JSON list,  # phase 3: hcv_ids outside the pinned taxonomy
+    stray_scenarios: JSON list,  # phase 2: a redundant top-level scenarios list — §8
     http_status, transport_error: text,       # set when no body came back
     model, finish_reason, prompt_tokens, completion_tokens, cost, latency_ms,
     created_at)
@@ -275,8 +401,13 @@ LLMCall(
 Label(
     phase_run→, scenario→, hcv→,
     evidence: text, rationale: text,
-    source: llm | human, created_by→ (null), created_at)
+    source: llm | human,
+    llm_call→ (null),            # the call this label came from; null for a human label
+    created_by→ (null), created_at)
     unique_together (phase_run, scenario, hcv)
+    ordered by (scenario, hcv, id) — id is a deliberate final tiebreaker, so a
+    paginated listing stays stable across two labels that tie on
+    (scenario, hcv) alone, which a re-run or a retry can genuinely produce
 ```
 
 `Experiment.generate_systems` and `generate_scenarios` are independent toggles;
@@ -288,6 +419,49 @@ every variant actually listed in `variants` — not both unconditionally, since
 `variants` may be `["A"]`, `["B"]`, or both — and requires whichever of the
 two is set to be phase-2 templates (`phase3_prompt` likewise must be a
 phase-3 template).
+
+A validator also refuses a **generated-origin** `SystemDescription` anywhere
+in `seed_systems`, and refuses one as `target_system` outright. Seeding a run
+with a prior run's own output contaminates the comparison in the obvious way;
+targeting is the more dangerous of the two, not merely a second instance of
+it — `target_system.body` is written into the variant-A prompt
+unconditionally, and its prose is taxonomy-*derived*, not a literal quote, so
+none of §5.3's text-scanning guards can catch it. The origin check is the only
+thing that closes this route.
+
+These config-shaped rules — generated seeds, a generated or missing target,
+both generation toggles off — live in one shared checker that
+`Experiment.clean()` calls, and that the ad-hoc iterate-mode path calls too,
+at both its own create-time validation and again, live, at execution time.
+That sharing exists because the same rule, hand-ported separately across
+`Experiment` and the ad-hoc path, drifted out of sync more than once; a
+dedicated parity test now fails the build if a future rule reaches only one
+of the two paths.
+
+`PhaseRun.taxonomy` is never a free choice either. For an orchestrated or
+borrowed run it is always `experiment.taxonomy`; for an ad-hoc run borrowing
+no experiment it must be whichever `Taxonomy` is currently active. Both are
+re-checked at execution time, not only when the row was created, because
+either half of that binding — the experiment's own taxonomy, or which
+taxonomy is active — can change in the meantime. A decoy taxonomy chosen
+freely by a caller is exactly the failure this closes (see §5.3's closing
+paragraph): the leak backstop would genuinely run and genuinely find nothing,
+because it was scanning the wrong list, and archive `leak_scan_ran=True` as
+false proof.
+
+`PipelineRun.config` is a snapshot of the seven fields that live only on
+`Experiment` — `seed_systems`, `fewshots`, `target_system`,
+`generate_systems`, `generate_scenarios`, `n_systems`,
+`n_scenarios_per_system` — taken once, at launch, and never re-read from the
+experiment afterward. `Experiment` stays completely free to edit at any time,
+including after it has runs (§9); this snapshot is what keeps an
+already-launched run's prompt, and its export, truthful against a later edit.
+Reading a run's config back validates it fail-closed (§5.3): a field a guard
+depends on must be genuinely present and of the right shape, or the run
+refuses to execute rather than guessing a default. A permissive reader here
+was a real, since-closed leak — a malformed snapshot once let a
+taxonomy-kind resource's text render into a Run A prompt anyway, because a
+missing field silently read as "no file, so nothing to guard against."
 
 `LLMCall` stores **both complete payloads** for every call, successful or not:
 `request_json` is the exact body sent to OpenRouter, `response_json` the entire
@@ -320,19 +494,58 @@ land in the same table with `source="human"`, needing no migration.
 
 Django-Q2 with a Redis broker, run as a separate `qcluster` process.
 
-- Launching a batch creates `PipelineRun` + its `PhaseRun` rows as `pending`,
-  then enqueues one task per phase run.
-- **Phase 2** is one task per variant per repetition.
-- **Phase 3** fans out to **one task per scenario**, so labelling parallelises
-  across workers and a single failed scenario does not fail the run. A group
-  callback marks the `PhaseRun` complete when all children finish.
-- A `PhaseRun` that finishes with any failed children is `failed` with a count,
-  and `POST /api/phase-runs/{id}/retry/` re-enqueues only the failures.
-- The frontend polls run status; TanStack Query handles the polling interval and
-  cache invalidation.
+**One task per repetition, run serially inside it — a considered decision,
+not the original design.** Launching a batch creates `PipelineRun` + its
+`PhaseRun` rows as `pending`, then enqueues exactly one django-q task per
+`PipelineRun`. That single task drives every variant of that repetition end
+to end, in order: Phase 2 for variant A, then Phase 3 labelling everything it
+produced, then Phase 2 for variant B, then its own Phase 3 — one provider
+call at a time, inside one worker process. Phase 3 does not fan out to a task
+per scenario; it is a plain loop over the generation's scenarios, one call
+per scenario, writing `completed_children`/`failed_children` as it goes so a
+client polling mid-run still sees a live denominator.
 
-Variant A and variant B are separate tasks with separately constructed
-contexts. There is no shared conversation state between them at any point.
+An earlier design fanned Phase 2 out to one task per variant per repetition
+and Phase 3 to one task per scenario, with a django-q group callback marking
+the `PhaseRun` complete once every child finished. The researcher was shown
+that trade-off directly and chose to keep the simpler, serial shape instead:
+
+- **failure granularity.** The only thing the fan-out design bought was "a
+  bad scenario fails only itself" — true, but the serial loop already gets
+  that: one scenario's failure is recorded on its own `LLMCall` and the loop
+  moves on, without needing a separate worker per scenario to achieve it;
+- **timeout exposure.** A fanned-out design times each task individually — a
+  tighter, easier number to reason about. The serial design's timeout
+  (`Q_TIMEOUT`, default 3600s) has to cover every provider call in a
+  repetition end to end, not just its slowest one; a shorter window kills the
+  worker mid-run and strands the whole repetition. This is a real cost the
+  researcher accepted, not an oversight;
+- **scaling headroom.** Fan-out buys parallelism within one repetition; the
+  serial design buys it across repetitions instead — every repetition in a
+  batch is queued at once and they run concurrently as workers free up
+  (`Q_WORKERS`, 2 by default), rather than strictly one after another. For a
+  batch of several repetitions, the normal case here, that is most of the
+  benefit fan-out would have offered, at a fraction of the moving parts: no
+  group callbacks, no task-per-scenario bookkeeping, one failure mode to
+  reason about per repetition instead of two.
+
+A `PhaseRun` that finishes with any failed children is `failed` with a count,
+and `POST /api/phase-runs/{id}/retry/` re-enqueues only the failures — for a
+phase-3 (labelling) run; a phase-2 generation run is a single call, so there
+is nothing partial to retry, only a whole rerun. Repetitions queued together
+in a batch all run concurrently, not strictly in sequence: with 2 workers,
+two repetitions finish together in about the time one takes alone, and each
+further pair waits for a free worker. A batch launch is capped at 100
+repetitions per call; at the default configuration (3 systems x 5 scenarios,
+both variants, 32 provider calls) one repetition costs roughly $1.61 and
+takes about 23 minutes.
+
+The frontend polls run status; TanStack Query handles the polling interval and
+cache invalidation.
+
+Variant A and variant B run one after the other inside the same task, each
+against its own, separately constructed context (§5.3) — never a shared task,
+and no shared conversation state between them at any point in the call.
 
 ### Provider
 
@@ -345,6 +558,10 @@ then validated against a Pydantic model. A schema violation is recorded on the
 
 The client sits behind a small interface with a `FakeLLMClient` implementation,
 so the entire pipeline is testable with no network and no spend.
+
+`complete()` also accepts an optional `preflight` callable, invoked on the
+final, fully-built request dict immediately before the HTTP call — the seam
+Phase 2's taxonomy choke point attaches to (§5.3).
 
 ### API key
 
@@ -407,6 +624,24 @@ key, taxonomy import, prompt editing, experiment creation and run launching.
 With `generate_systems` false, the response is a bare `{"scenarios": [...]}`
 against `target_system`. With `generate_scenarios` false, `scenarios` is omitted.
 
+The JSON Schema pinned into the request is pruned to match: whichever
+top-level field a run's mode does not use (`scenarios` when generating fresh
+systems, `system_descriptions` when targeting an existing one) is removed
+from the schema itself, not only from this prose description of the expected
+shape. A live run showed a model will fill in both fields whenever the schema
+offers both places to; this is the fix upstream of parsing, not a rule
+`_persist_error` (below) has to enforce after the fact.
+
+`strict` is deliberately not pinned on the request — a provider enforcing
+strict structured-output rules would reject this project's schemas outright,
+failing every schema-pinned call — so the pruned schema narrows what the
+model is *told* to do but cannot make the redundant shape structurally
+impossible. If a response still carries a populated `system_descriptions`
+alongside a non-empty top-level `scenarios`, the nested material is persisted
+as authoritative and the redundant top-level list is recorded on the call as
+`stray_scenarios` (§5.4) — a visible research signal, never silently dropped
+and never treated as a parse failure.
+
 **Phase 3**, one call per scenario:
 
 ```json
@@ -423,6 +658,8 @@ out-of-vocabulary labels is itself informative.
 Session auth; every endpoint requires authentication except login.
 
 ```
+GET    /api/auth/csrf/                        sets the CSRF cookie; call before
+                                              any POST while unauthenticated
 POST   /api/auth/login/                       GET /api/auth/me/
 POST   /api/auth/logout/                      POST /api/auth/change-password/
 GET    /api/settings/  PATCH /api/settings/   openrouter_key, staff only
@@ -431,37 +668,91 @@ GET    /api/settings/  PATCH /api/settings/   openrouter_key, staff only
 GET    /api/taxonomies/                       GET /api/taxonomies/{id}/hcvs/
 CRUD   /api/resources/                        upload + text extraction
 CRUD   /api/fewshots/                         ?phase=2|3
-CRUD   /api/system-descriptions/              ?origin=&run=
-CRUD   /api/scenarios/                        ?origin=&run=&variant=  writes
-                                              on seed/manual rows only
-CRUD   /api/prompts/                          ?phase=  (PATCH creates a new version)
-POST   /api/prompts/{id}/preview/             → exact rendered system+user strings
+CRUD   /api/system-descriptions/              ?origin=   writes on seed/manual
+                                              rows only
+CRUD   /api/scenarios/                        ?origin=&system=   writes on
+                                              seed/manual rows only
+GET/POST/PATCH /api/prompts/                  ?phase=  (PATCH creates a new
+                                              version; DELETE is a plain 405,
+                                              by design — a version is a
+                                              provenance record)
+POST   /api/prompts/{id}/activate/            staff; makes this version the
+                                              active one for its (phase, name)
+POST   /api/prompts/{id}/preview/             → exact rendered system+user
+                                              strings, plus leak_scan_ran/
+                                              guarded_by for a variant-A preview
 GET    /api/models/                           OpenRouter model list, cached 1h
 
-CRUD   /api/experiments/
-POST   /api/experiments/{id}/run/             {n_repetitions} → batch mode; 202
-                                              carries the cancel caveat below
+CRUD   /api/experiments/                      read: any authenticated;
+                                              write: staff
+GET    /api/experiments/{id}/progress/        {done, total, failed, percent} —
+                                              the same shape already embedded
+                                              on the list/detail serializer
+POST   /api/experiments/{id}/run/             staff; {n_repetitions} → batch
+                                              mode; 202 carries the cancel
+                                              caveat below
 GET    /api/experiments/{id}/export/          ?format=json|csv
 
 GET    /api/pipeline-runs/                    one row per repetition; ?experiment=
 GET    /api/pipeline-runs/{id}/               status, progress, own pinned config
-DELETE /api/pipeline-runs/{id}/               409 while pending/queued/running
-POST   /api/pipeline-runs/{id}/cancel/        pending/queued/running → cancelled;
-                                              does not interrupt a worker already
-                                              executing it, only marks the run (and
-                                              its open phase runs) dead so it can
-                                              be deleted
+DELETE /api/pipeline-runs/{id}/               staff; 409 while pending/queued/running
+POST   /api/pipeline-runs/{id}/cancel/        staff; pending/queued/running →
+                                              cancelled; does not interrupt a
+                                              worker already executing it, only
+                                              marks the run (and its open phase
+                                              runs) dead so it can be deleted
 GET    /api/pipeline-runs/{id}/export/        ?format=json|csv — one repetition,
                                               carrying that run's own config
 
-POST   /api/phase-runs/                       ad-hoc single phase → iterate mode
-GET    /api/phase-runs/{id}/                  status polling; ?pipeline_run=&phase=
-                                              &variant=&status=&experiment=
-POST   /api/phase-runs/{id}/retry/
+GET    /api/phase-runs/                       ?pipeline_run=&phase=&variant=
+                                              &status=&experiment=
+POST   /api/phase-runs/                       staff; ad-hoc single phase →
+                                              iterate mode (see below)
+GET    /api/phase-runs/{id}/
+DELETE /api/phase-runs/{id}/                  staff
+POST   /api/phase-runs/{id}/retry/            staff; phase 3 (labelling) only
 GET    /api/phase-runs/{id}/calls/            LLMCall inspector
 
-GET    /api/labels/                           ?scenario=&phase_run=
+GET    /api/labels/                           ?scenario=&phase_run=&hcv=&source=
 ```
+
+Every list endpoint above returns a paginated envelope
+(`{"count", "next", "previous", "results"}`, 50 rows per page), never a bare
+array — a frontend data layer needs to unwrap `results` and follow
+`next`/`previous`.
+
+A 503 (no API key configured; the broker is unreachable) and a 409 (a
+conflicting run state, a protected deletion) each carry a machine-readable
+`code` alongside the human-readable `detail` — `missing_api_key` vs.
+`broker_unavailable` for the two 503s; `run_in_flight`,
+`run_not_cancellable`, `experiment_has_runs`, `experiment_has_adhoc_runs`,
+`missing_source_phase_run`, and similarly-named codes for the 409s — so a
+frontend can branch on `code` instead of pattern-matching the English
+message.
+
+**Iterate mode.** `POST /api/phase-runs/` runs a single phase, ad-hoc, outside
+any `Experiment` or `PipelineRun` — `pipeline_run` stays null. It exists so a
+prompt or a configuration can be tuned by actually running it, one call at a
+time, without paying for a whole batch: the researcher's own framing is "if I
+am in phase 2, I can rerun manually until I am satisfied." An ad-hoc run is
+**deliberately never archived** — it has no `PipelineRun` to roll up under,
+and the export bundles (below) are scoped to real, launched repetitions only,
+so nothing about an iterate-mode call ever appears in either export. It may
+optionally borrow an `Experiment`'s CURRENT, LIVE inputs (seed systems,
+few-shots, target system, the two toggles) instead of bare built-in defaults —
+read live, at execution time, never pinned or snapshotted, because the whole
+point is iterating against the experiment as it stands right now, including
+an edit made five minutes ago. `n_systems`/`n_scenarios_per_system` may
+additionally be overridden per ad-hoc run (capped at 50, well above a real
+experiment's usual 3x5) — the actual common case: real seeds and few-shots,
+but one system and one scenario, cheap to tune against. Every isolation guard
+(§5.3) still applies in full to a borrowed run exactly as it does to an
+orchestrated one, since none of them read `pipeline_run` or a config
+snapshot — and a borrowed experiment's taxonomy, seeds, and target system are
+re-checked, live, against the same contamination and binding rules
+`Experiment.clean()` enforces (§5.4), at the moment a worker actually
+executes the run, since the experiment can be edited between when the ad-hoc
+run was created and when a worker picks it up.
 
 A repetition (`PipelineRun`) is never edited over the API — deletion is the
 one exception, and it is refused while a worker may still hold the run
@@ -470,10 +761,13 @@ those states with no worker coming for it (a broker that accepted a task and
 then died, say): it marks the run, and every phase run under it that is not
 already terminal, CANCELLED, which is a genuinely terminal status (nothing
 re-drives a cancelled run through the ordinary execution path). It does
-**not** reach into a worker already executing — any write that worker is
-mid-way through may still land after `cancel` returns. The same caveat is
-surfaced in `run`'s own 202 body, not only at cancel time, so an operator
-learns it the moment they start a batch.
+**not** reach into a worker already executing — confirmed directly against a
+running worker, not only reasoned about — so any write that worker is
+mid-way through (an `LLMCall` save, a status roll-up) may still land after
+`cancel` returns. Both `run`'s 202 body and `cancel`'s own response return
+this exact caveat as their `detail` field, not only here in prose, so a
+frontend can surface it automatically the moment a batch starts, rather than
+only when an operator goes looking for a way to stop a stuck run.
 
 `Experiment` stays completely unrestricted to edit, at any time, whether or
 not it has runs — nothing freezes it. What keeps an already-launched run's
@@ -483,12 +777,27 @@ seven fields that live only on `Experiment` (`seed_systems`, `fewshots`,
 `n_scenarios_per_system`), pinned once at launch and read back at BOTH
 render time and export time — never re-read from the experiment afterward.
 Editing an experiment while a run sits QUEUED cannot change what that run
-prompts a model with, nor what its export reports it prompted with.
+prompts a model with, nor what its export reports it prompted with. Deleting
+an `Experiment` is refused (409) not only while it has any `PipelineRun`
+recorded against it, but also while any ad-hoc iterate-mode `PhaseRun` is
+still borrowing its inputs — deleting the experiment out from under a
+still-queued ad-hoc run would otherwise leave that run rendering against an
+experiment that no longer exists.
 
-`POST /api/prompts/{id}/preview/` renders against a chosen experiment
-configuration and returns the literal strings that would be sent. This is the
-main tool for prompt refinement and must never diverge from what the task sends
-— both go through the same renderer.
+`POST /api/prompts/{id}/preview/` does **not** take an experiment reference.
+It takes a free-standing bag of the same fields an experiment would have
+(`variant`, `seed_systems`, `fewshots`, the two toggles, counts,
+`target_system`, `scenario` — and, kept separate from `taxonomy` itself,
+`guard_taxonomy`, which taxonomy to scan a variant-A preview against) and
+renders exactly as a run would, through the same renderer. There is no "pick
+an experiment, then preview" flow; assembling the same fields by hand (or
+copying them from an experiment) is the whole interface. This must never
+diverge from what a real run sends — both go through the same renderer.
+Unlike a real run's guard taxonomy, which is always derived (§5.3),
+`guard_taxonomy` here is a free choice: preview creates no `LLMCall` and
+archives no isolation evidence, so there is nothing for a freely-chosen
+value to falsify — an admin previewing is allowed to check a variant-A
+render against a taxonomy other than the active one on purpose.
 
 `PATCH` and `DELETE` on a system description or scenario with
 `origin="generated"` return 403. Generated material is only removed by deleting
@@ -549,7 +858,27 @@ record, so size is the wrong thing to optimise. Deferred metrics and the
 offline ontology step both read this bundle, which is why it carries the
 prompts and calls rather than only the labels.
 
+Known limitation: there is no streaming. The whole bundle is assembled as one
+in-memory dict, and `json.dumps`/the CSV zip writer each build a further full
+copy of it on top — at the 100-repetition cap (§6), a two-variant experiment
+with a modest scenario count is roughly 160MB resident for the bundle alone,
+several times that at peak while a second copy is being built alongside the
+first. This is a boundary to design around later (a background export job, or
+a streaming writer), not a bug to silently hit.
+
+`run_configs`/`inputs`, and every seed/target system and few-shot nested
+inside them, are rebuilt into a fixed, canonical key order before they are
+serialised, regardless of which database produced the row. PostgreSQL's
+`jsonb` does not preserve an object's key insertion order on write (SQLite's
+JSON1 storage does), so reading a snapshot back and handing it straight to
+`json.dumps` would put two byte-identical exports of the same experiment in
+different byte order depending on which database produced them. This only
+reorders keys; it never changes a value, and the documented contents above
+are unaffected.
+
 ## 10. Screens
+
+*This section is under revision and does not yet reflect the current backend.*
 
 | Screen | Purpose |
 |---|---|
@@ -579,8 +908,9 @@ Both deferrals are already accommodated by the schema and need no migration:
 
 ## 12. Testing
 
-pytest-django, TDD throughout. `FakeLLMClient` covers the pipeline end to end
-without network access. The tests that matter most:
+pytest 9.1.1 / pytest-django 4.14.0, TDD throughout; ruff 0.16.6 lints (and
+formats) everything outside the generated migrations. `FakeLLMClient` covers
+the pipeline end to end without network access. The tests that matter most:
 
 - **Variant isolation** — rendering a Run A prompt with a taxonomy in scope
   must raise, and the rendered variant-A string must contain no HCV identifier
@@ -607,3 +937,11 @@ without network access. The tests that matter most:
   without `target_system` is rejected.
 - **Retry semantics** — retrying a partially failed Phase 3 re-runs only the
   failed scenarios and creates no duplicate labels.
+
+These eight are the tests that matter most, not the only tests. The suite
+covers substantially more ground across every app: a meta-test
+(`test_adhoc_rule_parity.py`) that fails the build if a validation rule
+added to `Experiment.clean()` is not also reachable from the ad-hoc
+iterate-mode path; end-to-end coverage of iterate mode itself; the
+`leak_scan_ran`/`guarded_by` isolation-evidence fields; the `run_experiment`
+management command; and admin-layer tests in every app.
