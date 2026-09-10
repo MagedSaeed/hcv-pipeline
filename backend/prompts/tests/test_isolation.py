@@ -1,10 +1,14 @@
 import pytest
+from django.core.management import call_command
 
 from corpus.models import FewShotExample, ResourceFile, ResourceKind
+from llm.client import build_request
+from llm.schemas import phase2_json_schema
 from prompts.models import PromptTemplate
 from prompts.rendering import (
     PromptRenderError,
     TaxonomyLeak,
+    assert_request_not_leaking_taxonomy,
     build_phase2_context,
     format_hcv_table,
     render,
@@ -598,3 +602,274 @@ def test_an_unrecognised_context_shape_is_refused(taxonomy):
 def test_an_empty_context_is_refused(taxonomy):
     with pytest.raises(TaxonomyLeak, match="_variant"):
         render(make("Generate."), {})
+
+
+# --- Round 6: dict KEYS are request text too -------------------------------------
+#
+# `_iter_request_text` used to yield dict VALUES only. A schema with one boolean
+# property per HCV — exactly what a labelling schema looks like — carries the
+# ids ONLY as keys, so both scanners that walk with it passed it: the final
+# request choke point had always been key-blind, and `render()`'s schema scan
+# became key-blind when it moved off `json.dumps`. Review reproduced a real
+# variant-A `run_phase2` sending `HCV-01` to the provider and archiving the call
+# with `leak_scan_ran=True`. Each scanner is tested SEPARATELY below, because the
+# choke point was key-blind before `render()` was, and a test that only reached
+# it through `render()` would leave it unguarded. The end-to-end run lives in
+# pipeline/tests/test_choke_point.py.
+
+
+@pytest.fixture
+def hcv21(db):
+    """The REAL HCV-21 v1.1 taxonomy, imported from `resources/` the way an
+    operator imports it — so "no false refusals" below is checked against the
+    21 actual ids, names and definitions, not a two-row stand-in. (Never
+    combined with this file's `taxonomy` fixture, which reuses the same
+    vocabulary_id/version.)"""
+    call_command("import_taxonomy", "--activate")
+    tax = Taxonomy.objects.get(vocabulary_id="HCV-21", version="1.1")
+    assert tax.hcvs.count() == 21
+    return tax
+
+
+def one_boolean_per(labels):
+    """A labelling-shaped schema: one boolean property per label, the labels
+    appearing ONLY as property keys."""
+    return {
+        "type": "object",
+        "properties": {label: {"type": "boolean"} for label in labels},
+        "additionalProperties": False,
+    }
+
+
+def string_values(value):
+    """Every string VALUE in `value`, keys deliberately excluded — used only to
+    prove a fixture below is genuinely key-only, so a test cannot pass because
+    the content also sits in a value the old walker already saw."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in string_values(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in string_values(item)]
+    return []
+
+
+def nested_in_items(key):
+    """`key` three levels down: properties -> labels -> items -> properties."""
+    return {
+        "type": "object",
+        "properties": {
+            "labels": {
+                "type": "array",
+                "items": {"type": "object", "properties": {key: {"type": "boolean"}}},
+            }
+        },
+    }
+
+
+# The same id, as a key at every nesting level a schema or request can put it.
+KEY_ONLY_ID_SCHEMAS = {
+    "top-level key": lambda ids: {"HCV-01": {"type": "boolean"}},
+    "property key": lambda ids: one_boolean_per(["HCV-01"]),
+    "key nested inside array items": lambda ids: nested_in_items("HCV-01"),
+    "one boolean per HCV (a labelling schema)": lambda ids: one_boolean_per(ids),
+}
+
+# A realistic variant-A schema using only ordinary JSON Schema keywords, nested
+# objects and arrays included — the no-false-refusal floor for key-yielding.
+LEGITIMATE_SCHEMA = {
+    "type": "object",
+    "description": "Generated systems and the scenarios set in each.",
+    "additionalProperties": False,
+    "required": ["system_descriptions"],
+    "properties": {
+        "system_descriptions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "body", "scenarios"],
+                "properties": {
+                    "title": {"type": "string", "description": "A short system name."},
+                    "body": {"type": "string"},
+                    "scenarios": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "scenario_id": {"type": "string"},
+                                "actor": {"type": "string"},
+                                "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                                "narrative_steps": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    },
+}
+
+
+def hcv_names(taxonomy, *ids):
+    return [taxonomy.hcvs.get(hcv_id=hcv_id).name for hcv_id in ids]
+
+
+# --- render(): the template's output_schema -------------------------------------
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", KEY_ONLY_ID_SCHEMAS)
+def test_render_refuses_an_output_schema_with_an_hcv_id_only_in_a_key(hcv21, shape):
+    """Innocent prompts, and a schema whose only HCV content is a KEY. Any
+    single id is a hard fail, wherever the key sits."""
+    ids = [row.hcv_id for row in hcv21.hcvs.all()]
+    schema = KEY_ONLY_ID_SCHEMAS[shape](ids)
+    assert not any(hcv_id in text for text in string_values(schema) for hcv_id in ids)
+
+    with pytest.raises(TaxonomyLeak, match="HCV-01"):
+        render(make("Generate.", output_schema=schema), base("A", guard_taxonomy=hcv21))
+
+
+@pytest.mark.django_db
+def test_render_refuses_three_hcv_names_only_in_keys_but_not_two(hcv21):
+    """The names route: keys are subject to the SAME 3-distinct threshold as
+    values — two names as keys is still incidental, three is a listing."""
+    names = hcv_names(hcv21, "HCV-07", "HCV-09", "HCV-10")
+    two, three = one_boolean_per(names[:2]), one_boolean_per(names)
+    for schema in (two, three):
+        assert not any(name in text for text in string_values(schema) for name in names)
+        assert "HCV-" not in repr(schema)
+
+    rendered = render(make("Generate.", output_schema=two), base("A", guard_taxonomy=hcv21))
+    assert rendered.leak_scan_ran is True
+
+    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+        render(make("Generate.", output_schema=three), base("A", guard_taxonomy=hcv21))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "schema",
+    [
+        LEGITIMATE_SCHEMA,
+        phase2_json_schema(generate_systems=True),
+        phase2_json_schema(generate_systems=False),
+    ],
+    ids=["hand-written", "phase2-generate-systems", "phase2-target-system"],
+)
+def test_render_does_not_refuse_ordinary_json_schema_keys(hcv21, schema):
+    """No new false refusals: `type`/`properties`/`items`/`required`/`enum`/
+    `description`/`additionalProperties`, nested objects and arrays, and the
+    pipeline's own default phase-2 schemas (which go to the provider whenever
+    a template has no output_schema) all scan clean against the real HCV-21."""
+    rendered = render(make("Generate.", output_schema=schema), base("A", guard_taxonomy=hcv21))
+
+    assert rendered.leak_scan_ran is True
+    assert rendered.guarded_by == hcv21.pk
+
+
+@pytest.mark.django_db
+def test_variant_b_may_carry_hcv_ids_as_schema_keys(hcv21):
+    """Run B is not scanned — the key-only labelling schema is its intended
+    design there, not a leak."""
+    ids = [row.hcv_id for row in hcv21.hcvs.all()]
+    rendered = render(
+        make("Generate.", output_schema=one_boolean_per(ids)), base("B", taxonomy=hcv21)
+    )
+
+    assert rendered.user == "Generate."
+    assert rendered.leak_scan_ran is False
+
+
+# --- assert_request_not_leaking_taxonomy: the final choke point, called directly --
+
+
+def request_with_schema(schema):
+    """The REAL request shape — `llm.client.build_request`, the one both
+    clients use — carrying `schema` as `response_format.json_schema.schema`."""
+    return build_request("m", "You write scenarios.", "Generate scenarios.", 1.0, schema)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", KEY_ONLY_ID_SCHEMAS)
+def test_the_request_scan_refuses_an_hcv_id_only_in_a_key(hcv21, shape):
+    """Tested WITHOUT `render()`: the choke point is the last layer, and the
+    one that sees a field added to the request after rendering, so it must
+    catch a key-only id on its own."""
+    ids = [row.hcv_id for row in hcv21.hcvs.all()]
+    request = request_with_schema(KEY_ONLY_ID_SCHEMAS[shape](ids))
+    assert not any(hcv_id in text for text in string_values(request) for hcv_id in ids)
+
+    with pytest.raises(TaxonomyLeak, match="HCV-01"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=request)
+
+
+@pytest.mark.django_db
+def test_the_request_scan_refuses_an_hcv_id_as_a_top_level_request_key(hcv21):
+    """A field nobody has invented yet may be NAMED after its content — the
+    request dict's own top-level keys are walked too, not just its schema."""
+    request = request_with_schema(None)
+    request["HCV-01"] = True
+
+    with pytest.raises(TaxonomyLeak, match="HCV-01"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=request)
+
+
+@pytest.mark.django_db
+def test_the_request_scan_refuses_three_hcv_names_only_in_keys_but_not_two(hcv21):
+    names = hcv_names(hcv21, "HCV-07", "HCV-09", "HCV-10")
+    two = request_with_schema(one_boolean_per(names[:2]))
+    three = request_with_schema(one_boolean_per(names))
+    assert "HCV-" not in repr(three)
+
+    assert assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=two)
+    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=three)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "schema",
+    [
+        None,
+        LEGITIMATE_SCHEMA,
+        phase2_json_schema(generate_systems=True),
+        phase2_json_schema(generate_systems=False),
+    ],
+    ids=["no-schema", "hand-written", "phase2-generate-systems", "phase2-target-system"],
+)
+def test_the_request_scan_does_not_refuse_an_ordinary_request(hcv21, schema):
+    """No new false refusals at the choke point: the real request's own keys
+    (`model`, `messages`, `role`, `content`, `temperature`, `usage`, `include`,
+    and with a schema `response_format`/`json_schema`/`schema`) plus ordinary
+    schema keywords all pass against the real HCV-21."""
+    request = request_with_schema(schema)
+    keys = set()
+
+    def collect(value):
+        if isinstance(value, dict):
+            keys.update(value)
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(request)
+    assert {"model", "messages", "role", "content", "temperature", "usage", "include"} <= keys
+    if schema is not None:
+        assert {"response_format", "json_schema", "schema", "type", "properties"} <= keys
+
+    assert assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=request)
+
+
+@pytest.mark.django_db
+def test_the_request_scan_still_skips_variant_b_with_ids_in_keys(hcv21):
+    ids = [row.hcv_id for row in hcv21.hcvs.all()]
+    request = request_with_schema(one_boolean_per(ids))
+
+    assert (
+        assert_request_not_leaking_taxonomy(variant="B", guard_taxonomy=hcv21, request=request)
+        is False
+    )

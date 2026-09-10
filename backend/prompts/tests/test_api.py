@@ -765,6 +765,161 @@ def test_a_partial_draft_falls_back_to_the_stored_output_schema_and_is_refused_l
 
 
 @pytest.mark.django_db
+def test_a_partial_draft_falls_back_to_the_stored_system_prompt_and_is_refused_like_a_real_run(
+    api_client, staff, taxonomy
+):
+    """The system_prompt half of the fallback above. A draft supplying only
+    user_prompt must still render — and scan — the STORED system_prompt: a
+    real run against this row sends it, so a preview that dropped it to ""
+    would be the original false-clean 200 again, through a different field."""
+    leaky = PromptTemplate.objects.create_version(
+        phase=2,
+        name="leaky-system-draft",
+        system_prompt="Label with HCV-07 wherever it applies.",
+        user_prompt="Generate.",
+    )
+    api_client.force_authenticate(user=staff)
+    body = {
+        "variant": "A",
+        "guard_taxonomy": taxonomy.id,
+        "n_systems": 1,
+        "n_scenarios_per_system": 1,
+    }
+
+    persisted = api_client.post(f"/api/prompts/{leaky.id}/preview/", body, format="json")
+    assert persisted.status_code == 400
+    assert "HCV-07" in str(persisted.json())
+
+    draft = api_client.post(
+        f"/api/prompts/{leaky.id}/preview/",
+        {**body, "user_prompt": "Generate something else entirely."},
+        format="json",
+    )
+    assert draft.status_code == 400
+    assert "HCV-07" in str(draft.json())
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_scans_its_draft_system_prompt(
+    api_client, staff, taxonomy
+):
+    """The id-less route must render and scan the DRAFT system_prompt, not a
+    blank one — the user_prompt here is innocent, so only the system_prompt
+    can trip the scan."""
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 2,
+            "variant": "A",
+            "guard_taxonomy": taxonomy.id,
+            "system_prompt": "Label with HCV-07 wherever it applies.",
+            "user_prompt": "Generate.",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "HCV-07" in str(response.json())
+    assert PromptTemplate.objects.count() == before_count
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_renders_its_draft_system_prompt(
+    api_client, staff, taxonomy
+):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 2,
+            "variant": "A",
+            "guard_taxonomy": taxonomy.id,
+            "system_prompt": "You write scenarios for {{ n_systems }} systems.",
+            "user_prompt": "Generate.",
+            "n_systems": 2,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["system_prompt"] == "You write scenarios for 2 systems."
+
+
+# --- The fail-closed 400 must say what is actually wrong ------------------------
+
+
+def _unscannable_preview(api_client, staff, template, **extra):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {"variant": "A", "n_systems": 1, "n_scenarios_per_system": 1, **extra},
+        format="json",
+    )
+    assert response.status_code == 400
+    return str(response.json())
+
+
+@pytest.mark.django_db
+def test_preview_with_a_guard_taxonomy_of_no_rows_names_that_guard(api_client, staff, template):
+    """A guard WAS passed — telling the operator to pass one would send them
+    looking for the wrong problem."""
+    empty = Taxonomy.objects.create(vocabulary_id="HCV-EMPTY-PREVIEW", version="1.0")
+
+    detail = _unscannable_preview(api_client, staff, template, guard_taxonomy=empty.id)
+
+    assert "backstop could not run" in detail
+    assert f"The guard_taxonomy you passed ({empty})" in detail
+    assert "has no HCV rows" in detail
+    assert "No taxonomy to check" not in detail
+
+
+@pytest.mark.django_db
+def test_preview_with_a_guard_taxonomy_of_blank_rows_names_those_rows(api_client, staff, template):
+    blanked = Taxonomy.objects.create(vocabulary_id="HCV-BLANK-PREVIEW", version="1.0")
+    HCV.objects.create(taxonomy=blanked, hcv_id="HCV-07", name="Malicious Insiders", order=7)
+    HCV.objects.create(taxonomy=blanked, hcv_id="", name="", definition="", order=8)
+
+    detail = _unscannable_preview(api_client, staff, template, guard_taxonomy=blanked.id)
+
+    assert "backstop could not run" in detail
+    assert f"The guard_taxonomy you passed ({blanked})" in detail
+    assert "1 of 2 HCV rows with no hcv_id, name or definition" in detail
+    assert "No taxonomy to check" not in detail
+
+
+@pytest.mark.django_db
+def test_preview_falling_back_to_an_empty_active_taxonomy_names_it(api_client, staff, template):
+    """No guard passed, but one WAS found — the active taxonomy — and it is
+    the thing that is broken."""
+    active = Taxonomy.objects.create(
+        vocabulary_id="HCV-EMPTY-ACTIVE", version="1.0", is_active=True
+    )
+
+    detail = _unscannable_preview(api_client, staff, template)
+
+    assert "backstop could not run" in detail
+    assert f"The active taxonomy ({active})" in detail
+    assert "has no HCV rows" in detail
+    assert "No taxonomy to check" not in detail
+
+
+@pytest.mark.django_db
+def test_preview_with_no_guard_at_all_still_asks_for_one(api_client, staff, template):
+    assert Taxonomy.objects.filter(is_active=True).count() == 0
+
+    detail = _unscannable_preview(api_client, staff, template)
+
+    assert "No taxonomy to check" in detail
+    assert "Pass guard_taxonomy=" in detail
+
+
+@pytest.mark.django_db
 def test_draft_preview_returns_the_draft_output_schema_not_the_stored_one(
     api_client, staff, template, taxonomy
 ):

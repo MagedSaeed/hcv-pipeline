@@ -161,6 +161,33 @@ class ConflictCodeMixin:
         return response
 
 
+def _routed_action(view):
+    """The action this request is routed to — what a `get_serializer_class`
+    should pick a serializer by.
+
+    Not `view.action`: `ViewSetMixin.initialize_request` sets it to
+    `"metadata"` for EVERY `OPTIONS` request, whatever URL it targets, so a
+    `get_serializer_class` keyed on `self.action` describes the default
+    serializer in `OPTIONS` metadata for every action alike — even though it
+    picks correctly for a real POST. `view.action_map` survives that: it is
+    set once, from the URL's own routing, and DRF's
+    `SimpleMetadata.determine_actions` clones the probed request onto
+    `view.request` with `method` set to `"POST"`/`"PUT"` before calling
+    `get_serializer()` — so `action_map[method]` names the right action both
+    during a real request and during an `OPTIONS` probe.
+
+    `view.request` can be None: DRF's schema generator
+    (`BaseSchemaGenerator.create_view`) builds views that way, and in that
+    case sets `view.action` straight from the routing for the method it is
+    describing — so that is what is returned, instead of an `AttributeError`
+    on `None.method`.
+    """
+    request = getattr(view, "request", None)
+    if request is None:
+        return getattr(view, "action", None)
+    return (getattr(view, "action_map", None) or {}).get(request.method.lower())
+
+
 class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewsets.ModelViewSet):
     serializer_class = ExperimentSerializer
     permission_classes = [IsAuthenticated, StaffWrites]
@@ -172,24 +199,10 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         a frontend discovers `n_repetitions`' `help_text` — the $1.61/23-
         minute cost explanation — without hand-copying it and risking drift.
 
-        `self.action` is **not** enough here. `ViewSetMixin.initialize_request`
-        hardcodes `self.action = "metadata"` for every `OPTIONS` request,
-        whatever URL it targets — so a plain `if self.action == "run": ...`
-        (the pattern `PhaseRunViewSet.get_serializer_class` uses below, which
-        works because a real POST to `/create/` genuinely sets
-        `self.action = "create"`) would never fire for `OPTIONS
-        /api/experiments/{id}/run/`, and this method would keep reporting
-        `ExperimentSerializer`'s fields for every action alike.
-        `self.action_map` is what survives that: it is set once, from the
-        URL's own routing, before `self.action` gets overwritten, and DRF's
-        `SimpleMetadata.determine_actions` clones the probed request onto
-        `self.request` with `method` set to `"POST"` before calling
-        `get_serializer()` — so `self.action_map.get(self.request.method.
-        lower())` resolves to `"run"` correctly whether this runs during a
-        real POST (where it agrees with `self.action` anyway) or during
-        `OPTIONS`'s metadata probe (where `self.action` alone cannot tell).
+        Keyed on `_routed_action`, not `self.action`, which is always
+        `"metadata"` during an `OPTIONS` request — see that helper.
         """
-        if self.action_map.get(self.request.method.lower()) == "run":
+        if _routed_action(self) == "run":
             return RunRequestSerializer
         return super().get_serializer_class()
 
@@ -620,10 +633,17 @@ class PhaseRunViewSet(
     permission_classes = [IsAuthenticated, StaffWrites]
 
     def get_serializer_class(self):
-        # `create` writes a narrower, validated shape than `PhaseRunSerializer`
-        # exposes for reads (see `PhaseRunCreateSerializer`'s own docstring for
-        # why that is a separate class rather than the read serializer reused).
-        if self.action == "create":
+        """`create` writes a narrower, validated shape than `PhaseRunSerializer`
+        exposes for reads (see `PhaseRunCreateSerializer`'s own docstring for
+        why that is a separate class rather than the read serializer reused).
+
+        Keyed on `_routed_action`, not `self.action`: `self.action == "create"`
+        held for a real POST, but every `OPTIONS /api/phase-runs/` runs with
+        `self.action == "metadata"`, so it described `PhaseRunSerializer` —
+        the READ shape — as what POST accepts. Same cause, and same fix, as
+        `ExperimentViewSet.get_serializer_class`.
+        """
+        if _routed_action(self) == "create":
             return PhaseRunCreateSerializer
         return super().get_serializer_class()
 

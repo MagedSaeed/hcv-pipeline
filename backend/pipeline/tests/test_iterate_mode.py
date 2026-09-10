@@ -184,6 +184,43 @@ def test_staff_may_create_an_ad_hoc_phase_run(api_client, staff, taxonomy, phase
 
 
 @pytest.mark.django_db
+def test_options_on_phase_runs_describes_what_post_actually_accepts(api_client, staff):
+    """OPTIONS /api/phase-runs/ must describe `PhaseRunCreateSerializer`, the
+    shape `create` reads — not `PhaseRunSerializer`, the READ shape. DRF sets
+    `self.action = "metadata"` for every OPTIONS request, so choosing by
+    `self.action == "create"` only ever worked for a real POST — the same
+    bug `ExperimentViewSet`'s `run` action had."""
+    from pipeline.serializers import PhaseRunCreateSerializer
+
+    api_client.force_authenticate(user=staff)
+    response = api_client.options("/api/phase-runs/")
+
+    assert response.status_code == 200
+    fields = response.json()["actions"]["POST"]
+    assert set(fields) == set(PhaseRunCreateSerializer().fields)
+    assert "leak_scan_ran" not in fields
+    assert "status" not in fields
+
+
+def test_phase_run_get_serializer_class_survives_a_view_built_without_a_request():
+    """DRF's schema generator builds views with `request=None`; the choice
+    must fall back to the routed `action` it sets, not raise."""
+    from django.urls import resolve
+    from rest_framework.schemas.generators import BaseSchemaGenerator
+
+    from pipeline.serializers import PhaseRunCreateSerializer, PhaseRunSerializer
+
+    generator = BaseSchemaGenerator()
+    callback = resolve("/api/phase-runs/").func
+    post_view = generator.create_view(callback, "POST")
+    get_view = generator.create_view(callback, "GET")
+
+    assert post_view.request is None
+    assert post_view.get_serializer_class() is PhaseRunCreateSerializer
+    assert get_view.get_serializer_class() is PhaseRunSerializer
+
+
+@pytest.mark.django_db
 def test_non_staff_cannot_delete_an_ad_hoc_run(api_client, member, taxonomy, phase2_template):
     generation = PhaseRun.objects.create(
         phase=2, variant="A", model="m2", prompt_template=phase2_template, taxonomy=taxonomy

@@ -473,6 +473,26 @@ def test_options_on_run_describes_n_repetitions_help_text(api_client, staff, exp
     assert response.status_code == 200
     fields = response.json()["actions"]["POST"]
     assert set(fields) == {"n_repetitions"}
-    assert fields["n_repetitions"]["help_text"] == RunRequestSerializer().fields[
-        "n_repetitions"
-    ].help_text
+    assert (
+        fields["n_repetitions"]["help_text"]
+        == RunRequestSerializer().fields["n_repetitions"].help_text
+    )
+
+
+def test_get_serializer_class_survives_a_view_built_without_a_request():
+    """DRF's schema generator builds views with `request=None`
+    (`BaseSchemaGenerator.create_view`), setting `action` from the routing
+    instead. `get_serializer_class` must not raise `AttributeError` on
+    `None.method` there — and must still pick by the routed action."""
+    from django.urls import resolve
+    from rest_framework.schemas.generators import BaseSchemaGenerator
+
+    from pipeline.serializers import ExperimentSerializer, RunRequestSerializer
+
+    generator = BaseSchemaGenerator()
+    run_view = generator.create_view(resolve("/api/experiments/1/run/").func, "POST")
+    create_view = generator.create_view(resolve("/api/experiments/").func, "POST")
+
+    assert run_view.request is None
+    assert run_view.get_serializer_class() is RunRequestSerializer
+    assert create_view.get_serializer_class() is ExperimentSerializer

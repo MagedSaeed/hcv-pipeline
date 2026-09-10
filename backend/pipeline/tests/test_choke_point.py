@@ -29,7 +29,7 @@ from pipeline.clients import reset_llm_client, set_llm_client
 from pipeline.execution_config import config_snapshot
 from pipeline.generation import run_phase2
 from pipeline.labelling import label_scenario
-from pipeline.models import Experiment, PhaseRun, PipelineRun
+from pipeline.models import Experiment, LLMCall, PhaseRun, PipelineRun
 from prompts.models import PromptTemplate
 from prompts.rendering import build_phase2_context, render
 from taxonomy.models import HCV, Taxonomy
@@ -324,3 +324,83 @@ def test_the_choke_point_refuses_a_variant_a_call_when_the_taxonomy_cannot_be_re
     assert "TaxonomyLeak" in run.error
     assert run.calls.count() == 0
     assert _client.calls == []
+
+
+# --- Dict KEYS are request text: the reviewer's reproduction, end to end ----------
+#
+# A variant-A template whose output_schema names HCV ids ONLY as property keys —
+# one boolean per HCV, exactly what a labelling schema looks like. Both scanners
+# walked with `prompts.rendering._iter_request_text`, which used to yield dict
+# values only, so this rendered clean, a real run_phase2 COMPLETED, `HCV-07` went
+# to the provider, and the call was archived with leak_scan_ran=True.
+
+KEY_ONLY_SCHEMA = {"type": "object", "properties": {"HCV-07": {"type": "boolean"}}}
+
+
+@pytest.mark.django_db
+def test_a_variant_a_schema_naming_hcv_ids_only_as_keys_fails_with_zero_calls(
+    _client, experiment, taxonomy
+):
+    """A response IS queued, so a scan that misses the key lets the run
+    COMPLETE and archive the call — the failure the reviewer reproduced —
+    rather than failing for the unrelated reason of an empty fake queue."""
+    key_only = PromptTemplate.objects.create_version(
+        phase=2, name="key-only", user_prompt="Generate scenarios.", output_schema=KEY_ONLY_SCHEMA
+    )
+    _client.queue(PAYLOAD)
+
+    run = run_phase2(make_run(experiment, taxonomy, key_only, variant="A"))
+
+    assert run.status == PhaseRun.Status.FAILED
+    assert "TaxonomyLeak" in run.error
+    assert "HCV-07" in run.error
+    assert _client.calls == []
+    assert run.calls.count() == 0
+    assert LLMCall.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_the_choke_point_alone_catches_a_key_only_id_injected_after_rendering(
+    monkeypatch, _client, experiment, taxonomy, phase2_template
+):
+    """The same key-only shape, but added to the request AFTER `render()` —
+    so the render-time scan cannot see it and only the choke point stands
+    between it and the provider. The choke point had been key-blind since it
+    was built, before `render()` ever was."""
+    import llm.fake as fake_module
+    from llm.client import build_request as real_build_request
+
+    def leaky_build_request(*args, **kwargs):
+        request = real_build_request(*args, **kwargs)
+        request["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": KEY_ONLY_SCHEMA},
+        }
+        return request
+
+    monkeypatch.setattr(fake_module, "build_request", leaky_build_request)
+    _client.queue(PAYLOAD)
+
+    run = run_phase2(make_run(experiment, taxonomy, phase2_template, variant="A"))
+
+    assert run.status == PhaseRun.Status.FAILED
+    assert "TaxonomyLeak" in run.error
+    assert "HCV-07" in run.error
+    assert _client.calls == []
+    assert LLMCall.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_variant_b_with_hcv_ids_as_schema_keys_still_runs(_client, experiment, taxonomy):
+    """The mirror image: under variant B the key-only schema is the intended
+    design, and the run completes with one call."""
+    key_only = PromptTemplate.objects.create_version(
+        phase=2, name="key-only-b", user_prompt="Generate scenarios.", output_schema=KEY_ONLY_SCHEMA
+    )
+    _client.queue(PAYLOAD)
+
+    run = run_phase2(make_run(experiment, taxonomy, key_only, variant="B"))
+
+    assert run.status == PhaseRun.Status.COMPLETED
+    assert len(_client.calls) == 1
+    assert run.calls.get().leak_scan_ran is False

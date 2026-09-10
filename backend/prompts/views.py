@@ -16,6 +16,7 @@ from prompts.rendering import (
     build_phase2_context,
     build_phase3_context,
     render,
+    unscannable_hcv_rows,
 )
 from prompts.serializers import PreviewSerializer, PromptTemplateSerializer
 from taxonomy.models import Taxonomy
@@ -191,10 +192,10 @@ class PromptTemplateViewSet(
         if context.get("_variant") == VARIANT_UNBIASED and not rendered.leak_scan_ran:
             raise ValidationError(
                 {
-                    "detail": "No taxonomy to check this variant-A preview against, "
-                    "so the isolation backstop could not run. Pass guard_taxonomy=, "
-                    "or activate a Taxonomy, before previewing — a preview that "
-                    "proved nothing must not be shown as clean."
+                    "detail": _unscanned_preview_detail(
+                        context.get("_guard_taxonomy"),
+                        explicit=bool(config.get("guard_taxonomy")),
+                    )
                 }
             )
 
@@ -256,9 +257,7 @@ class PromptTemplateViewSet(
 
         if template is None:
             if "phase" not in config:
-                raise ValidationError(
-                    {"phase": "Previewing a template with no id requires phase."}
-                )
+                raise ValidationError({"phase": "Previewing a template with no id requires phase."})
             phase, name = config["phase"], ""
             system_prompt = overrides.get("system_prompt", "")
             user_prompt = overrides["user_prompt"]
@@ -316,3 +315,49 @@ class PromptTemplateViewSet(
 
     def _fewshots(self, config, *, phase):
         return FewShotExample.objects.filter(pk__in=config.get("fewshots", []), phase=phase)
+
+
+def _unscanned_preview_detail(guard, *, explicit):
+    """The 400 for a variant-A preview whose backstop could not run, naming
+    what is actually wrong.
+
+    `assert_no_taxonomy_leak` returns False for three different reasons that
+    need three different fixes: there is no guard taxonomy at all (pass one,
+    or activate one); the guard has no HCV rows (a broken import); or some
+    of its rows carry no content — decided by `unscannable_hcv_rows`, the
+    SAME predicate the scan itself uses, so this cannot disagree with it.
+    One message for all three used to tell an operator who HAD passed
+    `guard_taxonomy=` to "Pass guard_taxonomy=". `explicit` says whether the
+    guard came from the request or from the `Taxonomy.active()` fallback, so
+    the message names the taxonomy the operator actually needs to look at.
+    """
+    unproven = "A preview that proved nothing must not be shown as clean."
+    if guard is None:
+        return (
+            "No taxonomy to check this variant-A preview against, so the isolation "
+            "backstop could not run. Pass guard_taxonomy=, or activate a Taxonomy, "
+            f"before previewing. {unproven}"
+        )
+    source = (
+        f"The guard_taxonomy you passed ({guard})"
+        if explicit
+        else f"The active taxonomy ({guard}), used because no guard_taxonomy was passed,"
+    )
+    rows = list(guard.hcvs.all())
+    blank = unscannable_hcv_rows(rows)
+    if not rows:
+        problem = "has no HCV rows"
+    elif blank:
+        problem = f"has {len(blank)} of {len(rows)} HCV rows with no hcv_id, name or definition"
+    else:
+        problem = "could not be scanned against"
+    alternative = (
+        "pass a different guard_taxonomy="
+        if explicit
+        else "pass guard_taxonomy= naming a complete taxonomy"
+    )
+    return (
+        f"{source} {problem}, so the isolation backstop could not run. Fix or "
+        f"re-import that taxonomy (manage.py import_taxonomy), or {alternative}. "
+        f"{unproven}"
+    )

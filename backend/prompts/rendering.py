@@ -22,7 +22,7 @@ left to whoever writes the template:
   every hcv_id, definitions in its descriptions — into a Run A template with
   prompts that look entirely innocent;
 - `assert_request_not_leaking_taxonomy()` walks the FINAL request dict and
-  scans every raw string it contains — not the two prompt strings `render()`
+  scans every raw string it contains, dict keys included — not the two prompt strings `render()`
   sees, but everything about to be sent to the provider, including whatever
   a future field carries — immediately before the HTTP call. Deliberately
   RAW text, not a `json.dumps`'d blob: JSON's own escaping of a quote,
@@ -256,9 +256,25 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
 
 def _iter_request_text(value, _ancestors=frozenset()):
     """Walk a JSON-like value (nested dicts/lists/tuples) and yield every
-    string leaf it contains, RAW — never round-tripped through `json.dumps`.
+    dict KEY and every string leaf it contains, RAW — never round-tripped
+    through `json.dumps`.
 
-    That distinction is load-bearing, not cosmetic: `json.dumps` ESCAPES a
+    Keys are yielded, at every nesting level, because a key IS request text.
+    `{"type": "object", "properties": {"HCV-01": {"type": "boolean"}, ...}}`
+    — one boolean per HCV, exactly the shape of a labelling schema — sends
+    `HCV-01` to the provider in a key, while every VALUE in it is harmless
+    ("object", "boolean"). Review reproduced exactly that end to end: a
+    variant-A template whose `output_schema` carried HCV ids only as
+    property keys rendered clean, ran, sent them, and archived the call with
+    `leak_scan_ran=True` — false evidence of isolation. This walker used to
+    yield values only, so the final request scan had ALWAYS been key-blind,
+    and `render()`'s schema scan became key-blind too the moment it moved
+    off `json.dumps` (which does include keys) onto this walker. A string
+    key is yielded as-is; any other key via `str()` — JSON itself only
+    allows string keys, so one reaching here is already off-spec, and
+    dropping it would be the silent skip this walker exists not to do.
+
+    Raw rather than `json.dumps`'d is load-bearing, not cosmetic: `json.dumps` ESCAPES a
     `"`, a backslash, a real newline and a real tab inside a string value
     (`"` becomes the two characters `\\"`, a real newline becomes the two
     characters `\\n`, and so on). A taxonomy name or definition containing
@@ -293,9 +309,13 @@ def _iter_request_text(value, _ancestors=frozenset()):
         if marker in _ancestors:
             raise ValueError("Circular reference detected while scanning the request.")
         nested = _ancestors | {marker}
-        items = value.values() if isinstance(value, dict) else value
-        for item in items:
-            yield from _iter_request_text(item, nested)
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield key if isinstance(key, str) else str(key)
+                yield from _iter_request_text(item, nested)
+        else:
+            for item in value:
+                yield from _iter_request_text(item, nested)
         return
     if value is None or isinstance(value, bool | int | float):
         return
@@ -632,7 +652,9 @@ def render(template, context):
         guard,
         rendered,
         # The schema is part of the request body, so it is part of what is
-        # scanned — walked with `_iter_request_text`, the SAME raw-string walk
+        # scanned, KEYS included — a schema with one property per HCV carries
+        # the ids only as keys (see `_iter_request_text`'s docstring for the
+        # leak that caused) — walked with `_iter_request_text`, the SAME raw-string walk
         # `assert_request_not_leaking_taxonomy` uses for the final request
         # scan, NOT `json.dumps`. Coordinator review: `json.dumps` escapes a
         # literal `"`, backslash, newline or tab inside a string value (`"`
