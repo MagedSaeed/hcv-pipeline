@@ -915,7 +915,7 @@ are unaffected.
 
 ## 10. Screens
 
-Ten screens. The researcher's day is two loops: tune a prompt until the output is
+Eleven screens. The researcher's day is two loops: tune a prompt until the output is
 worth running, then launch, watch, and read the result. The layout follows those
 loops rather than the data model.
 
@@ -928,7 +928,8 @@ loops rather than the data model.
 | Taxonomy | the 21 HCVs, read-only, with version selector; the active taxonomy is marked |
 | Corpus | system descriptions and scenarios; filter by origin, run and variant; seed and manual rows editable, generated rows read-only and marked as such |
 | Prompt editor | Jinja2 editor, version history, per-variant preview, and the iterate panel below |
-| Experiment builder | models, a phase-2 prompt **per variant**, phase-3 prompt, taxonomy, seeds, few-shots, the two toggles, counts, variants, repetitions |
+| Experiment builder | models, a phase-2 prompt **per variant**, phase-3 prompt, taxonomy, seeds, few-shots, the two toggles, counts, variants; creates or edits an experiment |
+| Experiment detail | an experiment's current configuration, launching N repetitions, its runs, and editing it |
 | Run detail | live progress, cancel, retry, per-run export, the pinned config, isolation evidence, and the call inspector |
 | Labels | per-variant scenario x HCV matrix, evidence and rationale on hover |
 
@@ -944,11 +945,17 @@ not a nicety: templates render under `StrictUndefined`, so a mistake in the A
 template fails only the A run while B succeeds, which is the most confusing
 symptom the system can produce.
 
+The variant a template is being validated for is always an explicit choice, never carried over from a previously loaded template, and a variant-A preview whose isolation scan did not run is never presented as OK. At launch, each active variant's phase-2 template is dry-rendered under its own variant with the experiment's real inputs, and the launch is refused before any provider call if that render fails.
+
 The iterate panel sits beneath the editor and drives `POST /api/phase-runs/`:
 pick an experiment to borrow inputs from, override the counts down to one system
 and one scenario, run, and read the output beside the template that produced it.
 The panel must state that these runs are scratch — they are never archived and
 never appear in an export bundle (§9).
+
+### Experiment detail
+
+An experiment must be reachable and launchable at any time after it is created — never only from the builder's in-memory state in the moment after creation. A screen at `/experiments/:id` shows the experiment's **current** configuration, labelled as such (each run pins its own copy at launch, so this is not what any existing run used); launches N repetitions, with the explanation of why you would raise N taken from `OPTIONS` on the run action; lists the experiment's runs, linking to Run detail; and offers Edit through the builder form. Editing is safe by construction: a run's configuration is pinned at launch (§5.4), so an edit can never change what an existing run reports. Dashboard rows link here, and the builder lands here after creating an experiment.
 
 ### Run detail
 
@@ -962,7 +969,7 @@ the caveat that cancelling marks a run dead but does not interrupt a worker
 already mid-call.
 
 The call inspector lists every call with the full rendered prompt beside the
-verbatim response, copyable, never truncated.
+verbatim response, copyable, never truncated. Run detail links to Labels with this run preselected.
 
 ### Labels
 
