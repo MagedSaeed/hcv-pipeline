@@ -5,7 +5,9 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
 import Dashboard from './pages/Dashboard';
+import Resources from './pages/Resources';
 import Taxonomy from './pages/Taxonomy';
+import Corpus from './pages/Corpus';
 import Settings from './pages/Settings';
 
 // The axios response interceptor (src/api/client.js) has no Router context
@@ -50,7 +52,9 @@ export default function App() {
           }
         >
           <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/resources" element={<Resources />} />
           <Route path="/taxonomy" element={<Taxonomy />} />
+          <Route path="/corpus" element={<Corpus />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

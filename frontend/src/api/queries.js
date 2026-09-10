@@ -186,3 +186,147 @@ export function useUpdateSettings() {
     },
   });
 }
+
+// -----------------------------------------------------------------------
+// Resources (ResourceFile) - any authenticated user (spec §9's CRUD
+// endpoints carry no staff restriction of their own). Upload goes through
+// this SAME `apiClient` instance as every other request - passing a
+// `FormData` body straight through, with no `Content-Type` header set by
+// hand, is deliberate: axios detects `FormData` and lets the XHR adapter
+// set `multipart/form-data` WITH the boundary itself. Setting the header
+// manually here would fix the value without the boundary parameter the
+// browser actually used to separate parts, breaking the upload silently.
+// The CSRF request interceptor (client.js) doesn't care either way - it
+// only ever touches `X-CSRFToken`, matching on the unsafe HTTP method, so
+// CSRF still applies to this request exactly as it does to a JSON one.
+export function useResources(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.resources.list(params),
+    queryFn: () => fetchList('/resources/', params),
+    ...options,
+  });
+}
+
+export function useCreateResource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (formData) => {
+      const { data } = await apiClient.post('/resources/', formData);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.resources.all });
+    },
+  });
+}
+
+export function useDeleteResource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/resources/${id}/`);
+      return id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.resources.all });
+    },
+  });
+}
+
+// -----------------------------------------------------------------------
+// Few-shots (FewShotExample) - ?phase=2|3. `resolved_input`/`resolved_output`
+// (FewShotExampleSerializer) are read-only, server-computed fields: the
+// text of whichever side is file-backed is read from the file at RESPONSE
+// time, not stored on the row - callers must render these fields as given,
+// never recompute them from `input_text`/`input_file` client-side.
+export function useFewShots(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.fewshots.list(params),
+    queryFn: () => fetchList('/fewshots/', params),
+    ...options,
+  });
+}
+
+export function useCreateFewShot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/fewshots/', payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.fewshots.all });
+    },
+  });
+}
+
+// -----------------------------------------------------------------------
+// System descriptions and scenarios (corpus). `?origin=&variant=&run=
+// &phase_run=` on both; `?system=` additionally on scenarios. `origin
+// ="generated"` rows are read-only at the API (corpus.permissions.
+// ReadOnlyIfGenerated) - `is_editable` is already embedded on every row so a
+// page never has to re-derive that from `origin` itself.
+export function useSystemDescriptions(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.systemDescriptions.list(params),
+    queryFn: () => fetchList('/system-descriptions/', params),
+    ...options,
+  });
+}
+
+export function useUpdateSystemDescription() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/system-descriptions/${id}/`, payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.systemDescriptions.all });
+    },
+  });
+}
+
+export function useScenarios(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.scenarios.list(params),
+    queryFn: () => fetchList('/scenarios/', params),
+    ...options,
+  });
+}
+
+export function useUpdateScenario() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/scenarios/${id}/`, payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.scenarios.all });
+    },
+  });
+}
+
+// -----------------------------------------------------------------------
+// A single PhaseRun, read alone (not the list). Corpus is the one screen
+// that needs this: a system description or scenario row never carries its
+// own `generation_run`/`pipeline_run` over the API (SystemDescriptionSerializer
+// and ScenarioSerializer both omit it - see corpus/serializers.py), so the
+// ONLY way to tell whether a `?phase_run=` filter is currently showing
+// iterate-mode scratch material is to ask the PhaseRun itself whether its
+// own `pipeline_run` is null (spec §5.4: "null for ad-hoc iterate-mode
+// runs"). Reading any authenticated user can do - PhaseRunViewSet is
+// ReadOnlyModelViewSet plus two staff-only exceptions that don't include
+// retrieve (pipeline/views.py).
+export function usePhaseRun(id, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.phaseRuns.detail(id),
+    queryFn: async () => {
+      const { data } = await apiClient.get(`/phase-runs/${id}/`);
+      return data;
+    },
+    enabled: id != null,
+    ...options,
+  });
+}

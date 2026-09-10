@@ -22,8 +22,14 @@ export default function Layout() {
             <NavLink to="/dashboard" className={navLinkClassName}>
               Dashboard
             </NavLink>
+            <NavLink to="/resources" className={navLinkClassName}>
+              Resources
+            </NavLink>
             <NavLink to="/taxonomy" className={navLinkClassName}>
               Taxonomy
+            </NavLink>
+            <NavLink to="/corpus" className={navLinkClassName}>
+              Corpus
             </NavLink>
             {/* Settings holds the OpenRouter key; a non-staff user should not
                 even see a link to a form they cannot use. */}
