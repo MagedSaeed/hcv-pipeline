@@ -108,12 +108,12 @@ export default function Dashboard() {
           <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
             {runs.map((run) => (
               <li key={run.id} className="flex items-center justify-between gap-6 px-4 py-3">
-                <div className="min-w-0 flex-1">
+                <Link to={`/pipeline-runs/${run.id}`} className="min-w-0 flex-1 hover:underline">
                   <p className="truncate text-sm font-medium text-gray-900">
                     {experimentNameById.get(run.experiment) ?? `Experiment #${run.experiment}`}
                   </p>
                   <p className="text-xs text-gray-500">Repetition {run.repetition_index}</p>
-                </div>
+                </Link>
                 <div className="w-48 shrink-0">
                   <ProgressBar progress={run.progress} />
                 </div>

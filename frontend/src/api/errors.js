@@ -37,3 +37,65 @@ export function extractErrorMessage(error, fallback = 'Something went wrong. Ple
   if (firstFieldError) return firstFieldError[0];
   return fallback;
 }
+
+// The keys a DRF error body can carry that are NOT about one specific
+// field - `detail` (a permission/auth failure, or a plain-string
+// ValidationError DRF coerced into `{"detail": ...}`), `non_field_errors`
+// (a whole-serializer ValidationError, e.g. Experiment.clean() raising
+// against no field in particular), and `code` (the machine-readable
+// 409/503 marker this API attaches - see pipeline/views.py's
+// ConflictCodeMixin/_service_unavailable). Everything else in the body is
+// a field name from the serializer that was actually being validated.
+const NON_FIELD_KEYS = new Set(['detail', 'non_field_errors', 'code']);
+
+function joinMessages(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join(' ');
+  }
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+// Turns a DRF ValidationError body into a {fieldName: message} map, so a
+// form can place the backend's own wording next to the field it actually
+// refused - Experiment.clean() (backend/pipeline/models.py) raises exactly
+// this shape (`{"seed_systems": [...], "generate_systems": [...], ...}`,
+// via Django's `ValidationError.message_dict`), and ExperimentSerializer
+// re-raises it unchanged (`pipeline/serializers.py`). A value that is a
+// list of strings (the common case) is joined into one string; a value
+// that is itself a list of objects (e.g. `variants`' own list-of-strings
+// errors) still joins cleanly since every entry here is already a string.
+//
+// Deliberately ignores `detail`/`non_field_errors`/`code` - those are what
+// `hasNonFieldError` below is for, so a caller renders EITHER the specific
+// field errors this returns OR a fallback banner for what's left, never
+// both saying the same thing twice.
+export function extractFieldErrors(error) {
+  const data = error?.response?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+  const fieldErrors = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (NON_FIELD_KEYS.has(key)) continue;
+    fieldErrors[key] = joinMessages(value);
+  }
+  return fieldErrors;
+}
+
+// Whether anything is left for a generic ErrorBanner to say once every
+// field-specific error above has already been placed next to its own
+// field - a network failure or an unshaped body (no `response.data` at
+// all) always has something to show; a shaped body only does when it
+// carries `detail` or `non_field_errors`. This is what keeps a page from
+// showing the SAME message twice - once next to the field, once in a
+// banner that duplicates it - when the backend response was entirely
+// field-shaped errors.
+export function hasNonFieldError(error) {
+  const data = error?.response?.data;
+  if (!data) return true;
+  if (typeof data === 'string') return true;
+  if (Array.isArray(data)) return true;
+  return (
+    typeof data.detail === 'string' ||
+    (Array.isArray(data.non_field_errors) && data.non_field_errors.length > 0)
+  );
+}

@@ -113,11 +113,75 @@ async function fetchList(url, params) {
 }
 
 // -----------------------------------------------------------------------
-// Experiments - read: any authenticated user (spec §9).
+// Experiments - read: any authenticated user; create/launch: staff (spec §9).
 export function useExperiments(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.experiments.list(params),
     queryFn: () => fetchList('/experiments/', params),
+    ...options,
+  });
+}
+
+export function useExperiment(id, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.experiments.detail(id),
+    queryFn: async () => {
+      const { data } = await apiClient.get(`/experiments/${id}/`);
+      return data;
+    },
+    enabled: id != null,
+    ...options,
+  });
+}
+
+export function useCreateExperiment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/experiments/', payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.experiments.all });
+    },
+  });
+}
+
+// `POST /api/experiments/{id}/run/` - staff; {n_repetitions} -> batch mode.
+// The 202 body carries `runs` (one {id, repetition_index} per queued
+// repetition - link straight to those, per task 6's own acceptance bar) and
+// `detail` (pipeline/views.py's CANCEL_CAVEAT - the SAME honest caveat
+// `cancel` itself repeats, spec §9: "so a frontend can surface it
+// automatically the moment a batch starts"). A missing API key or an
+// unreachable broker fails this with a 503 carrying a machine-readable
+// `code` (`missing_api_key`/`broker_unavailable`) alongside `detail` -
+// callers must branch on `error.response.data.code`, never pattern-match
+// the English message (spec §9).
+export function useRunExperiment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, n_repetitions }) => {
+      const { data } = await apiClient.post(`/experiments/${id}/run/`, { n_repetitions });
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.experiments.all });
+    },
+  });
+}
+
+// -----------------------------------------------------------------------
+// The OpenRouter model catalogue (llm/models_api.py) - cached an hour
+// server-side. Shaped `{count, results}`, NOT the paginated envelope every
+// other list endpoint returns (no `next`/`previous` - it is never paged),
+// so this deliberately reads through the same `fetchList` unwrap-by-
+// `.results` convention as everything else rather than inventing a second
+// response shape for callers to special-case.
+export function useModels(options = {}) {
+  return useQuery({
+    queryKey: queryKeys.models.list(),
+    queryFn: () => fetchList('/models/'),
     ...options,
   });
 }
@@ -134,6 +198,122 @@ export function usePipelineRuns(params = {}, options = {}) {
     queryFn: () => fetchList('/pipeline-runs/', params),
     refetchInterval: (query) => runsRefetchInterval(query.state.data?.results),
     ...options,
+  });
+}
+
+// One repetition, read alone - Run detail's top-level subject. Polling
+// reuses the exact same "stop once terminal" decision every other run-status
+// poll in this app uses (`runsRefetchInterval`), wrapping the single fetched
+// row in a one-element array - the same trick `usePhaseRun` (task 5) already
+// applies, so there is still only ONE place that decides when polling stops,
+// and it drives off `status`, never off a progress number (task 7's own
+// note: "note it drives off run status, not progress numbers").
+export function usePipelineRun(id, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.pipelineRuns.detail(id),
+    queryFn: async () => {
+      const { data } = await apiClient.get(`/pipeline-runs/${id}/`);
+      return data;
+    },
+    enabled: id != null,
+    refetchInterval: (query) => runsRefetchInterval(query.state.data ? [query.state.data] : undefined),
+    ...options,
+  });
+}
+
+// `POST /api/pipeline-runs/{id}/cancel/` - staff; pending/queued/running ->
+// cancelled. Marks the run (and its still-open phase runs) dead so it can be
+// deleted; does NOT interrupt a worker already mid-call - the response's own
+// `detail` repeats that caveat (pipeline/views.py's CANCEL_CAVEAT), which
+// RunDetail shows verbatim rather than writing a second copy that could
+// drift from it. A terminal run is refused with a 409
+// (`code: "run_not_cancellable"`).
+export function useCancelPipelineRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      const { data } = await apiClient.post(`/pipeline-runs/${id}/cancel/`);
+      return data;
+    },
+    onSuccess: (_data, id) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.lists() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.all });
+    },
+  });
+}
+
+// `DELETE /api/pipeline-runs/{id}/` - staff; 409 while pending/queued/running
+// (`code: "run_in_flight"`) - cancel first. Cascades to this repetition's
+// phase runs, calls, labels and every system/scenario it generated (spec
+// §5.2: "Deletion is per run, never per row").
+export function useDeletePipelineRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/pipeline-runs/${id}/`);
+      return id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.all });
+    },
+  });
+}
+
+// `GET /api/pipeline-runs/{id}/export/?format=json|csv` - this ONE
+// repetition's archival bundle. Fetched as `arraybuffer` rather than
+// axios/XHR's own `responseType: 'blob'` - under msw's Node interceptors,
+// requesting `blob` directly makes `@mswjs/interceptors` reconstruct the
+// response through undici's own `Response`/body-extraction internals,
+// which - verified directly, not just suspected - throws `TypeError:
+// object.stream is not a function` regardless of what shape the mock
+// handler's own body is. `arraybuffer` sidesteps that reconstruction
+// entirely and is exactly as capable of carrying an opaque binary export
+// (a JSON document or a zip); `downloadBlobResponse` (RunDetail.jsx) wraps
+// the bytes in a `Blob` itself, client-side, only at the point they are
+// actually handed to `URL.createObjectURL`. Never parsed/re-encoded either
+// way - this app never constructs the download FILENAME itself; the
+// response object's `headers['content-disposition']` is what the caller
+// reads the server's own filename off of.
+export function useExportPipelineRun() {
+  return useMutation({
+    mutationFn: ({ id, format }) =>
+      apiClient.get(`/pipeline-runs/${id}/export/`, {
+        params: { format },
+        responseType: 'arraybuffer',
+      }),
+  });
+}
+
+// Every `PhaseRun` under one repetition (or matching any other `?pipeline_run=
+// &phase=&variant=&status=&experiment=` filter, spec §9) - Run detail's
+// per-phase progress list. Same "stop once every row is terminal" polling as
+// every other list of runs in this app.
+export function usePhaseRuns(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.phaseRuns.list(params),
+    queryFn: () => fetchList('/phase-runs/', params),
+    refetchInterval: (query) => runsRefetchInterval(query.state.data?.results),
+    ...options,
+  });
+}
+
+// `POST /api/phase-runs/{id}/retry/` - staff; phase 3 (labelling) only,
+// re-enqueues only the scenarios whose call failed. A cancelled or
+// in-flight run refuses with a 409 carrying its own `code`
+// (`retry_run_cancelled`/`retry_run_in_flight`) - RunDetail shows the API's
+// `detail` for that rather than inventing its own wording.
+export function useRetryPhaseRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      const { data } = await apiClient.post(`/phase-runs/${id}/retry/`);
+      return data;
+    },
+    onSuccess: (_data, id) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.lists() });
+    },
   });
 }
 
