@@ -276,6 +276,18 @@ describe('RunDetail', () => {
     expect(within(currentPanel).queryByText(/pinned oldsmar/i)).not.toBeInTheDocument();
   });
 
+  it('counts a single pinned system and scenario in the singular', async () => {
+    const run = pipelineRun({ status: 'completed', config: { ...PINNED_CONFIG, n_systems: 1, n_scenarios_per_system: 1 } });
+    installBaseFixtures({ run, phaseRuns: [] });
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    const pinnedPanel = await screen.findByTestId('pinned-config');
+    expect(await within(pinnedPanel).findByText('1 system × 1 scenario')).toBeInTheDocument();
+    const currentPanel = await screen.findByTestId('current-config');
+    expect(await within(currentPanel).findByText('3 systems × 5 scenarios')).toBeInTheDocument();
+  });
+
   it('links to Labels with this repetition preselected, not left for the id to be typed by hand', async () => {
     const run = pipelineRun({ status: 'completed' });
     installBaseFixtures({ run, phaseRuns: [] });

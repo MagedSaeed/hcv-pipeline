@@ -253,7 +253,7 @@ export default function ExperimentDetail() {
           <div>
             <dt className="font-medium text-gray-500">Counts</dt>
             <dd>
-              {experiment.n_systems} systems × {experiment.n_scenarios_per_system} scenarios
+              {experiment.n_systems} {experiment.n_systems === 1 ? 'system' : 'systems'} × {experiment.n_scenarios_per_system} {experiment.n_scenarios_per_system === 1 ? 'scenario' : 'scenarios'}
             </dd>
           </div>
         </dl>

@@ -99,7 +99,7 @@ function ConfigSummary({ testId, label, note, systems, fewshotNames, targetTitle
         <div>
           <dt className="font-medium text-gray-500">Counts</dt>
           <dd>
-            {nSystems} systems × {nScenariosPerSystem} scenarios
+            {nSystems} {nSystems === 1 ? 'system' : 'systems'} × {nScenariosPerSystem} {nScenariosPerSystem === 1 ? 'scenario' : 'scenarios'}
           </dd>
         </div>
       </dl>

@@ -125,6 +125,15 @@ describe('ExperimentDetail', () => {
     expect(within(config).getByText('label (v1)')).toBeInTheDocument();
     expect(within(config).getByText(/oldsmar water plant/i)).toBeInTheDocument();
     expect(within(config).getByText(/shot-1/i)).toBeInTheDocument();
+    expect(within(config).getByText('3 systems × 5 scenarios')).toBeInTheDocument();
+  });
+
+  it('counts a single system and scenario in the singular', async () => {
+    installDetailFixtures({ ...EXPERIMENT, n_systems: 1, n_scenarios_per_system: 1 });
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    await screen.findByRole('heading', { name: 'Baseline comparison' });
+    expect(within(screen.getByTestId('current-config')).getByText('1 system × 1 scenario')).toBeInTheDocument();
   });
 
   it('links to Edit, which reuses the builder form', async () => {
