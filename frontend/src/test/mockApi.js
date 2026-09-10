@@ -86,9 +86,38 @@ export function paginate(rows, requestOrUrl, { pageSize = PAGE_SIZE } = {}) {
 // handler in the suite was already being touched.
 const UNSAFE_METHODS = new Set(['post', 'put', 'patch', 'delete']);
 
-export const NOT_AUTHENTICATED_BODY = { detail: 'Authentication credentials were not provided.' };
-export const PERMISSION_DENIED_BODY = { detail: 'You do not have permission to perform this action.' };
-const CSRF_FAILED_BODY = { detail: 'CSRF Failed: CSRF token missing or incorrect.' };
+// Task 10.6: `backend/core/exceptions.py` (the project's DRF exception
+// handler) now puts a machine-readable `code` on every non-validation error
+// body - `not_authenticated`/`permission_denied` for the two 403s this file
+// mocks, `not_found` for a 404. Before this, these three bodies carried
+// only `detail`, so nothing in this suite could actually catch a client
+// that branched on DRF's English wording instead of `code` - a mock more
+// permissive than the real API, the exact shape of bug this project has
+// been bitten by before (see `paginate`'s own comment above). `code` is
+// added here, once, so every caller of these three helpers - and every
+// screen test that installs its own 403 via one of them - gets a body that
+// actually matches what `api/client.js`'s `isSessionExpired` (task 10.6)
+// branches on.
+export const NOT_AUTHENTICATED_BODY = {
+  detail: 'Authentication credentials were not provided.',
+  code: 'not_authenticated',
+};
+export const PERMISSION_DENIED_BODY = {
+  detail: 'You do not have permission to perform this action.',
+  code: 'permission_denied',
+};
+// A CSRF failure is refused by Django's CSRF middleware, ahead of DRF's own
+// permission checks, but it is still a `PermissionDenied` under the hood
+// (`django.middleware.csrf` raises exactly that) - so the project exception
+// handler gives it the SAME `permission_denied` code as any other
+// permission refusal, not a bespoke one of its own. That is exactly the
+// case `isSessionExpired` must never treat as a session ending: a stale or
+// missing CSRF token is recovered by `ensureCsrfCookie` on the very next
+// unsafe request, not by logging the user out.
+const CSRF_FAILED_BODY = {
+  detail: 'CSRF Failed: CSRF token missing or incorrect.',
+  code: 'permission_denied',
+};
 
 // A 403 Response if `request` is an unsafe method with no `X-CSRFToken`
 // header, else null - a handler calls this first and returns its result
@@ -103,16 +132,16 @@ export function requireCsrf(request) {
   return HttpResponse.json(CSRF_FAILED_BODY, { status: 403 });
 }
 
-// A 403 (IsAdminUser's own body, PERMISSION_DENIED_BODY) if `user` is
-// missing or not staff, else null.
+// A 403 (IsAdminUser's own body, PERMISSION_DENIED_BODY, `code:
+// "permission_denied"`) if `user` is missing or not staff, else null.
 export function requireStaff(user) {
   if (user?.is_staff) return null;
   return HttpResponse.json(PERMISSION_DENIED_BODY, { status: 403 });
 }
 
 // A 403 (NOT_AUTHENTICATED_BODY - the real API's body for an unauthenticated
-// request, per DRF coercing 401->403 under SessionAuthentication, spec §9)
-// if `user` is missing, else null.
+// request, per DRF coercing 401->403 under SessionAuthentication, spec §9;
+// `code: "not_authenticated"`) if `user` is missing, else null.
 export function requireAuth(user) {
   if (user) return null;
   return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });

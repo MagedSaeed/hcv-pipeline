@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/auth-context';
 import {
   useCreatePhaseRun,
   useCreatePromptTemplate,
+  useDeletePhaseRun,
   useExperiments,
   usePhaseRun,
   usePhaseRunCalls,
@@ -13,6 +14,7 @@ import {
   useUpdatePromptTemplate,
 } from '../api/queries';
 import CodeBlock from '../components/CodeBlock';
+import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
@@ -34,6 +36,35 @@ const VARIANT_COPY = {
 const SCRATCH_NOTICE =
   'Iterate runs are scratch: never archived, never included in any export bundle (spec §9) — ' +
   'even a run that succeeds leaves no trace beyond what you see on this screen right now.';
+
+const DELETE_ITERATE_RUN_MESSAGE =
+  'Its generated material — every system description and scenario it produced — goes with it. ' +
+  'There is no per-row undo.';
+
+// Task 10.5: the same isolation evidence Run detail shows per phase run
+// (`leak_scan_ran`/`guarded_by`, both already on `PhaseRunSerializer`), read
+// straight off THIS iterate run rather than off whatever `phase`/`variant`
+// happen to be selected in the editor right now — those can drift out of
+// sync with what the run actually was (the researcher is free to keep
+// editing the form after launching one). Only meaningful for a phase-2,
+// variant-A run: phase 3 always receives the taxonomy on purpose, and
+// variant B is never withheld from it, so there is nothing to verify there.
+function IterateIsolationNote({ iterateRun }) {
+  if (iterateRun.phase !== 2 || iterateRun.variant !== 'A') return null;
+  if (iterateRun.leak_scan_ran) {
+    return (
+      <p className="text-xs font-semibold text-green-700">
+        Isolation verified — guarded by taxonomy #{iterateRun.guarded_by.join(', ')}.
+      </p>
+    );
+  }
+  return (
+    <p className="text-xs font-semibold text-red-700">
+      Isolation NOT verified — the leak scan did not run for every call in this run. Do not treat
+      this run as proof variant A stayed unbiased.
+    </p>
+  );
+}
 
 // PhaseRunSerializer's `error` field (a plain string) is not itself an
 // axios/DRF error object - ErrorBanner (task 1/2) only knows how to read
@@ -109,6 +140,7 @@ export default function PromptEditor() {
   const [iterateNScenarios, setIterateNScenarios] = useState('1');
   const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
   const [iterateRunId, setIterateRunId] = useState(null);
+  const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
 
   const templatesQuery = usePromptTemplates({ phase });
   const taxonomiesQuery = useTaxonomies();
@@ -121,6 +153,7 @@ export default function PromptEditor() {
   const createTemplate = useCreatePromptTemplate();
   const updateTemplate = useUpdatePromptTemplate();
   const createPhaseRun = useCreatePhaseRun();
+  const deletePhaseRun = useDeletePhaseRun();
   const iterateRunQuery = usePhaseRun(iterateRunId);
   const iterateCallsQuery = usePhaseRunCalls(iterateRunId, {
     enabled: iterateRunId != null && iterateRunQuery.data?.status === 'completed',
@@ -417,6 +450,18 @@ export default function PromptEditor() {
     }
   }
 
+  async function handleDeleteIterateRunConfirmed() {
+    try {
+      await deletePhaseRun.mutateAsync(iterateRunId);
+      setConfirmingDeleteIterateRun(false);
+      // Nothing left to show — the run and everything it generated is gone.
+      setIterateRunId(null);
+    } catch {
+      // Surfaced below via deletePhaseRun.isError/error - dialog stays open
+      // so the API's own 409 message (e.g. "run_in_flight") is visible.
+    }
+  }
+
   const iterateRun = iterateRunQuery.data ?? null;
   const iterateCalls = iterateCallsQuery.data?.results ?? [];
 
@@ -646,6 +691,10 @@ export default function PromptEditor() {
                   {scenarios.map((scenario) => (
                     <option key={scenario.id} value={scenario.id}>
                       #{scenario.id} · system {scenario.system_description} · {scenario.scenario_id}
+                      {/* Task 10.5: say so plainly wherever a corpus row is
+                          listed - scratch material from an iterate run,
+                          not part of any experiment's record. */}
+                      {scenario.is_scratch ? ' · scratch (iterate run)' : ''}
                     </option>
                   ))}
                 </select>
@@ -932,11 +981,34 @@ export default function PromptEditor() {
 
         {iterateRunId != null && (
           <div className="space-y-3 border-t border-gray-200 pt-4">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               {iterateRun && <StatusBadge status={iterateRun.status} />}
               <span className="text-sm text-gray-600">Phase run #{iterateRunId}</span>
+              {isStaff && !confirmingDeleteIterateRun && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDeleteIterateRun(true)}
+                  className="rounded-md border border-red-600 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                >
+                  Delete this run
+                </button>
+              )}
             </div>
             {iterateRun && <ProgressBar progress={iterateRun.progress} label="This run" />}
+            {iterateRun && <IterateIsolationNote iterateRun={iterateRun} />}
+
+            {confirmingDeleteIterateRun && (
+              <ConfirmDialog
+                title={`Delete iterate run #${iterateRunId}?`}
+                message={DELETE_ITERATE_RUN_MESSAGE}
+                confirmLabel="Confirm"
+                cancelLabel="Never mind"
+                pending={deletePhaseRun.isPending}
+                onConfirm={handleDeleteIterateRunConfirmed}
+                onCancel={() => setConfirmingDeleteIterateRun(false)}
+              />
+            )}
+            {deletePhaseRun.isError && <ErrorBanner error={deletePhaseRun.error} />}
 
             {iterateRun?.status === 'failed' && (
               <ErrorBanner error={asApiError(iterateRun.error || 'The run failed.')} />

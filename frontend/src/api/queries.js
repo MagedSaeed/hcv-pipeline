@@ -825,6 +825,31 @@ export function useCreatePhaseRun() {
   });
 }
 
+// `DELETE /api/phase-runs/{id}/` - staff; refused with a 409 (`code:
+// "run_in_flight"`) while the run is QUEUED/RUNNING (spec §9, task 10.5).
+// This is the ONLY deletion route an ad-hoc (iterate-mode) run has - it has
+// no `PipelineRun` to delete instead (see `useDeletePipelineRun` for that
+// route on an orchestrated run) - and it cascades to whatever
+// SystemDescription/Scenario rows the run generated (corpus.models:
+// `generation_run`, `on_delete=CASCADE`), so every corpus list this app
+// reads must be treated as stale afterward, not only this phase run's own
+// queries.
+export function useDeletePhaseRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/phase-runs/${id}/`);
+      return id;
+    },
+    onSuccess: (id) => {
+      queryClient.removeQueries({ queryKey: queryKeys.phaseRuns.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.lists() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.systemDescriptions.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.scenarios.all });
+    },
+  });
+}
+
 // Every LLMCall archived under one phase run, in full (LLMCallSerializer -
 // rendered_system_prompt/rendered_user_prompt/raw_response, untruncated).
 // FETCH-ALL, not visible paging (task 10.1): spec §9 promises this endpoint

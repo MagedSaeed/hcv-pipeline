@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/auth-context';
 import { useSettings, useUpdateSettings } from '../api/queries';
+import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
 
 // backend/core/keys.py's key_source(): the stored (Settings-screen) key
@@ -25,6 +26,19 @@ export default function Settings() {
 
   const [newKey, setNewKey] = useState('');
   const [saved, setSaved] = useState(false);
+  // Task 10.6 (folded-in walkthrough finding): before this, Save disabled
+  // itself on an empty field ("disabled={... || !newKey}"), so once a key
+  // was ever saved on this screen there was NO way to make the app fall
+  // back to `.env` again — the exact trap that failed the walkthrough's
+  // first iterate attempt with a 401. The API always allowed this
+  // (`openrouter_key` is `allow_blank=True`; a PATCH with `""` clears the
+  // stored key and `key_source` becomes `"environment"`, core/keys.py) — the
+  // gap was only ever this screen never sending that request. This is a
+  // SEPARATE action from Save, not "Save with an empty field made to work",
+  // so an operator can never clear the key by accident while merely leaving
+  // the input blank.
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [cleared, setCleared] = useState(false);
 
   if (!isStaff) {
     return (
@@ -40,6 +54,7 @@ export default function Settings() {
   async function handleSubmit(event) {
     event.preventDefault();
     setSaved(false);
+    setCleared(false);
     try {
       await updateSettings.mutateAsync({ openrouter_key: newKey });
       setNewKey('');
@@ -47,6 +62,21 @@ export default function Settings() {
     } catch {
       // Surfaced below via updateSettings.isError/error - nothing further
       // to do here.
+    }
+  }
+
+  async function handleClearConfirmed() {
+    setSaved(false);
+    setCleared(false);
+    try {
+      // The exact same PATCH `openrouter_key: ""` the API has always
+      // accepted (`allow_blank=True`) - never a distinct backend action.
+      await updateSettings.mutateAsync({ openrouter_key: '' });
+      setNewKey('');
+      setConfirmingClear(false);
+      setCleared(true);
+    } catch {
+      // Surfaced below via updateSettings.isError/error - dialog stays open.
     }
   }
 
@@ -116,6 +146,50 @@ export default function Settings() {
               {updateSettings.isPending ? 'Saving…' : 'Save key'}
             </button>
           </form>
+
+          {/* Task 10.6: a SEPARATE, explicit action from the form above - Save
+              staying disabled on an empty field must never be the only way
+              this key can move, or an admin-entered one can never be
+              un-done and the app can never fall back to `.env` again (the
+              walkthrough's own first-run 401). This never handles or shows
+              the real key either; it only ever sends the empty string the
+              API already accepts. */}
+          {settingsQuery.data.key_source === 'settings' && (
+            <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-4">
+              <p className="text-sm text-gray-600">
+                A key is currently set on this screen, which always wins over the environment
+                variable. Clearing it falls back to <code>OPENROUTER_API_KEY</code> from the
+                environment, if one is configured there.
+              </p>
+              {!confirmingClear && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingClear(true)}
+                  className="rounded-md border border-red-600 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
+                >
+                  Clear — use the environment key
+                </button>
+              )}
+              {confirmingClear && (
+                <ConfirmDialog
+                  title="Clear the OpenRouter key set on this screen?"
+                  message="Every generation and labelling call will fall back to the OPENROUTER_API_KEY environment variable — or fail immediately with a clear message if none is configured there. This does not touch the environment variable itself."
+                  confirmLabel="Confirm"
+                  cancelLabel="Never mind"
+                  pending={updateSettings.isPending}
+                  onConfirm={handleClearConfirmed}
+                  onCancel={() => setConfirmingClear(false)}
+                />
+              )}
+            </div>
+          )}
+
+          {cleared && (
+            <p role="status" className="text-sm text-green-700">
+              Cleared. Source in effect is now:{' '}
+              {SOURCE_LABELS[settingsQuery.data.key_source] ?? settingsQuery.data.key_source}
+            </p>
+          )}
         </>
       )}
     </div>

@@ -74,5 +74,5 @@ npm run dev    # http://localhost:5173
 - **Iterate-mode runs are scratch.** Runs started from the prompt editor's panel are never archived and never appear in an export bundle.
 - **Cancel marks a run dead; it doesn't interrupt a worker mid-call.** A call already in flight may still finish and write its output.
 - **Repetitions queue together** and run as workers free up (2 by default). At the default configuration each costs about **$1.61** and takes about **23 minutes**.
-- **A key saved in Settings takes precedence over `OPENROUTER_API_KEY` in `.env`.** If calls start failing with a 401 after you've changed `.env`, check Settings — a stale key saved there wins.
+- **A key saved in Settings takes precedence over `OPENROUTER_API_KEY` in `.env`.** If calls start failing with a 401 after you've changed `.env`, check Settings — a stale key saved there wins. To fall back to `.env`, use **Clear — use the environment key** in Settings.
 - **The export reflects what each run actually used.** Every repetition pins its own configuration at launch, so editing an experiment afterwards doesn't change an existing run's export.

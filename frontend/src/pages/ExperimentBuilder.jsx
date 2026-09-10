@@ -187,6 +187,16 @@ export default function ExperimentBuilder() {
   const phase3Templates = phase3TemplatesQuery.data?.results ?? [];
   const systems = systemsQuery.data?.results ?? [];
   const fewshots = fewshotsQuery.data?.results ?? [];
+  // Task 10.5: the backend refuses ANY generated-origin row as a seed or a
+  // target — scratch (an iterate run's own output) or from a real launched
+  // repetition alike — because its prose is taxonomy-DERIVED, not a literal
+  // quote of it, so none of the text-scanning isolation guards can catch it
+  // (spec §5.4: "the origin check is the only thing that closes this
+  // route"). Offering a choice the backend will only ever refuse is worse
+  // than no choice at all — a researcher who picks one gets a 400 with no
+  // way to tell in advance which system was the problem. Both pickers below
+  // read from this filtered list, never the raw `systems` above.
+  const selectableSystems = systems.filter((system) => system.origin !== 'generated');
 
   // Task 6's own acceptance bar: map every field-shaped DRF error onto the
   // field it names; fall back to ErrorBanner only for what's left
@@ -430,10 +440,12 @@ export default function ExperimentBuilder() {
         <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Seed systems</legend>
           <p className="text-xs text-gray-500">
-            A generated-origin system is refused as a seed — its prose already reflects what a
-            prior run produced, so seeding with it would contaminate the comparison.
+            Only seed and manual systems are offered here — a generated-origin system (whether from
+            a launched repetition or an iterate run's own scratch output) is refused by the API as a
+            seed, since its prose already reflects what a prior run produced and would contaminate
+            the comparison, so it is left off this list rather than offered only to be rejected.
           </p>
-          {systems.map((system) => (
+          {selectableSystems.map((system) => (
             <label key={system.id} htmlFor={`seed-system-${system.id}`} className="flex items-center gap-2 text-sm text-gray-700">
               <input
                 id={`seed-system-${system.id}`}
@@ -503,7 +515,7 @@ export default function ExperimentBuilder() {
                 className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
               >
                 <option value="">Select a system…</option>
-                {systems.map((system) => (
+                {selectableSystems.map((system) => (
                   <option key={system.id} value={system.id}>
                     {system.title} ({ORIGIN_LABELS[system.origin] ?? system.origin})
                   </option>

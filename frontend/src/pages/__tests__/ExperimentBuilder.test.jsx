@@ -389,6 +389,31 @@ describe('ExperimentBuilder', () => {
     expect(await within(variantA).findByText(/filler-template-55/)).toBeInTheDocument();
   });
 
+  // Task 10.5: the backend refuses ANY generated-origin row as a seed or a
+  // target (spec §5.4 - its prose is taxonomy-DERIVED, so none of the
+  // text-scanning isolation guards can catch it; the origin check is the
+  // only thing that closes this route). Offering "Leaked system" here would
+  // only ever be refused with a 400 the researcher has no way to anticipate
+  // in advance - so it must not be offered at all, not merely discouraged.
+  it('offers only seed/manual systems as a seed or a target — a generated-origin row the API would refuse is never offered', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    await screen.findByLabelText(/^name$/i);
+    // A seed system genuinely renders (proof this is a real filter, not an
+    // empty list)...
+    expect(await screen.findByLabelText(/oldsmar water plant/i)).toBeInTheDocument();
+    // ...but the generated-origin one never does, anywhere on the page.
+    expect(screen.queryByLabelText(/leaked system/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/leaked system/i)).not.toBeInTheDocument();
+
+    // Uncheck "generate systems" to reveal the Target system picker too.
+    await user.click(screen.getByLabelText(/^generate systems$/i));
+    const targetSelect = screen.getByLabelText(/^target system$/i);
+    expect(within(targetSelect).getByText(/oldsmar water plant/i)).toBeInTheDocument();
+    expect(within(targetSelect).queryByText(/leaked system/i)).not.toBeInTheDocument();
+  });
+
   it('the seed-system list and target-system picker offer every system, not just the first 50 (fails if only page 1 is read)', async () => {
     renderApp({ initialEntries: ['/experiments/new'] });
 

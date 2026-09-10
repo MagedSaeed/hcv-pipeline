@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
@@ -101,5 +101,116 @@ describe('Settings', () => {
     await user.click(screen.getByRole('button', { name: /save key/i }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('This field may not be blank.');
+  });
+
+  // Task 10.6 / walkthrough finding: before this, Save disabled itself on
+  // an empty field, so once a key was ever saved here, the UI could never
+  // fall back to `.env` again - the exact trap that failed the
+  // walkthrough's first iterate attempt with a 401. The API already allows
+  // this (`openrouter_key` is `allow_blank=True`); the fix is this explicit,
+  // confirmed action.
+  describe('clearing an admin-entered key (task 10.6)', () => {
+    it('offers the clear action only while a key is set on this screen, never when the key already comes from the environment', async () => {
+      authState.currentUserEmail = 'admin@example.com';
+      server.use(
+        http.get('/api/settings/', () =>
+          HttpResponse.json({ openrouter_key_masked: 'sk-o...ab12', key_source: 'environment', updated_at: '2026-09-01T00:00:00Z' })
+        )
+      );
+
+      renderApp({ initialEntries: ['/settings'] });
+
+      await screen.findByText('sk-o...ab12');
+      expect(screen.queryByRole('button', { name: /clear.*environment key/i })).not.toBeInTheDocument();
+    });
+
+    it('clears the stored key behind a confirmation, sends an empty string, and shows the resulting source - never the real key', async () => {
+      let receivedBody = null;
+      authState.currentUserEmail = 'admin@example.com';
+      server.use(
+        http.get('/api/settings/', () =>
+          HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
+        ),
+        http.patch('/api/settings/', async ({ request }) => {
+          receivedBody = await request.json();
+          return HttpResponse.json({
+            openrouter_key_masked: 'sk-e...nv01',
+            key_source: 'environment',
+            updated_at: '2026-09-06T00:00:00Z',
+          });
+        })
+      );
+
+      const user = userEvent.setup();
+      renderApp({ initialEntries: ['/settings'] });
+
+      await screen.findByText('sk-o...9999');
+      const clearButton = screen.getByRole('button', { name: /clear.*environment key/i });
+      await user.click(clearButton);
+
+      // Behind confirmation - the click above must not have sent anything yet.
+      expect(receivedBody).toBeNull();
+      const dialog = screen.getByRole('alertdialog');
+      expect(dialog).toHaveTextContent(/fall back to the openrouter_api_key environment variable/i);
+      await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
+
+      // Anchored to the start of the whole status paragraph so this can
+      // only match the "Cleared. Source in effect is now: ..." note itself,
+      // never the (separately rendered) "Source in effect" dt/dd pair above
+      // it, which shares the same trailing wording.
+      const clearedNote = await screen.findByText(/^cleared\./i);
+      expect(clearedNote).toHaveTextContent(/OPENROUTER_API_KEY environment variable/i);
+      // The PATCH sent the empty string the API already accepts - never a
+      // distinct backend action, and never any part of a real key.
+      expect(receivedBody).toEqual({ openrouter_key: '' });
+      expect(await screen.findByText('sk-e...nv01')).toBeInTheDocument();
+      // The real key never appears anywhere on the page.
+      expect(screen.queryByText(/sk-or-[a-z0-9]{15,}/i)).not.toBeInTheDocument();
+    });
+
+    it('cancelling the confirmation clears nothing', async () => {
+      let patchCalled = false;
+      authState.currentUserEmail = 'admin@example.com';
+      server.use(
+        http.get('/api/settings/', () =>
+          HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
+        ),
+        http.patch('/api/settings/', () => {
+          patchCalled = true;
+          return HttpResponse.json({ openrouter_key_masked: '', key_source: 'none', updated_at: '2026-09-06T00:00:00Z' });
+        })
+      );
+
+      const user = userEvent.setup();
+      renderApp({ initialEntries: ['/settings'] });
+
+      await screen.findByText('sk-o...9999');
+      await user.click(screen.getByRole('button', { name: /clear.*environment key/i }));
+      await user.click(screen.getByRole('button', { name: /never mind/i }));
+
+      expect(patchCalled).toBe(false);
+      expect(screen.getByText('sk-o...9999')).toBeInTheDocument();
+    });
+
+    it("shows the API's own error message if clearing fails", async () => {
+      authState.currentUserEmail = 'admin@example.com';
+      server.use(
+        http.get('/api/settings/', () =>
+          HttpResponse.json({ openrouter_key_masked: 'sk-o...9999', key_source: 'settings', updated_at: '2026-09-01T00:00:00Z' })
+        ),
+        http.patch('/api/settings/', () =>
+          HttpResponse.json({ detail: 'Something went wrong clearing the key.' }, { status: 500 })
+        )
+      );
+
+      const user = userEvent.setup();
+      renderApp({ initialEntries: ['/settings'] });
+
+      await screen.findByText('sk-o...9999');
+      await user.click(screen.getByRole('button', { name: /clear.*environment key/i }));
+      await user.click(screen.getByRole('button', { name: /^confirm$/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(/something went wrong clearing the key/i);
+    });
   });
 });
