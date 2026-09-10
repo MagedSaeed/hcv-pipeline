@@ -69,6 +69,9 @@ LTS concept, so those are pinned to current stable and noted as such.
 | Styling | tailwindcss | 4.3.3 | no LTS track; CSS-first config, no `tailwind.config.js` |
 | Data fetching | @tanstack/react-query | 5.102.8 | no LTS track |
 | HTTP | axios | 1.20.0 | no LTS track |
+| Frontend tests | vitest | 4.0.6 | no LTS track; Vite-native test runner |
+| Frontend tests | @testing-library/react | 17.0.1 | no LTS track |
+| API mocking | msw | 2.12.4 | no LTS track; mocks at the network boundary, not by stubbing modules |
 
 The backend rows above are pinned versions verified against the running code
 (`backend/pyproject.toml`). The frontend rows are not yet verifiable against
