@@ -91,7 +91,7 @@ backend/config/settings.py    + "django_q", "pipeline"; + Q_CLUSTER
 **Interfaces:**
 - Produces: `pipeline.models.Experiment`, `PipelineRun`, `PhaseRun`, `LLMCall`, `Label`; `PhaseRun.Status` / `PipelineRun.Status` text choices; `Experiment.clean()` validation; `PhaseRun.is_unbiased` property.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_models.py`:
 
@@ -331,12 +331,12 @@ def test_an_llm_call_records_ok_from_its_payloads(experiment, taxonomy, template
     assert failed.ok is False
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_models.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline'`.
 
-- [ ] **Step 3: Write the pipeline app**
+- [x] **Step 3: Write the pipeline app**
 
 `backend/pipeline/__init__.py`, `backend/pipeline/migrations/__init__.py`,
 `backend/pipeline/tests/__init__.py`: empty.
@@ -659,7 +659,7 @@ class LabelAdmin(admin.ModelAdmin):
 
 Add `"pipeline"` to `INSTALLED_APPS` in `backend/config/settings.py`, after `"prompts"`.
 
-- [ ] **Step 4: Link the corpus back to a run**
+- [x] **Step 4: Link the corpus back to a run**
 
 In `backend/corpus/models.py`, add this field to BOTH `SystemDescription` and
 `Scenario`, placed with the other fields (before `Meta`, per DJ012):
@@ -702,7 +702,7 @@ with:
             )
 ```
 
-- [ ] **Step 5: Create the migrations and run the tests**
+- [x] **Step 5: Create the migrations and run the tests**
 
 Run:
 
@@ -716,7 +716,7 @@ uv run pytest
 Expected: `pipeline/migrations/0001_initial.py` and `corpus/migrations/0004_*.py`
 created; the new tests pass; all 282 pre-existing tests still pass.
 
-- [ ] **Step 6: Format and lint**
+- [x] **Step 6: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -733,7 +733,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 **Interfaces:**
 - Produces: `pipeline.redaction.REDACTED`, `secrets_to_scrub() -> list[str]`, `scrub(value, secrets) -> value`, `redact_call(call) -> None`; `pipeline.clients.get_llm_client() -> LLMClient`, `pipeline.clients.set_llm_client(client)` (test seam), `pipeline.clients.reset_llm_client()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_redaction.py`:
 
@@ -834,12 +834,12 @@ def test_redaction_does_not_mangle_a_clean_call(phase_run):
     assert call.raw_response == "hello"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_redaction.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.redaction'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/redaction.py`:
 
@@ -944,7 +944,7 @@ Q_CLUSTER = {
 }
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -957,7 +957,7 @@ uv run pytest
 
 Expected: django_q's own migrations are picked up; all tests pass.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -974,7 +974,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 - Consumes: `build_phase2_context`, `render`, `get_llm_client`, `parse_phase2`, `json_schema`, `Phase2Response`.
 - Produces: `pipeline.generation.run_phase2(phase_run) -> PhaseRun` — renders, calls, parses and persists, always leaving the run in a terminal status.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_generation.py`:
 
@@ -1221,12 +1221,12 @@ def test_two_runs_against_one_target_do_not_collide(
     assert Scenario.objects.filter(scenario_id="sc_01").count() == 2
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_generation.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.generation'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/generation.py`:
 
@@ -1384,12 +1384,12 @@ def run_phase2(phase_run):
     return phase_run
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_generation.py -v && uv run pytest`
 Expected: all pass.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1406,7 +1406,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 - Consumes: `build_phase3_context`, `render`, `get_llm_client`, `parse_phase3`, `split_known_labels`, `json_schema`, `Phase3Response`.
 - Produces: `pipeline.labelling.label_scenario(phase_run, scenario, sequence=1) -> LLMCall`; `pipeline.labelling.scenarios_for(phase_run) -> QuerySet`; `pipeline.labelling.finish_labelling_run(phase_run) -> PhaseRun`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_labelling.py`:
 
@@ -1582,12 +1582,12 @@ def test_finishing_fails_a_run_that_had_a_failed_child(_client, run, scenario):
     assert "1" in finished.error
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_labelling.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.labelling'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/labelling.py`:
 
@@ -1724,12 +1724,12 @@ def finish_labelling_run(phase_run):
     return phase_run
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_labelling.py -v && uv run pytest`
 Expected: all pass.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1745,7 +1745,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 **Interfaces:**
 - Produces: `pipeline.orchestration.launch(experiment, n_repetitions=1, inline=False) -> list[PipelineRun]`, `execute_pipeline_run(pipeline_run)`, `retry_failed(phase_run)`, `roll_up(pipeline_run)`; `pipeline.tasks.run_phase2_task(phase_run_id)`, `run_phase3_task(phase_run_id)`; `manage.py run_experiment <name> [--repetitions N] [--inline]`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_orchestration.py`:
 
@@ -2028,12 +2028,12 @@ def test_an_invalid_experiment_is_refused_before_any_call(_client, experiment):
     assert _client.calls == []
 ```
 
-- [ ] **Step 2: Run both to verify they fail**
+- [x] **Step 2: Run both to verify they fail**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_orchestration.py pipeline/tests/test_run_experiment.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.orchestration'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/orchestration.py`:
 
@@ -2228,12 +2228,12 @@ class Command(BaseCommand):
         )
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/ -v && uv run pytest`
 Expected: all pass.
 
-- [ ] **Step 5: Prove it end to end against the real seed data**
+- [x] **Step 5: Prove it end to end against the real seed data**
 
 Run:
 
@@ -2268,7 +2268,7 @@ PromptTemplate.objects.filter(name__startswith='smoke-').delete()
 
 Expected: prints that the experiment validates, with variants `['A', 'B']`.
 
-- [ ] **Step 6: Format and lint**
+- [x] **Step 6: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .

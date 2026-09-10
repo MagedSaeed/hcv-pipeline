@@ -81,7 +81,7 @@ migration at all. Plan 3 imports `from llm.client import …` unchanged.
 - Consumes: `core.User`.
 - Produces: `prompts.models.PromptTemplate` with fields `phase, name, version, system_prompt, user_prompt, output_schema, is_active, created_by, created_at`; manager method `PromptTemplate.objects.create_version(phase=…, name=…, **fields)`; classmethod `PromptTemplate.latest(phase, name)`; instance method `template.new_version(**changes)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/prompts/tests/test_models.py`:
 
@@ -162,12 +162,12 @@ def test_str_names_the_version(first):
     assert str(first) == "[phase 2] generate v1"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest prompts/tests/test_models.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'prompts'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/prompts/__init__.py`, `backend/prompts/migrations/__init__.py`,
 `backend/prompts/tests/__init__.py`: all empty.
@@ -278,7 +278,7 @@ class PromptTemplateAdmin(admin.ModelAdmin):
 
 Add `"prompts"` to `INSTALLED_APPS` in `backend/config/settings.py`, after `"corpus"`.
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -290,7 +290,7 @@ uv run pytest prompts/tests/test_models.py -v
 
 Expected: `prompts/migrations/0001_initial.py` created; all eight tests PASS.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -309,7 +309,7 @@ Expected: clean. Do not run any git command.
 - Consumes: `PromptTemplate` (Task 1); `corpus.models.ResourceFile`, `corpus.models.FewShotExample`; `taxonomy.models.Taxonomy`.
 - Produces: `prompts.rendering.RenderedPrompt` (dataclass with `.system` and `.user`); `render(template, context) -> RenderedPrompt`; `build_phase2_context(...) -> dict`; `build_phase3_context(...) -> dict`; `format_hcv_table(taxonomy) -> str`; exceptions `TaxonomyLeak` and `PromptRenderError`.
 
-- [ ] **Step 1: Write the failing rendering test**
+- [x] **Step 1: Write the failing rendering test**
 
 Create `backend/prompts/tests/test_rendering.py`:
 
@@ -458,12 +458,12 @@ def test_target_system_is_bound_when_not_generating_systems(system):
     assert render(make("{{ target_system.title }}"), context).user == "Oldsmar"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest prompts/tests/test_rendering.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'prompts.rendering'`.
 
-- [ ] **Step 3: Write the failing isolation test**
+- [x] **Step 3: Write the failing isolation test**
 
 Create `backend/prompts/tests/test_isolation.py`:
 
@@ -556,12 +556,12 @@ def test_variant_b_context_carries_the_rows(taxonomy):
     assert [row["hcv_id"] for row in context["taxonomy"]] == ["HCV-06", "HCV-07"]
 ```
 
-- [ ] **Step 4: Run it to verify it fails**
+- [x] **Step 4: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest prompts/tests/test_isolation.py -v`
 Expected: FAIL — `ImportError: cannot import name 'TaxonomyLeak'`.
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 `backend/prompts/rendering.py`:
 
@@ -727,12 +727,12 @@ def render(template, context):
         raise PromptRenderError(str(error)) from error
 ```
 
-- [ ] **Step 6: Run both test files to verify they pass**
+- [x] **Step 6: Run both test files to verify they pass**
 
 Run: `cd backend && uv run pytest prompts/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 7: Run the whole suite and lint**
+- [x] **Step 7: Run the whole suite and lint**
 
 ```bash
 cd backend
@@ -754,7 +754,7 @@ Expected: 127 prior tests plus the new ones, all green; ruff clean.
 - Consumes: `PromptTemplate` (Task 1); `render`, `build_phase2_context`, `build_phase3_context`, `TaxonomyLeak`, `PromptRenderError` (Task 2).
 - Produces: `GET/POST /api/prompts/` (list filterable by `?phase=`, paginated), `GET /api/prompts/{id}/`, `PATCH /api/prompts/{id}/` returning **201 with a NEW version**, `POST /api/prompts/{id}/preview/` returning `{"system_prompt": str, "user_prompt": str}`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/prompts/tests/test_api.py`:
 
@@ -945,12 +945,12 @@ def test_preview_of_a_phase_3_template_uses_a_scenario(api_client, staff, taxono
     assert response.json()["user_prompt"] == "sc_01/EP1"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest prompts/tests/test_api.py -v`
 Expected: FAIL — 404 on `/api/prompts/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/prompts/serializers.py`:
 
@@ -1154,12 +1154,12 @@ Add to `backend/config/urls.py`'s `urlpatterns`:
     path("api/", include("prompts.urls")),
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest prompts/tests/ -v`
 Expected: all PASS.
 
-- [ ] **Step 5: Run the whole suite and lint**
+- [x] **Step 5: Run the whole suite and lint**
 
 ```bash
 cd backend
@@ -1180,7 +1180,7 @@ Expected: everything green, ruff clean.
 - Consumes: nothing.
 - Produces: `llm.schemas.ScenarioCard`, `GeneratedSystem`, `Phase2Response`, `LabelOut`, `Phase3Response`; `json_schema(model) -> dict`; `parse_phase2(payload) -> Phase2Response`; `parse_phase3(payload) -> Phase3Response`; `split_known_labels(response, allowed_ids) -> (known, unknown)`; exception `SchemaError`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/llm/tests/test_schemas.py`:
 
@@ -1280,12 +1280,12 @@ def test_json_schema_is_shaped_for_response_format():
     assert "labels" in schema3["properties"]
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest llm/tests/test_schemas.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'llm'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/llm/__init__.py` and `backend/llm/tests/__init__.py`: empty.
 
@@ -1373,12 +1373,12 @@ def split_known_labels(response, allowed_ids):
     return known, [label.hcv_id for label in unknown]
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest llm/tests/test_schemas.py -v`
 Expected: all PASS.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1395,7 +1395,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 - Consumes: `core.keys.resolve_openrouter_key` only. The client takes `json_schema` as a plain dict parameter and imports nothing from `llm.schemas` — the caller (plan 3) is what pairs them.
 - Produces: `llm.client.LLMResult` (frozen dataclass: `request_json, response_json, raw_response, model, finish_reason, prompt_tokens, completion_tokens, cost, latency_ms, http_status, transport_error, ok`); `llm.client.LLMClient` Protocol with `complete(*, model, system_prompt, user_prompt, temperature=0.0, json_schema=None, timeout=120) -> LLMResult`; `llm.client.OpenRouterClient`; `llm.client.SecretLeak`; `llm.fake.FakeLLMClient(responses=None)` with `.queue(text, **overrides)`, `.calls` and `.fail_next(...)`.
 
-- [ ] **Step 1: Write the failing client test**
+- [x] **Step 1: Write the failing client test**
 
 Create `backend/llm/tests/test_client.py`:
 
@@ -1552,12 +1552,12 @@ def test_a_key_appearing_in_a_payload_is_refused_outright():
         client._guard({"messages": [{"role": "user", "content": SENTINEL_KEY}]})
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest llm/tests/test_client.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'llm.client'`.
 
-- [ ] **Step 3: Write the failing fake test**
+- [x] **Step 3: Write the failing fake test**
 
 Create `backend/llm/tests/test_fake.py`:
 
@@ -1619,12 +1619,12 @@ def test_queue_overrides_the_projected_columns():
     assert result.response_json["choices"][0]["message"]["content"] == "hi"
 ```
 
-- [ ] **Step 4: Run it to verify it fails**
+- [x] **Step 4: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest llm/tests/test_fake.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'llm.fake'`.
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 `backend/llm/client.py`:
 
@@ -1868,12 +1868,12 @@ class FakeLLMClient:
         )
 ```
 
-- [ ] **Step 6: Run both test files**
+- [x] **Step 6: Run both test files**
 
 Run: `cd backend && uv run pytest llm/tests/ -v`
 Expected: all PASS.
 
-- [ ] **Step 7: Run the whole suite and lint**
+- [x] **Step 7: Run the whole suite and lint**
 
 ```bash
 cd backend
@@ -1893,7 +1893,7 @@ uv run ruff format . && uv run ruff check --fix .
 - Consumes: `core.keys.resolve_openrouter_key`, `core.keys.MissingAPIKey`.
 - Produces: `llm.models_api.fetch_models(fetcher=None) -> list[dict]` (cached one hour) and `llm.models_api.AvailableModelsView`; route `GET /api/models/` returning `{"count": int, "results": [...]}`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/llm/tests/test_models_api.py`:
 
@@ -1989,12 +1989,12 @@ def test_endpoint_reports_a_missing_key_clearly(api_client, member, settings):
     assert "No OpenRouter API key" in str(response.json())
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest llm/tests/test_models_api.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'llm.models_api'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/llm/models_api.py`:
 
@@ -2082,12 +2082,12 @@ and to `urlpatterns`:
     path("api/models/", AvailableModelsView.as_view(), name="available-models"),
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest llm/tests/ -v`
 Expected: all PASS.
 
-- [ ] **Step 5: Run the whole suite and lint**
+- [x] **Step 5: Run the whole suite and lint**
 
 ```bash
 cd backend

@@ -86,7 +86,7 @@ holds the generated-row rule so it is enforced in one place rather than per view
 - Consumes: nothing.
 - Produces: a uv project at `backend/`; a Django project importable as `config.settings`; `GET /api/health/` returning `{"status": "ok"}`; `uv run pytest` works from `backend/`.
 
-- [ ] **Step 1: Create the uv project and install dependencies**
+- [x] **Step 1: Create the uv project and install dependencies**
 
 Run:
 
@@ -158,7 +158,7 @@ Expected: uv downloads Python 3.13 if needed, writes `uv.lock`, and prints
 `5.2.17`. This exact pin set was resolved and installed on 2026-09-07 against
 uv 0.8.12, so a resolution failure means a pin has been edited.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `backend/config/tests/__init__.py` (empty) and `backend/config/tests/test_health.py`:
 
@@ -174,12 +174,12 @@ def test_health_is_public_and_ok(client):
     assert response.json() == {"status": "ok"}
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest config/tests/test_health.py -v`
 Expected: FAIL — pytest cannot find `DJANGO_SETTINGS_MODULE` / no `config` module.
 
-- [ ] **Step 4: Write the project files**
+- [x] **Step 4: Write the project files**
 
 `backend/manage.py`:
 
@@ -352,12 +352,12 @@ def api_client():
     return APIClient()
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest config/tests/test_health.py -v`
 Expected: PASS.
 
-- [ ] **Step 6: Add developer scaffolding**
+- [x] **Step 6: Add developer scaffolding**
 
 `.env.example` at the repository root:
 
@@ -403,7 +403,7 @@ backend/staticfiles/
 `uv.lock` is **not** ignored — it is committed so every machine and CI resolve
 the same versions.
 
-- [ ] **Step 7: Format, lint and commit**
+- [x] **Step 7: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -424,7 +424,7 @@ git commit -m "feat: scaffold Django project with health endpoint and pytest"
 - Consumes: `config.settings` from Task 1.
 - Produces: `core.models.User` with fields `email`, `name`, `is_active`, `is_staff`, `must_change_password`; manager methods `User.objects.create_user(email, password, **extra)` and `User.objects.create_superuser(email, password, **extra)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/core/tests/test_user.py`:
 
@@ -464,12 +464,12 @@ def test_email_is_required():
         User.objects.create_user(email="", password="pw-123456")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest core/tests/test_user.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'core'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/core/__init__.py`: empty.
 
@@ -576,7 +576,7 @@ In `backend/config/settings.py`, add `"core"` to the end of `INSTALLED_APPS` and
 AUTH_USER_MODEL = "core.User"
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -588,7 +588,7 @@ uv run pytest core/tests/test_user.py -v
 
 Expected: migration `core/migrations/0001_initial.py` created; all four tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -609,7 +609,7 @@ git commit -m "feat: add email-keyed custom User model"
 - Consumes: `core.models.User` from Task 2.
 - Produces: `POST /api/auth/login/`, `POST /api/auth/logout/`, `GET /api/auth/me/`, `POST /api/auth/change-password/`, `GET /api/auth/csrf/`. `UserSerializer` exposing `id, email, name, is_staff, must_change_password`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/core/tests/test_auth_api.py`:
 
@@ -693,12 +693,12 @@ def test_change_password_rejects_wrong_current_password(api_client, user):
     assert user.must_change_password is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest core/tests/test_auth_api.py -v`
 Expected: FAIL — 404 on every route.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/core/serializers.py`:
 
@@ -835,12 +835,12 @@ In `backend/config/urls.py`, add `include` to the imports and this entry to `url
     path("api/", include("core.urls")),
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest core/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Write the failing test for the account-creation command**
+- [x] **Step 5: Write the failing test for the account-creation command**
 
 Append to `backend/core/tests/test_auth_api.py`:
 
@@ -873,12 +873,12 @@ def test_create_user_command_refuses_a_duplicate_email(user):
         )
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest core/tests/test_auth_api.py -k create_user_command -v`
 Expected: FAIL — `CommandError: Unknown command: 'create_user'`.
 
-- [ ] **Step 7: Write the command**
+- [x] **Step 7: Write the command**
 
 Create `backend/core/management/__init__.py` and
 `backend/core/management/commands/__init__.py`, both empty.
@@ -925,12 +925,12 @@ class Command(BaseCommand):
 
 ```
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [x] **Step 8: Run the tests to verify they pass**
 
 Run: `cd backend && uv run pytest core/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 9: Format, lint and commit**
+- [x] **Step 9: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -951,7 +951,7 @@ git commit -m "feat: add session auth endpoints and create_user command"
 - Consumes: `core.models` from Task 2.
 - Produces: `core.models.AppSettings.load() -> AppSettings`; `core.keys.resolve_openrouter_key() -> str` (raises `MissingAPIKey`); `core.keys.key_source() -> "settings" | "environment" | "none"`; `core.keys.mask_key(value) -> str`; exception `core.keys.MissingAPIKey`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/core/tests/test_keys.py`:
 
@@ -1021,12 +1021,12 @@ def test_mask_key_never_reveals_a_short_key():
     assert mask_key("sk-or123") == "********"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest core/tests/test_keys.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'core.keys'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/core/models.py`:
 
@@ -1124,7 +1124,7 @@ def mask_key(value):
     return f"{value[:MASK_VISIBLE]}...{value[-MASK_VISIBLE:]}"
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -1136,7 +1136,7 @@ uv run pytest core/tests/test_keys.py -v
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -1156,7 +1156,7 @@ git commit -m "feat: add AppSettings singleton and OpenRouter key resolution"
 - Consumes: `AppSettings`, `mask_key`, `key_source` from Task 4.
 - Produces: `GET /api/settings/` returning `{"openrouter_key_masked": str, "key_source": str, "updated_at": str|null}`; `PATCH /api/settings/` accepting `{"openrouter_key": str}`. Staff only.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/core/tests/test_settings_api.py`:
 
@@ -1227,12 +1227,12 @@ def test_key_source_reports_none_when_nothing_configured(api_client, staff, sett
     assert api_client.get("/api/settings/").json()["key_source"] == "none"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest core/tests/test_settings_api.py -v`
 Expected: FAIL — 404 on `/api/settings/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/core/serializers.py`:
 
@@ -1327,12 +1327,12 @@ class AppSettingsAdmin(admin.ModelAdmin):
         return False
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest core/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -1353,7 +1353,7 @@ git commit -m "feat: add staff-gated settings API with masked OpenRouter key"
 - Consumes: nothing beyond Django.
 - Produces: `taxonomy.models.Taxonomy(vocabulary_id, version, notes, is_active, source_json, created_at)` and `taxonomy.models.HCV(taxonomy, hcv_id, name, definition, condition_classes, order)`; `HCV.has_condition_class` property; `Taxonomy.active()` classmethod.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/taxonomy/tests/test_models.py`:
 
@@ -1418,12 +1418,12 @@ def test_active_returns_the_flagged_taxonomy(taxonomy):
     assert Taxonomy.active().version == "1.2"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest taxonomy/tests/test_models.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'taxonomy'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/taxonomy/__init__.py`: empty.
 
@@ -1528,7 +1528,7 @@ class HCVAdmin(admin.ModelAdmin):
 
 Add `"taxonomy"` to `INSTALLED_APPS` in `backend/config/settings.py`.
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -1540,7 +1540,7 @@ uv run pytest taxonomy/tests/test_models.py -v
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -1560,7 +1560,7 @@ git commit -m "feat: add versioned Taxonomy and HCV models"
 - Consumes: `Taxonomy`, `HCV` from Task 6; `settings.RESOURCES_DIR` from Task 1.
 - Produces: `python manage.py import_taxonomy [path] [--activate]`, importing the JSON at `resources/taxonomy/hcv21_v1.1.json` by default. Re-importing the same `vocabulary_id`+`version` replaces that version's rows rather than duplicating them.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/taxonomy/tests/test_import.py`:
 
@@ -1643,12 +1643,12 @@ def test_rejects_a_file_with_no_rows(tmp_path):
         call_command("import_taxonomy", str(bad))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest taxonomy/tests/test_import.py -v`
 Expected: FAIL — `CommandError: Unknown command: 'import_taxonomy'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `backend/taxonomy/management/__init__.py` and
 `backend/taxonomy/management/commands/__init__.py`, both empty.
@@ -1736,12 +1736,12 @@ class Command(BaseCommand):
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest taxonomy/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -1762,7 +1762,7 @@ git commit -m "feat: add import_taxonomy command seeding the 21 HCVs"
 - Consumes: `Taxonomy`, `HCV` from Task 6.
 - Produces: `GET /api/taxonomies/`, `GET /api/taxonomies/{id}/`, `GET /api/taxonomies/{id}/hcvs/`. Read-only; authenticated.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/taxonomy/tests/test_api.py`:
 
@@ -1820,12 +1820,12 @@ def test_taxonomies_are_read_only(api_client, member, imported):
     assert response.status_code == 405
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest taxonomy/tests/test_api.py -v`
 Expected: FAIL — 404 on `/api/taxonomies/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/taxonomy/serializers.py`:
 
@@ -1899,12 +1899,12 @@ Add to `backend/config/urls.py`'s `urlpatterns`:
     path("api/", include("taxonomy.urls")),
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest taxonomy/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -1925,7 +1925,7 @@ git commit -m "feat: add read-only taxonomy API"
 - Consumes: `core.models.User`.
 - Produces: `corpus.models.ResourceFile(name, kind, file, text, description, uploaded_by, created_at)`; `CRUD /api/resources/`. Uploading a UTF-8 text file populates `text` automatically.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/corpus/tests/test_resource_file.py`:
 
@@ -2005,12 +2005,12 @@ def test_resources_require_authentication(api_client):
     assert api_client.get("/api/resources/").status_code == 403
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_resource_file.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'corpus'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/corpus/__init__.py`: empty.
 
@@ -2161,7 +2161,7 @@ Add `"corpus"` to `INSTALLED_APPS`, and add to `backend/config/urls.py`:
     path("api/", include("corpus.urls")),
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -2173,7 +2173,7 @@ uv run pytest corpus/tests/test_resource_file.py -v
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -2198,7 +2198,7 @@ plan 3. Declare it now as a nullable `CharField`-free placeholder is **not**
 acceptable — instead omit the field here and add it in plan 3's first task via a
 migration. `origin` alone distinguishes the rows for this plan.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/corpus/tests/test_corpus_models.py`:
 
@@ -2302,12 +2302,12 @@ def test_intended_hcvs_records_expert_intent(system):
     assert [row.hcv_id for row in scenario.intended_hcvs.all()] == ["HCV-07"]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_corpus_models.py -v`
 Expected: FAIL — `ImportError: cannot import name 'Origin' from 'corpus.models'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/corpus/models.py`:
 
@@ -2439,7 +2439,7 @@ class ScenarioAdmin(admin.ModelAdmin):
     search_fields = ("scenario_id", "actor", "narrative")
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -2451,7 +2451,7 @@ uv run pytest corpus/tests/ -v
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -2471,7 +2471,7 @@ git commit -m "feat: add SystemDescription and Scenario with origin semantics"
 - Consumes: `ResourceFile` from Task 9.
 - Produces: `corpus.models.FewShotExample(phase, name, input_text, input_file, output_text, output_file, order, is_active)` with `resolved_input` and `resolved_output` properties and a `clean()` that enforces exactly one source per side; `CRUD /api/fewshots/?phase=`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/corpus/tests/test_fewshot.py`:
 
@@ -2563,12 +2563,12 @@ def test_api_rejects_a_half_empty_pair(api_client, member):
     assert response.status_code == 400
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_fewshot.py -v`
 Expected: FAIL — `ImportError: cannot import name 'FewShotExample'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/corpus/models.py`:
 
@@ -2740,7 +2740,7 @@ class FewShotExampleAdmin(admin.ModelAdmin):
     list_filter = ("phase", "is_active")
 ```
 
-- [ ] **Step 4: Create the migration and run the tests**
+- [x] **Step 4: Create the migration and run the tests**
 
 Run:
 
@@ -2752,7 +2752,7 @@ uv run pytest corpus/tests/ -v
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -2773,7 +2773,7 @@ git commit -m "feat: add FewShotExample pairs with exactly-one-of validation"
 - Consumes: `SystemDescription`, `Scenario`, `Origin` from Task 10.
 - Produces: `corpus.permissions.ReadOnlyIfGenerated`; `CRUD /api/system-descriptions/?origin=`, `CRUD /api/scenarios/?origin=&system=`. `PATCH`/`DELETE` on a generated row returns 403.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/corpus/tests/test_corpus_api.py`:
 
@@ -2900,12 +2900,12 @@ def test_filter_by_origin(api_client, member, seed_system, generated_system):
     assert [row["title"] for row in rows] == ["Seed system"]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_corpus_api.py -v`
 Expected: FAIL — 404 on `/api/system-descriptions/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/corpus/permissions.py`:
 
@@ -3035,12 +3035,12 @@ router.register(
 router.register("scenarios", ScenarioViewSet, basename="scenario")
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest corpus/tests/ -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Format, lint and commit**
+- [x] **Step 5: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..
@@ -3067,7 +3067,7 @@ table of the six card fields, then a `## The scenario` section holding the
 narrative. Content before the first `# sc_` heading is the template preamble and
 must be skipped.
 
-- [ ] **Step 1: Write the failing parser test**
+- [x] **Step 1: Write the failing parser test**
 
 Create `backend/corpus/tests/test_parsers.py`:
 
@@ -3157,12 +3157,12 @@ def test_parses_the_real_seed_file(settings):
     assert all(row["narrative"] for row in scenarios)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_parsers.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'corpus.parsers'`.
 
-- [ ] **Step 3: Write the parser**
+- [x] **Step 3: Write the parser**
 
 `backend/corpus/parsers.py`:
 
@@ -3230,12 +3230,12 @@ def parse_scenarios(markdown):
     return scenarios
 ```
 
-- [ ] **Step 4: Run the parser test to verify it passes**
+- [x] **Step 4: Run the parser test to verify it passes**
 
 Run: `cd backend && uv run pytest corpus/tests/test_parsers.py -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Write the failing command test**
+- [x] **Step 5: Write the failing command test**
 
 Create `backend/corpus/tests/test_seed_corpus.py`:
 
@@ -3290,12 +3290,12 @@ def test_unknown_pack_reports_clearly():
         call_command("seed_corpus", "--pack", "atlantis")
 ```
 
-- [ ] **Step 6: Run the command test to verify it fails**
+- [x] **Step 6: Run the command test to verify it fails**
 
 Run: `cd backend && uv run pytest corpus/tests/test_seed_corpus.py -v`
 Expected: FAIL — `CommandError: Unknown command: 'seed_corpus'`.
 
-- [ ] **Step 7: Write the command**
+- [x] **Step 7: Write the command**
 
 Create `backend/corpus/management/__init__.py` and
 `backend/corpus/management/commands/__init__.py`, both empty.
@@ -3403,12 +3403,12 @@ class Command(BaseCommand):
         )
 ```
 
-- [ ] **Step 8: Run the full backend suite**
+- [x] **Step 8: Run the full backend suite**
 
 Run: `cd backend && uv run pytest -v`
 Expected: every test across `config`, `core`, `taxonomy` and `corpus` PASSES.
 
-- [ ] **Step 9: Verify the seeded state end to end**
+- [x] **Step 9: Verify the seeded state end to end**
 
 Run:
 
@@ -3428,7 +3428,7 @@ print('scenarios:', [s.scenario_id for s in Scenario.objects.all()])
 
 Expected output: `HCVs: 21`, `systems: 1`, `scenarios: ['sc_01', 'sc_02', 'sc_03']`.
 
-- [ ] **Step 10: Format, lint and commit**
+- [x] **Step 10: Format, lint and commit**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix . && cd ..

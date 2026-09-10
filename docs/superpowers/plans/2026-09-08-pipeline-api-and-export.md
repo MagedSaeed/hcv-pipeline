@@ -69,7 +69,7 @@ backend/config/urls.py   + pipeline.urls
 **Interfaces:**
 - Produces: `ExperimentSerializer`; `ExperimentViewSet` at `/api/experiments/` with actions `run` (`POST`, staff, body `{"n_repetitions": int}`) and `progress` (`GET`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_experiment_api.py`:
 
@@ -327,12 +327,12 @@ def test_the_progress_action_reports_the_roll_up(api_client, member, staff, expe
     assert body["percent"] == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_experiment_api.py -v`
 Expected: FAIL — 404 on `/api/experiments/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/serializers.py`:
 
@@ -544,12 +544,12 @@ Add to `backend/config/urls.py`'s `urlpatterns`:
     path("api/", include("pipeline.urls")),
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_experiment_api.py -v && uv run pytest`
 Expected: all pass.
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -568,7 +568,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 
 **Why a run may be deleted when generated material is otherwise immutable:** `corpus/permissions.py` already states the policy — "Removing generated material is done by deleting the run that produced it, which cascades. Deleting one row at a time would be selective reporting." Deleting a whole run is the sanctioned escape hatch precisely because it is all-or-nothing. Task 1's 409 on experiment deletion tells the operator to delete the runs first, so that route has to exist.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_run_api.py`:
 
@@ -810,12 +810,12 @@ def test_retrying_a_phase_two_run_is_refused(api_client, staff, executed):
     assert "phase 3" in str(response.json()).lower()
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_run_api.py -v`
 Expected: FAIL — 404 on `/api/pipeline-runs/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/pipeline/serializers.py`:
 
@@ -984,11 +984,11 @@ router.register("pipeline-runs", PipelineRunViewSet, basename="pipeline-run")
 router.register("phase-runs", PhaseRunViewSet, basename="phase-run")
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_run_api.py -v && uv run pytest`
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1005,7 +1005,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 **Interfaces:**
 - Produces: `LabelSerializer`; `LabelViewSet` (read-only) at `/api/labels/` filterable by `?scenario=&phase_run=&hcv=&source=`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_label_api.py`:
 
@@ -1147,12 +1147,12 @@ def test_labels_are_read_only(api_client, member, labelled):
     assert api_client.post("/api/labels/", {}, format="json").status_code == 405
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_label_api.py -v`
 Expected: FAIL — 404 on `/api/labels/`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `backend/pipeline/serializers.py`:
 
@@ -1203,11 +1203,11 @@ from pipeline.views import LabelViewSet
 router.register("labels", LabelViewSet, basename="label")
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_label_api.py -v && uv run pytest`
 
-- [ ] **Step 5: Format and lint**
+- [x] **Step 5: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1226,7 +1226,7 @@ cd backend && uv run ruff format . && uv run ruff check --fix .
 
 Spec §9 fixes the bundle's sections: `experiment`, `taxonomy`, `prompts`, `inputs`, `runs`, `systems`, `scenarios`, `labels`, `calls`. It assembles stored rows and computes nothing.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/pipeline/tests/test_export.py`:
 
@@ -1420,12 +1420,12 @@ def test_an_unknown_export_format_is_a_400(api_client, member, experiment):
     assert response.status_code == 400
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_export.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.export'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `backend/pipeline/export.py`:
 
@@ -1730,11 +1730,11 @@ and inside `ExperimentViewSet`:
 Note: `export` must be readable by any authenticated user, but `StaffWrites` only
 gates unsafe methods, and `export` is a GET — so no extra permission is needed.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest pipeline/tests/test_export.py -v && uv run pytest`
 
-- [ ] **Step 5: Prove it end to end against the real seed data**
+- [x] **Step 5: Prove it end to end against the real seed data**
 
 ```bash
 cd backend
@@ -1780,7 +1780,7 @@ PromptTemplate.objects.filter(name__startswith='x-').delete()
 Expected: 9 sections, 21 taxonomy rows, 2 calls, 1 label, no key, and the Run A
 generation call reporting `[True]`.
 
-- [ ] **Step 6: Format and lint**
+- [x] **Step 6: Format and lint**
 
 ```bash
 cd backend && uv run ruff format . && uv run ruff check --fix .
@@ -1834,7 +1834,7 @@ it urgent: the user can now edit an experiment and relaunch instead.
 
 ---
 
-- [ ] **Step 1: `retry_failed` must refuse a run in flight — fix it at the source**
+- [x] **Step 1: `retry_failed` must refuse a run in flight — fix it at the source**
 
 The whole-branch review proved: a phase-3 run RUNNING with `total=5 completed=0 failed=1`
 (a worker mid-fan-out), `POST .../retry/` returns **200**, **deletes archived `LLMCall` pk 4**,
@@ -1858,7 +1858,7 @@ fire earlier and say something more specific.
 Test: a RUNNING phase run's archived calls survive a refused retry byte-for-byte (pks, counters,
 status, `finished_at`), and the management command is refused too.
 
-- [ ] **Step 2: Snapshot the configuration onto the run**
+- [x] **Step 2: Snapshot the configuration onto the run**
 
 Seven fields live only on `Experiment` and are read **live** at export time: `seed_systems`,
 `fewshots`, `target_system`, `generate_systems`, `generate_scenarios`, `n_systems`,
@@ -1896,7 +1896,7 @@ still reports what the run actually used; a seed system's `body` edited after la
 the snapshot keeps the original text; two runs of one experiment with a config edit between
 them, asserting each run reports its own config and the two differ.
 
-- [ ] **Step 3: A run that will never finish must have a way out**
+- [x] **Step 3: A run that will never finish must have a way out**
 
 **The dead end, confirmed and permanent.** A run stuck QUEUED — the broker accepted the task
 then died, `max_attempts=1`, `catch_up=False` — has no route out across all 28 registered
@@ -1925,7 +1925,7 @@ Test the full escape as one journey: launch → leave the run QUEUED (patched `a
 `DELETE run` 409 → `cancel` 200 → `DELETE run` 204 → `DELETE experiment` 204. That journey is
 what was impossible.
 
-- [ ] **Step 4: Per-run export**
+- [x] **Step 4: Per-run export**
 
 **USER DECISION:** *"the export will be per run."* Add `GET /api/pipeline-runs/{id}/export/`
 with the same `?format=json|csv` contract as the experiment export, scoped to one repetition and
@@ -1937,7 +1937,7 @@ Reuse the experiment export's assembly rather than writing a second one; if the 
 extract what they share. The same guarantees apply and must be tested at this route too: no API
 key, deterministic byte-identical output, and the isolation evidence present.
 
-- [ ] **Step 5: Two cross-task inconsistencies**
+- [x] **Step 5: Two cross-task inconsistencies**
 
 - `?experiment=` exists on `pipeline-runs` and not on `phase-runs`, and the miss is **silent**:
   `/api/phase-runs/?experiment=1` returns 200 with every phase run of every experiment, so the
@@ -1948,7 +1948,7 @@ key, deterministic byte-identical output, and the isolation evidence present.
 - `LabelViewSet` alone omits explicit `permission_classes`; make it explicit so all four
   viewsets read the same way.
 
-- [ ] **Step 6: Verify, format, lint**
+- [x] **Step 6: Verify, format, lint**
 
 ```bash
 cd backend && uv run pytest && uv run ruff format . && uv run ruff check --fix .
