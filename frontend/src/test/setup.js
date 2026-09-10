@@ -12,8 +12,11 @@ afterEach(() => {
   resetFixtures();
   // Clears any csrftoken cookie a test left behind, so the "fetch csrf
   // exactly once" behaviour is exercised fresh in every test rather than
-  // riding on a cookie a previous test happened to set.
-  document.cookie = 'csrftoken=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+  // riding on a cookie a previous test happened to set. Node-environment
+  // tests have no document.
+  if (typeof document !== 'undefined') {
+    document.cookie = 'csrftoken=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+  }
 });
 
 afterAll(() => server.close());
