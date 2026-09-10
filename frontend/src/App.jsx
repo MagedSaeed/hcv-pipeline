@@ -11,6 +11,7 @@ import Corpus from './pages/Corpus';
 import PromptEditor from './pages/PromptEditor';
 import ExperimentBuilder from './pages/ExperimentBuilder';
 import RunDetail from './pages/RunDetail';
+import Labels from './pages/Labels';
 import Settings from './pages/Settings';
 
 // The axios response interceptor (src/api/client.js) has no Router context
@@ -61,6 +62,7 @@ export default function App() {
           <Route path="/prompts" element={<PromptEditor />} />
           <Route path="/experiments/new" element={<ExperimentBuilder />} />
           <Route path="/pipeline-runs/:id" element={<RunDetail />} />
+          <Route path="/labels" element={<Labels />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

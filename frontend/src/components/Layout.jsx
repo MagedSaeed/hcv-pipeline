@@ -34,6 +34,9 @@ export default function Layout() {
             <NavLink to="/prompts" className={navLinkClassName}>
               Prompts
             </NavLink>
+            <NavLink to="/labels" className={navLinkClassName}>
+              Labels
+            </NavLink>
             {/* Settings holds the OpenRouter key; a non-staff user should not
                 even see a link to a form they cannot use. */}
             {isStaff && (

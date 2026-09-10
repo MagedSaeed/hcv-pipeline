@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from './client';
 
 // -----------------------------------------------------------------------
@@ -617,4 +617,49 @@ export function usePhaseRunCalls(phaseRunId, options = {}) {
     enabled: phaseRunId != null,
     ...options,
   });
+}
+
+// -----------------------------------------------------------------------
+// Labels (pipeline.Label) - `?scenario=&phase_run=&hcv=&source=` only (spec
+// §9). Deliberately no `?run=`/`?variant=` here: neither lives on Label
+// itself - both are one hop away, on the labelling PhaseRun that produced
+// it (`PhaseRun.variant`, `PhaseRun.pipeline_run`). `useLabels` is the
+// plain single-query hook every other resource gets, for a caller that
+// already has one `phase_run` id in hand.
+export function useLabels(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.labels.list(params),
+    queryFn: () => fetchList('/labels/', params),
+    ...options,
+  });
+}
+
+// The Labels screen (task 8) resolves "run + variant" to the matching
+// phase-3 PhaseRun id(s) FIRST (via `usePhaseRuns`), then needs one
+// `?phase_run=` labels request per id - a count that is 0, 1, or
+// (defensively) more, and only known once that first query has resolved.
+// `useQueries` (not a loop of `useLabels` calls) is what lets the NUMBER of
+// requests vary between renders without breaking the rules of hooks.
+// Returns one flattened array of label rows across every matching phase
+// run, plus combined loading/error state - callers never see the
+// per-phase-run split. Reuses the exact same `queryKeys.labels.list` cache
+// key `useLabels` does (just with `phase_run` folded into its params), so a
+// row fetched here and a row fetched through `useLabels` for the same
+// phase run share one cache entry rather than two.
+export function useLabelsForPhaseRuns(phaseRunIds = [], params = {}) {
+  const queries = useQueries({
+    queries: phaseRunIds.map((phaseRunId) => {
+      const queryParams = { ...params, phase_run: phaseRunId };
+      return {
+        queryKey: queryKeys.labels.list(queryParams),
+        queryFn: () => fetchList('/labels/', queryParams),
+      };
+    }),
+  });
+  return {
+    isLoading: queries.some((query) => query.isLoading),
+    isError: queries.some((query) => query.isError),
+    error: queries.find((query) => query.isError)?.error,
+    results: queries.flatMap((query) => query.data?.results ?? []),
+  };
 }
