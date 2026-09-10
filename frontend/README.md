@@ -64,7 +64,7 @@ npm run dev    # http://localhost:5173
 
 | | Command | Note |
 |---|---|---|
-| Backend tests | `uv run pytest` | `addopts = "-q"` prints no summary line; exit code 0 means pass |
+| Backend tests | `uv run pytest` | ends with a one-line summary (`N passed …`); don't add `-q` — `addopts` already has it, and `-qq` hides that line |
 | Backend lint | `uv run ruff check . && uv run ruff format --check .` | run both; `ruff check` alone doesn't catch formatting |
 | Frontend tests | `npm run test` | vitest + msw; no backend needed |
 | Frontend lint | `npm run lint` | oxlint |
