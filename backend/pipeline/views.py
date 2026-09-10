@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.keys import MissingAPIKey, resolve_openrouter_key
+from core.params import integer_param
 from core.permissions import StaffWrites as BaseStaffWrites
 from pipeline.export import build_bundle, build_run_bundle, safe_filename_stem, write_csv_zip
 from pipeline.models import Experiment, Label, PhaseRun, PipelineRun
@@ -384,17 +385,6 @@ def _export_response(wanted, bundle, stem):
     )
     response["Content-Disposition"] = f'attachment; filename="{stem}.json"'
     return response
-
-
-def integer_param(params, name):
-    """Read an integer query parameter, or 400. Never a 500."""
-    raw = params.get(name)
-    if raw in (None, ""):
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError) as error:
-        raise ValidationError({name: f"Must be an integer, got {raw!r}."}) from error
 
 
 class PipelineRunViewSet(

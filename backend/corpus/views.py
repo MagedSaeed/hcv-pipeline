@@ -3,6 +3,7 @@ from rest_framework import viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 
+from core.params import integer_param
 from corpus.models import FewShotExample, Origin, ResourceFile, Scenario, SystemDescription
 from corpus.permissions import ReadOnlyIfGenerated
 from corpus.serializers import (
@@ -11,21 +12,6 @@ from corpus.serializers import (
     ScenarioSerializer,
     SystemDescriptionSerializer,
 )
-
-
-def integer_param(params, name):
-    """Read a query parameter that filters on an integer column.
-
-    An uncoerced value reaches the ORM and raises ValueError, which DRF does not
-    map to a response: a typo in a query string would be a 500 rather than a 400.
-    """
-    raw = params.get(name)
-    if raw in (None, ""):
-        return None
-    try:
-        return int(raw)
-    except ValueError as error:
-        raise ValidationError({name: f"Must be an integer, got {raw!r}."}) from error
 
 
 class ResourceFileViewSet(viewsets.ModelViewSet):
@@ -64,8 +50,21 @@ class SystemDescriptionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = SystemDescription.objects.all()
-        origin = self.request.query_params.get("origin")
-        return queryset.filter(origin=origin) if origin else queryset
+        params = self.request.query_params
+        if origin := params.get("origin"):
+            queryset = queryset.filter(origin=origin)
+        if variant := params.get("variant"):
+            queryset = queryset.filter(generation_run__variant=variant)
+        run = integer_param(params, "run")
+        # `is not None`, not truthiness: `run=0` is a real (if nonexistent)
+        # id and must filter to nothing, not fall through to "no filter was
+        # given" the way `if run` would for the falsy integer 0.
+        if run is not None:
+            queryset = queryset.filter(generation_run__pipeline_run_id=run)
+        phase_run = integer_param(params, "phase_run")
+        if phase_run is not None:
+            queryset = queryset.filter(generation_run_id=phase_run)
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, origin=Origin.MANUAL)
@@ -89,13 +88,30 @@ class ScenarioViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ReadOnlyIfGenerated]
 
     def get_queryset(self):
-        queryset = Scenario.objects.all()
+        # `intended_hcvs` is a ManyToManyField; `ScenarioSerializer` exposes
+        # it as a `PrimaryKeyRelatedField(many=True)`, which reads
+        # `instance.intended_hcvs.all()` PER ROW during serialization
+        # (`ManyRelatedField.get_attribute`, which has no pk-only
+        # optimization the way a plain FK does) — a page of 50 scenarios
+        # costs 50 extra queries without this. `prefetch_related` pays for
+        # the whole page in one extra query instead.
+        queryset = Scenario.objects.prefetch_related("intended_hcvs")
         params = self.request.query_params
         if origin := params.get("origin"):
             queryset = queryset.filter(origin=origin)
         system = integer_param(params, "system")
         if system is not None:
             queryset = queryset.filter(system_description_id=system)
+        if variant := params.get("variant"):
+            queryset = queryset.filter(generation_run__variant=variant)
+        run = integer_param(params, "run")
+        # `is not None`, not truthiness — see SystemDescriptionViewSet's
+        # identical comment; `run=0` must filter to nothing.
+        if run is not None:
+            queryset = queryset.filter(generation_run__pipeline_run_id=run)
+        phase_run = integer_param(params, "phase_run")
+        if phase_run is not None:
+            queryset = queryset.filter(generation_run_id=phase_run)
         return queryset
 
     def perform_create(self, serializer):

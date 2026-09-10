@@ -668,9 +668,11 @@ GET    /api/settings/  PATCH /api/settings/   openrouter_key, staff only
 GET    /api/taxonomies/                       GET /api/taxonomies/{id}/hcvs/
 CRUD   /api/resources/                        upload + text extraction
 CRUD   /api/fewshots/                         ?phase=2|3
-CRUD   /api/system-descriptions/              ?origin=   writes on seed/manual
-                                              rows only
-CRUD   /api/scenarios/                        ?origin=&system=   writes on
+CRUD   /api/system-descriptions/              ?origin=&variant=&run=
+                                              &phase_run=   writes on
+                                              seed/manual rows only
+CRUD   /api/scenarios/                        ?origin=&system=&variant=
+                                              &run=&phase_run=   writes on
                                               seed/manual rows only
 GET/POST/PATCH /api/prompts/                  ?phase=  (PATCH creates a new
                                               version; DELETE is a plain 405,
