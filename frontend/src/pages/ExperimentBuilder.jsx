@@ -7,33 +7,12 @@ import {
   useModels,
   usePromptTemplates,
   useRunExperiment,
+  useRunOptions,
   useSystemDescriptions,
   useTaxonomies,
 } from '../api/queries';
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
-
-// Verbatim from `RunRequestSerializer.n_repetitions.help_text`
-// (backend/pipeline/serializers.py) — the field `POST
-// /api/experiments/{id}/run/` reads (pipeline/views.py's `ExperimentViewSet.run`).
-//
-// There is no HTTP-reachable way to fetch this live. `OPTIONS
-// /api/experiments/{id}/run/` looks like the obvious route — DRF's
-// SimpleMetadata.determine_actions calls `view.get_serializer()` for the
-// route's POST method — but `ExperimentViewSet` never overrides
-// `get_serializer_class()` per-action (only `PhaseRunViewSet` does, for
-// `create`), so that call always returns `ExperimentSerializer`, never
-// `RunRequestSerializer`: `run`'s own serializer is only ever instantiated
-// inline inside the action method's body. Verified empirically against a
-// real Django test client (in-process, no live server, no network) rather
-// than only reasoned about — see the task report. So this is a hand-copy,
-// not a live fetch, kept BYTE-FOR-BYTE identical to the backend string
-// (the same source `pipeline/tests/test_experiment_api.py::
-// test_n_repetitions_help_text_...` asserts substrings against) so the two
-// cannot silently drift apart in MEANING, even though nothing enforces
-// that mechanically the way a truly live-fetched value would.
-const N_REPETITIONS_HELP_TEXT =
-  "How many times to repeat this exact configuration. LLM output is stochastic, so a single repetition's difference between variant A (taxonomy withheld) and variant B (taxonomy supplied) could just be sampling noise — you can't tell a real effect from luck off one run. Repeating the same configuration several times is what turns a one-off difference into a finding you can trust. Each repetition costs roughly $1.61 and takes about 23 minutes at the default configuration (3 systems x 5 scenarios, both variants, 32 provider calls), so the total cost is straightforwardly this number times $1.61. Wall-clock time is a bit different: all repetitions are queued together and run as workers become free (2 at a time by default), so they overlap rather than running strictly in sequence — 1 repetition still takes about 23 minutes, 2 finish together in about the same 23 minutes, and each further pair adds roughly another 23 minutes while it waits for a free worker. The default of 1 is deliberately conservative; raise it once you're ready to turn a promising one-off run into a real result.";
 
 // corpus.models.Origin.choices, spelled out here the same way Corpus.jsx's
 // ORIGIN_LABELS does — a generated row is a previous run's own output;
@@ -129,6 +108,10 @@ export default function ExperimentBuilder() {
 
   const createExperiment = useCreateExperiment();
   const runExperiment = useRunExperiment();
+  // Only meaningful once an experiment exists - `OPTIONS
+  // /api/experiments/{id}/run/` is a DETAIL route and needs a real id;
+  // `enabled` below keeps this from ever firing against a placeholder.
+  const runOptionsQuery = useRunOptions(savedExperiment?.id, { enabled: savedExperiment != null });
 
   if (!isStaff) {
     return (
@@ -562,7 +545,31 @@ export default function ExperimentBuilder() {
                 onChange={(event) => setNRepetitions(event.target.value)}
                 className="mt-1 block w-32 rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
               />
-              <p className="mt-1 max-w-2xl text-xs text-gray-500">{N_REPETITIONS_HELP_TEXT}</p>
+              {/* Sourced live from `OPTIONS /api/experiments/{id}/run/`'s
+                  `actions.POST.n_repetitions.help_text` (backend commit
+                  6f8e9a0) - the one place this text lives now, so the API's
+                  own wording and this screen can never drift apart. The
+                  field itself (above) works regardless of this query's
+                  state - it is never gated on runOptionsQuery, only its own
+                  `nRepetitions` state (defaulted to '1'). Deliberately NEVER
+                  falls back to a hand-copied string while loading or on
+                  failure - a stale copy showing during an outage is exactly
+                  the drift this change was meant to remove; a neutral,
+                  fact-free notice is safer than a possibly-wrong one. */}
+              {runOptionsQuery.isError ? (
+                <p className="mt-1 max-w-2xl text-xs text-amber-700">
+                  Could not load the explanation for this field from the server right now — this
+                  does not affect the field itself, which still defaults to 1 and works normally.
+                </p>
+              ) : runOptionsQuery.isSuccess ? (
+                <p className="mt-1 max-w-2xl text-xs text-gray-500">
+                  {runOptionsQuery.data?.actions?.POST?.n_repetitions?.help_text}
+                </p>
+              ) : (
+                <p className="mt-1 max-w-2xl text-xs text-gray-500">
+                  Loading the explanation for this field…
+                </p>
+              )}
             </div>
             <button
               type="submit"

@@ -202,6 +202,33 @@ export function useRunExperiment() {
   });
 }
 
+// `OPTIONS /api/experiments/{id}/run/` - DRF's standard metadata response,
+// now describing `RunRequestSerializer` (backend commit 6f8e9a0) rather than
+// `ExperimentSerializer`, which is all DRF reports for every action's
+// OPTIONS by default. This is the ONE HTTP-reachable source of
+// `n_repetitions.help_text` (`pipeline/tests/test_experiment_api.py::
+// test_options_on_run_describes_n_repetitions_help_text` pins the exact
+// envelope: `{"actions": {"POST": {"n_repetitions": {"help_text": ..., ...}}}}`,
+// `set(fields) == {"n_repetitions"}`) - callers read
+// `data.actions.POST.n_repetitions.help_text` rather than hand-copying the
+// string, so the backend's own wording and the screen can never drift.
+// This is a DETAIL route (needs a real experiment id) - `enabled` must stay
+// false until one exists; there is no id-less variant to fall back to.
+// `staleTime: Infinity`: this is field metadata, not run state - nothing
+// about it changes without a deploy, so there is nothing to ever re-fetch.
+export function useRunOptions(experimentId, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.experiments.detailSub(experimentId, 'run-options'),
+    queryFn: async () => {
+      const { data } = await apiClient.options(`/experiments/${experimentId}/run/`);
+      return data;
+    },
+    enabled: experimentId != null,
+    staleTime: Infinity,
+    ...options,
+  });
+}
+
 // -----------------------------------------------------------------------
 // The OpenRouter model catalogue (llm/models_api.py) - cached an hour
 // server-side. Shaped `{count, results}`, NOT the paginated envelope every

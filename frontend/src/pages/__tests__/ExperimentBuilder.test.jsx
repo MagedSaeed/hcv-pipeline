@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 
@@ -42,6 +42,41 @@ const FEWSHOTS_SEED = [
   { id: 20, phase: 2, name: 'shot-1', input_text: 'in', input_file: null, output_text: 'out', output_file: null, resolved_input: 'in', resolved_output: 'out', order: 1, is_active: true },
 ];
 
+// The exact envelope `OPTIONS /api/experiments/{id}/run/` now returns
+// (backend commit 6f8e9a0, pinned by `pipeline/tests/test_experiment_api.py::
+// test_options_on_run_describes_n_repetitions_help_text`): DRF's standard
+// `SimpleMetadata.determine_metadata` shape, with `actions.POST` narrowed
+// to ONLY `n_repetitions` (the real endpoint asserts
+// `set(fields) == {"n_repetitions"}` - `RunRequestSerializer` has no other
+// field). `helpText` is the one part a caller actually reads.
+function runOptionsResponse(helpText) {
+  return {
+    name: 'Experiment Run',
+    description: '',
+    renders: ['application/json'],
+    parses: ['application/json'],
+    actions: {
+      POST: {
+        n_repetitions: {
+          type: 'integer',
+          required: false,
+          read_only: false,
+          label: 'N repetitions',
+          help_text: helpText,
+          min_value: 1,
+          max_value: 100,
+        },
+      },
+    },
+  };
+}
+
+// Used by every test that doesn't care about the EXACT wording - only the
+// dedicated test below asserts the real text is what renders, via its own
+// distinctive sentinel (`server.use()` override, one handler wins over
+// another registered for the same method+path).
+const DEFAULT_RUN_OPTIONS_HELP_TEXT = 'Default fixture text for n_repetitions, unrelated to the real backend wording.';
+
 function installBuilderFixtures() {
   server.use(
     http.get('/api/models/', () => HttpResponse.json(MODELS_SEED)),
@@ -51,7 +86,10 @@ function installBuilderFixtures() {
       return HttpResponse.json(paginated(rows));
     }),
     http.get('/api/system-descriptions/', () => HttpResponse.json(paginated(SYSTEMS_SEED))),
-    http.get('/api/fewshots/', () => HttpResponse.json(paginated(FEWSHOTS_SEED)))
+    http.get('/api/fewshots/', () => HttpResponse.json(paginated(FEWSHOTS_SEED))),
+    http.options('/api/experiments/:id/run/', () =>
+      HttpResponse.json(runOptionsResponse(DEFAULT_RUN_OPTIONS_HELP_TEXT))
+    )
   );
 }
 
@@ -134,13 +172,18 @@ describe('ExperimentBuilder', () => {
     expect(screen.getByRole('checkbox', { name: /^variant b$/i })).toBeChecked();
   });
 
-  it('the repetitions field defaults to 1 and shows the API-provided explanation for raising it', async () => {
+  it('the repetitions field defaults to 1, and its explanation comes from the live API, never a hand-copied string', async () => {
     const user = userEvent.setup();
+    // A sentinel that could only ever have come from the OPTIONS mock below -
+    // proves the rendered text is SOURCED from the API response, not from
+    // any string baked into the component.
+    const sentinelHelpText = 'SENTINEL — this text exists only in the OPTIONS mock, never hand-copied into the component.';
     server.use(
       http.post('/api/experiments/', async ({ request }) => {
         const body = await request.json();
         return HttpResponse.json({ id: 77, ...body }, { status: 201 });
-      })
+      }),
+      http.options('/api/experiments/77/run/', () => HttpResponse.json(runOptionsResponse(sentinelHelpText)))
     );
     renderApp({ initialEntries: ['/experiments/new'] });
 
@@ -150,17 +193,66 @@ describe('ExperimentBuilder', () => {
 
     const repetitions = await screen.findByLabelText(/^repetitions$/i);
     expect(repetitions).toHaveValue(1);
-    // Verbatim from RunRequestSerializer.n_repetitions.help_text
-    // (backend/pipeline/serializers.py) - the exact facts
-    // pipeline/tests/test_experiment_api.py::
-    // test_n_repetitions_help_text_explains_why_the_number_exists_and_stays_defaulted_to_one
-    // asserts on that source string, copied here so the two texts cannot
-    // silently say different things.
-    const explanation = screen.getByText(/repeat this exact configuration/i);
-    expect(explanation).toHaveTextContent(/\$1\.61/);
-    expect(explanation).toHaveTextContent(/23 minutes/);
-    expect(explanation).toHaveTextContent(/queued together/i);
-    expect(explanation).toHaveTextContent(/stochastic|noise/i);
+
+    expect(await screen.findByText(sentinelHelpText)).toBeInTheDocument();
+    // The old hand-copied sentence is gone from the SOURCE entirely now
+    // (one source of truth, the live OPTIONS response) - this would only
+    // ever appear again if someone reintroduced a hardcoded fallback.
+    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$1\.61/)).not.toBeInTheDocument();
+  });
+
+  it('shows a neutral loading notice for the explanation - never the old hand-copied text - while OPTIONS is in flight', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/experiments/', async ({ request }) => {
+        const body = await request.json();
+        return HttpResponse.json({ id: 77, ...body }, { status: 201 });
+      }),
+      http.options('/api/experiments/77/run/', async () => {
+        await delay(50);
+        return HttpResponse.json(runOptionsResponse('Resolved after the delay.'));
+      })
+    );
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    await screen.findByLabelText(/^name$/i);
+    await fillMinimalValidForm(user);
+    await user.click(screen.getByRole('button', { name: /create experiment/i }));
+
+    // The field itself works immediately - it is never gated on this query.
+    const repetitions = await screen.findByLabelText(/^repetitions$/i);
+    expect(repetitions).toHaveValue(1);
+    expect(screen.getByText(/loading the explanation/i)).toBeInTheDocument();
+    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
+
+    expect(await screen.findByText('Resolved after the delay.')).toBeInTheDocument();
+  });
+
+  it('still lets repetitions be used if the API explanation fails to load, and never falls back to stale copy', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/experiments/', async ({ request }) => {
+        const body = await request.json();
+        return HttpResponse.json({ id: 77, ...body }, { status: 201 });
+      }),
+      http.options('/api/experiments/77/run/', () => HttpResponse.json({ detail: 'Server error.' }, { status: 500 }))
+    );
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    await screen.findByLabelText(/^name$/i);
+    await fillMinimalValidForm(user);
+    await user.click(screen.getByRole('button', { name: /create experiment/i }));
+
+    const repetitions = await screen.findByLabelText(/^repetitions$/i);
+    expect(repetitions).toHaveValue(1);
+    await user.clear(repetitions);
+    await user.type(repetitions, '5');
+    expect(repetitions).toHaveValue(5);
+
+    expect(await screen.findByText(/could not load the explanation/i)).toBeInTheDocument();
+    expect(screen.queryByText(/repeat this exact configuration/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$1\.61/)).not.toBeInTheDocument();
   });
 
   it("surfaces the API's validation errors field-by-field, never in a generic banner", async () => {
