@@ -54,6 +54,28 @@ describe('extractErrorMessage', () => {
     const error = { response: { data: [] } };
     expect(extractErrorMessage(error, 'default text')).toBe('default text');
   });
+
+  // prompts/views.py::PromptPreviewMixin._resolve_template raises
+  // `ValidationError({"user_prompt": "Previewing a template with no id
+  // requires user_prompt."})` directly (not through a serializer) - DRF
+  // coerces that bare STRING value into a single ErrorDetail, never a list,
+  // so the response body is `{"user_prompt": "..."}`, not `{"user_prompt":
+  // ["..."]}`. Also raised this way: prompts/views.py's own `{"phase": ...}`/
+  // `{"scenario": ...}` refusals and pipeline/views.py::_export_format's
+  // `{"format": "Use format=json or format=csv."}`.
+  it('reads a field-level validation error raised as a bare string, not a list', () => {
+    const error = {
+      response: {
+        data: { user_prompt: 'Previewing a template with no id requires user_prompt.' },
+      },
+    };
+    expect(extractErrorMessage(error)).toBe('Previewing a template with no id requires user_prompt.');
+  });
+
+  it('never reads `code` (a machine token, not error text) as a field-level message', () => {
+    const error = { response: { data: { code: 'missing_api_key' } } };
+    expect(extractErrorMessage(error, 'default text')).toBe('default text');
+  });
 });
 
 // Task 6's own acceptance bar: "surfaces the API's validation errors

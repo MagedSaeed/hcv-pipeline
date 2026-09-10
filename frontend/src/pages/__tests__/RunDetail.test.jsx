@@ -2,12 +2,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { authState, server } from '../../test/server';
+import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 import { RUN_POLL_INTERVAL_MS } from '../../api/queries';
 
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
+// `cancel`/`delete`/`retry` are staff-only (spec §9) - every test that
+// exercises one installs its own handler (the response varies per test),
+// so the guard wraps each test's own resolver rather than living as a
+// separate layered handler (see ExperimentBuilder.test.jsx's identical
+// `guardedExperimentWrite` for why: a later `server.use()` call - the
+// test's own - wins over an earlier one for the same request, so a
+// standalone guard handler registered first would never actually run).
+function guardedStaffWrite(resolver) {
+  return async (info) => {
+    const staffRefusal = requireStaff(currentUser());
+    if (staffRefusal) return staffRefusal;
+    const csrfRefusal = requireCsrf(info.request);
+    if (csrfRefusal) return csrfRefusal;
+    return resolver(info);
+  };
 }
 
 // PipelineRun.config's exact shape (backend/pipeline/execution_config.py's
@@ -282,6 +296,25 @@ describe('RunDetail', () => {
     expect(screen.getAllByRole('button', { name: /^copy$/i }).length).toBeGreaterThanOrEqual(3);
   });
 
+  it('the call inspector lists every call, not just the first 50 (fails if only page 1 is read)', async () => {
+    const user = userEvent.setup();
+    const run = pipelineRun({ status: 'completed' });
+    const variantA = phaseRun({ id: 9001, variant: 'A', status: 'completed' });
+    installBaseFixtures({ run, phaseRuns: [variantA] });
+    // 55 calls under one phase run - spec §9 promises this endpoint is
+    // "every call"; one page (PAGE_SIZE=50) would silently hide the last 5.
+    const calls = Array.from({ length: 55 }, (_, index) => call({ id: index + 1, sequence: index + 1 }));
+    server.use(
+      http.get('/api/phase-runs/9001/calls/', ({ request }) => HttpResponse.json(paginate(calls, request)))
+    );
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    await user.click(await screen.findByRole('button', { name: /view calls/i }));
+
+    expect(await screen.findByTestId('call-row-55')).toBeInTheDocument();
+  });
+
   it('offers cancel while pending/queued/running with the no-interrupt caveat, and hides it once terminal', async () => {
     const running = pipelineRun({ status: 'running' });
     installBaseFixtures({ run: running, phaseRuns: [] });
@@ -307,12 +340,15 @@ describe('RunDetail', () => {
     const run = pipelineRun({ status: 'running' });
     installBaseFixtures({ run, phaseRuns: [] });
     server.use(
-      http.post('/api/pipeline-runs/501/cancel/', () =>
-        HttpResponse.json({
-          id: 501,
-          status: 'cancelled',
-          detail: 'Cancelling marks a run dead so it can be deleted; it does NOT interrupt a worker already executing it.',
-        })
+      http.post(
+        '/api/pipeline-runs/501/cancel/',
+        guardedStaffWrite(() =>
+          HttpResponse.json({
+            id: 501,
+            status: 'cancelled',
+            detail: 'Cancelling marks a run dead so it can be deleted; it does NOT interrupt a worker already executing it.',
+          })
+        )
       )
     );
 
@@ -328,10 +364,13 @@ describe('RunDetail', () => {
     const failedLabelling = phaseRun({ id: 9003, phase: 3, variant: '', status: 'failed', error: 'Some scenarios failed.', leak_scan_ran: false, guarded_by: [] });
     installBaseFixtures({ run, phaseRuns: [failedLabelling] });
     server.use(
-      http.post('/api/phase-runs/9003/retry/', () =>
-        HttpResponse.json(
-          { detail: 'This run was cancelled and cannot be retried.', code: 'retry_run_cancelled' },
-          { status: 409 }
+      http.post(
+        '/api/phase-runs/9003/retry/',
+        guardedStaffWrite(() =>
+          HttpResponse.json(
+            { detail: 'This run was cancelled and cannot be retried.', code: 'retry_run_cancelled' },
+            { status: 409 }
+          )
         )
       )
     );
@@ -414,10 +453,13 @@ describe('RunDetail', () => {
     installBaseFixtures({ run, phaseRuns: [] });
     let deleteCalled = false;
     server.use(
-      http.delete('/api/pipeline-runs/501/', () => {
-        deleteCalled = true;
-        return new HttpResponse(null, { status: 204 });
-      })
+      http.delete(
+        '/api/pipeline-runs/501/',
+        guardedStaffWrite(() => {
+          deleteCalled = true;
+          return new HttpResponse(null, { status: 204 });
+        })
+      )
     );
 
     renderApp({ initialEntries: ['/pipeline-runs/501'] });

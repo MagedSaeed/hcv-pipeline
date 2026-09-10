@@ -4,33 +4,20 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { paginate, paginated } from '../../test/mockApi';
 
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
-
-// `/api/labels/` is the one endpoint this screen actually pages through
-// (`fetchAllPages` in api/queries.js) - real PAGE_SIZE is 50, and a single
-// repetition's phase-3 run can label far more than that. The other
-// endpoints below keep using the single-page `paginated()` helper above
-// (every fixture fits on one page, matching the house style every other
-// screen's tests already use) - this one alone slices into real pages with
-// a real `next` cursor, so a client that reads only page 1 has something to
-// actually fail against.
-const LABELS_PAGE_SIZE = 50;
-
-function paginateLabels(rows, url) {
-  const page = Number(url.searchParams.get('page') || '1');
-  const start = (page - 1) * LABELS_PAGE_SIZE;
-  const results = rows.slice(start, start + LABELS_PAGE_SIZE);
-  const hasNext = start + LABELS_PAGE_SIZE < rows.length;
-  return {
-    count: rows.length,
-    next: hasNext ? `http://localhost/api/labels/?page=${page + 1}` : null,
-    previous: page > 1 ? `http://localhost/api/labels/?page=${page - 1}` : null,
-    results,
-  };
-}
+// `/api/labels/` is the one endpoint whose OWN fixture here (PAGINATION_
+// LABELS below) actually exceeds PAGE_SIZE=50 - `useAllLabels` (unchanged
+// by task 10.1; it was the one hook this suite already got right) has to
+// follow `next` to see all of it. `/api/scenarios/`/`/api/system-
+// descriptions/` also now fetch every page as of task 10.1 (`useScenarios`/
+// `useSystemDescriptions`), but this file's own fixtures for those stay
+// small, so `paginated` (a faithful single-page envelope) is still the
+// right mock for them - Corpus.test.jsx is the one that proves
+// scenarios/system-descriptions pagination with a >50-row fixture. Every
+// envelope below is built through the shared `paginate`/`paginated`
+// (test/mockApi.js) rather than a one-off like the `paginateLabels` this
+// file used to hand-roll.
 
 // A deliberately small taxonomy (3 HCVs, not the real 21) - Labels.jsx must
 // treat this as "the whole taxonomy" and render every one of them as a
@@ -86,6 +73,24 @@ const PAGINATION_SCENARIOS = Array.from({ length: 17 }, (_, index) =>
   })
 );
 
+// Run 602 / variant A: 55 scenarios, deliberately carrying NO labels at
+// all - unlike PAGINATION_SCENARIOS above (which proves `/api/labels/`
+// pagination), this fixture isolates the OTHER confirmed task 10.1 finding:
+// Labels' scenario ROWS themselves come from `useScenarios({variant, run})`
+// (Labels.jsx's VariantMatrix), which - before this task - read only page
+// one. A run with 55 scenarios and no labels proves the ROWS are complete
+// (55 table rows, including the 55th) independent of any label-pagination
+// logic.
+const ROW_PAGINATION_SCENARIOS = Array.from({ length: 55 }, (_, index) =>
+  scenarioRow({
+    id: 9001 + index,
+    system_description: 11,
+    scenario_id: `row_${String(index + 1).padStart(2, '0')}`,
+    _variant: 'A',
+    _pipelineRunId: 602,
+  })
+);
+
 // Run 101 variant A has TWO scenarios; run 101 variant B has THREE - a
 // deliberate mismatch. If Labels.jsx ever tried to zip the two variants'
 // rows together by index (the exact merged view spec §10 forbids), B's
@@ -102,6 +107,9 @@ const SCENARIOS = [
   scenarioRow({ id: 3001, system_description: 13, scenario_id: 'sc_01', _variant: 'A', _pipelineRunId: 102 }),
   // Run 601's own 17 pagination-fixture scenarios (see PAGINATION_SCENARIOS above).
   ...PAGINATION_SCENARIOS,
+  // Run 602's own 55 row-pagination-fixture scenarios (see
+  // ROW_PAGINATION_SCENARIOS above).
+  ...ROW_PAGINATION_SCENARIOS,
 ];
 
 const PHASE_RUNS = [
@@ -115,6 +123,8 @@ const PHASE_RUNS = [
   // Run 601 / variant A - the pagination fixture's own phase run (see
   // PAGINATION_LABELS below).
   { id: 701, pipeline_run: 601, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 206, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 17, total: 17, failed: 0, percent: 100 }, total_children: 17, completed_children: 17, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+  // Run 602 / variant A - ROW_PAGINATION_SCENARIOS' own phase run.
+  { id: 702, pipeline_run: 602, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 207, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 55, total: 55, failed: 0, percent: 100 }, total_children: 55, completed_children: 55, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
 ];
 
 // Feeds run 601 / variant A's phase run (701) - see PAGINATION_SCENARIOS
@@ -244,7 +254,7 @@ beforeEach(() => {
     http.get('/api/system-descriptions/', () => HttpResponse.json(paginated(SYSTEMS))),
     http.get('/api/scenarios/', ({ request }) => {
       const url = new URL(request.url);
-      return HttpResponse.json(paginated(applyScenarioFilters(SCENARIOS, url).map(toScenarioWire)));
+      return HttpResponse.json(paginate(applyScenarioFilters(SCENARIOS, url).map(toScenarioWire), url));
     }),
     http.get('/api/phase-runs/', ({ request }) => {
       const url = new URL(request.url);
@@ -260,7 +270,7 @@ beforeEach(() => {
       if (run !== null && run !== '' && Number.isNaN(Number(run))) {
         return HttpResponse.json({ run: ['A valid integer is required.'] }, { status: 400 });
       }
-      return HttpResponse.json(paginateLabels(applyLabelFilters(LABELS, url), url));
+      return HttpResponse.json(paginate(applyLabelFilters(LABELS, url), url));
     })
   );
 });
@@ -465,5 +475,20 @@ describe('Labels', () => {
     await user.hover(marker);
     const tooltip = await screen.findByRole('tooltip');
     expect(within(tooltip).getByText(/Pagination evidence page_17 HCV-03/)).toBeInTheDocument();
+  });
+
+  it('fetches every page of a variant\'s scenario ROWS, not just the first 50 (fails if only page 1 is read)', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/labels'] });
+
+    // Run 602 / variant A has 55 scenarios and zero labels - isolates the
+    // scenario-ROW pagination bug (Labels.jsx's VariantMatrix reading
+    // useScenarios) from the label-CELL pagination proven by the test
+    // above. One page (50) could never show the 51st-55th rows at all.
+    await applyRunFilter(user, { run: 602, variant: 'A' });
+    const matrix = await screen.findByTestId('variant-A-matrix');
+
+    expect(within(matrix).getAllByRole('row')).toHaveLength(1 + 55); // header + 55 scenarios
+    expect(within(matrix).getByRole('rowheader', { name: /System Alpha \/ row_55/ })).toBeInTheDocument();
   });
 });

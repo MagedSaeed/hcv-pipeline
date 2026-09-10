@@ -113,16 +113,26 @@ async function fetchList(url, params) {
 }
 
 // -----------------------------------------------------------------------
-// A handful of lists can genuinely outgrow one page (`PAGE_SIZE=50`) in a
-// way a caller cannot safely ignore - see `useAllLabels` below for the
-// concrete case. `fetchList` above deliberately stays a single fetch, same
-// as every other list hook in this app (reading only the first page is the
-// house style, and is fine when a screen's own scope keeps results well
-// under 50). `fetchAllPages` is the one place that instead walks DRF's own
-// `next` cursor to exhaustion, re-issuing each page through `apiClient`
-// itself (never the raw absolute/relative URL the server handed back) so
-// its baseURL and interceptors stay in the loop for every page, not only
-// the first.
+// THE RULE (spec §9: "a frontend data layer needs to unwrap `results` and
+// follow `next`/`previous`"), replacing an earlier comment here that called
+// reading only page one "the house style" - that comment was wrong, and
+// task 10.1's review confirmed it as a live bug in 14 call sites (Labels'
+// own scenario rows among them: a probe drew 50 of 60 rows and silently
+// dropped labels for the rest):
+//
+//   No screen may present a partial list as complete. For every list, either
+//   fetch every page (`fetchAllPages` below) or paginate VISIBLY - a total
+//   ("50 of 212") and a pager, never built yet in this app - with an
+//   explicit reason in a comment for why that screen chose visible paging
+//   over fetching everything. Fetch-all is the DEFAULT; visible paging is
+//   only for a list a realistic screen could genuinely never hold at once.
+//
+// `fetchList` stays a single fetch and remains correct ONLY for a query
+// whose own scope keeps results well under PAGE_SIZE by construction, not
+// by hope - e.g. `usePhaseRuns` scoped to one repetition's own phase runs
+// (a handful of rows, domain-bounded), or `useTaxonomyHcvs` (always exactly
+// one taxonomy's ~21 HCVs, spec §5.1). Every hook below says, in its own
+// comment, which choice it made and why.
 function nextPageNumber(next) {
   if (!next) return null;
   try {
@@ -132,6 +142,10 @@ function nextPageNumber(next) {
   }
 }
 
+// Walks DRF's own `next` cursor to exhaustion, re-issuing each page through
+// `apiClient` itself (never the raw absolute/relative URL the server handed
+// back) so its baseURL and interceptors (CSRF, the auth-failure handler)
+// stay in the loop for every page, not only the first.
 async function fetchAllPages(url, params) {
   const results = [];
   let page = null;
@@ -143,8 +157,27 @@ async function fetchAllPages(url, params) {
   }
 }
 
+// Every fetch-all hook below returns `{ results }` - the same shape every
+// `fetchList`-backed hook returns after DRF's envelope, so a caller never
+// has to branch on which strategy backed a given query; it always just
+// reads `.results`. `count`/`next`/`previous` are meaningless once every
+// page has already been walked, so they are deliberately not carried
+// through.
+async function fetchAllPagesEnvelope(url, params) {
+  return { results: await fetchAllPages(url, params) };
+}
+
 // -----------------------------------------------------------------------
 // Experiments - read: any authenticated user; create/launch: staff (spec §9).
+// First-page only (task 10.1's review did not flag this one, unlike its
+// siblings below): an Experiment is created by hand, one per real
+// comparison design, not generated in bulk the way prompt VERSIONS or
+// PIPELINE RUNS are - realistically tens over this research tool's life,
+// not hundreds. Left as `fetchList` to keep this task's diff scoped to
+// confirmed findings; the SAME risk class applies here too (Dashboard's own
+// list, and PromptEditor's "borrow inputs from experiment" select, would
+// both silently hide experiment 51+), so revisit this the moment the count
+// realistically approaches PAGE_SIZE.
 export function useExperiments(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.experiments.list(params),
@@ -245,15 +278,23 @@ export function useModels(options = {}) {
 }
 
 // -----------------------------------------------------------------------
-// Pipeline runs (repetitions) - drives the Dashboard's "recent runs" list.
-// `refetchInterval` is derived from the data this same query just fetched,
-// via `runsRefetchInterval` above: once every run on the page is terminal,
-// React Query stops scheduling further automatic refetches on its own,
-// with no separate timer to remember to clear.
+// Pipeline runs (repetitions) - drives the Dashboard's "recent runs" list
+// AND, via `runsRefetchInterval` below, the poll gate that decides when to
+// stop polling. FETCH-ALL, not visible paging: `n_repetitions` allows up to
+// 100 on a single launch (spec §6), so a first-page-only read here could
+// report every visible run terminal while repetitions 51-100 are still
+// queued/running - polling would stop with a live batch still in flight
+// (task 10.1's own confirmed finding). The poll gate has to see EVERY run
+// to answer "is anything still running?" correctly; there is no such thing
+// as a visibly-paginated version of that question. `refetchInterval` is
+// derived from the data this same query just fetched: once every run
+// across every page is terminal, React Query stops scheduling further
+// automatic refetches on its own, with no separate timer to remember to
+// clear.
 export function usePipelineRuns(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.pipelineRuns.list(params),
-    queryFn: () => fetchList('/pipeline-runs/', params),
+    queryFn: () => fetchAllPagesEnvelope('/pipeline-runs/', params),
     refetchInterval: (query) => runsRefetchInterval(query.state.data?.results),
     ...options,
   });
@@ -345,8 +386,12 @@ export function useExportPipelineRun() {
 
 // Every `PhaseRun` under one repetition (or matching any other `?pipeline_run=
 // &phase=&variant=&status=&experiment=` filter, spec §9) - Run detail's
-// per-phase progress list. Same "stop once every row is terminal" polling as
-// every other list of runs in this app.
+// per-phase progress list. First-page only, deliberately: RunDetail always
+// scopes this to one repetition's own `?pipeline_run=`, and one repetition
+// runs at most a handful of phase runs (phase 1 + phase 2/phase 3 per
+// variant) - domain-bounded well under PAGE_SIZE, not merely assumed to be.
+// Same "stop once every row is terminal" polling as every other list of
+// runs in this app.
 export function usePhaseRuns(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.phaseRuns.list(params),
@@ -376,7 +421,10 @@ export function useRetryPhaseRun() {
 }
 
 // -----------------------------------------------------------------------
-// Taxonomy - read-only over the API (arrives by import command).
+// Taxonomy - read-only over the API (arrives by import command). First-page
+// only: a taxonomy VERSION is created by an offline import command, not by
+// anything a user does repeatedly in this UI - a handful of versions over
+// the project's life, nowhere near PAGE_SIZE.
 export function useTaxonomies(options = {}) {
   return useQuery({
     queryKey: queryKeys.taxonomies.list(),
@@ -385,6 +433,11 @@ export function useTaxonomies(options = {}) {
   });
 }
 
+// First-page only, and correct by a hard domain invariant rather than by
+// hope: a taxonomy has exactly the HCV rows imported for it, and spec §5.1/
+// §9's own export description says every taxonomy in scope carries "all 21
+// HCV rows verbatim" - one taxonomy can never itself reach a second page of
+// PAGE_SIZE=50.
 export function useTaxonomyHcvs(taxonomyId, options = {}) {
   return useQuery({
     queryKey: queryKeys.taxonomies.detailSub(taxonomyId, 'hcvs'),
@@ -437,6 +490,10 @@ export function useUpdateSettings() {
 // The CSRF request interceptor (client.js) doesn't care either way - it
 // only ever touches `X-CSRFToken`, matching on the unsafe HTTP method, so
 // CSRF still applies to this request exactly as it does to a JSON one.
+// First-page only: uploaded once per source document (a taxonomy table, a
+// system prompt, a scenario pack), not generated - realistically a modest,
+// hand-curated set. Not in task 10.1's confirmed findings; same residual
+// risk as `useExperiments` above if this ever grows large.
 export function useResources(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.resources.list(params),
@@ -477,6 +534,11 @@ export function useDeleteResource() {
 // text of whichever side is file-backed is read from the file at RESPONSE
 // time, not stored on the row - callers must render these fields as given,
 // never recompute them from `input_text`/`input_file` client-side.
+// First-page only: hand-paired, one at a time, from an already-modest
+// resources list - not in task 10.1's confirmed findings. RunDetail's own
+// `titleLookup` over this hook can still fall back to a bare id past row
+// 50 if this list ever does grow that large; same residual risk noted on
+// `useResources` above.
 export function useFewShots(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.fewshots.list(params),
@@ -504,10 +566,20 @@ export function useCreateFewShot() {
 // ="generated"` rows are read-only at the API (corpus.permissions.
 // ReadOnlyIfGenerated) - `is_editable` is already embedded on every row so a
 // page never has to re-derive that from `origin` itself.
+//
+// FETCH-ALL, not visible paging (task 10.1): every consumer needs the
+// COMPLETE set, not a page of it, or it is silently wrong rather than
+// merely incomplete - Corpus's own list IS the record of everything a run
+// produced, the builder's seed/target pickers must offer every eligible
+// system or a researcher simply cannot select one past row 50, and a title
+// lookup (Labels.jsx/Corpus.jsx's `System #<id>` fallback, RunDetail.jsx's
+// `titleLookup`) falls back to a bare id for any row that fetch-all didn't
+// bring back. A real corpus is not expected to grow into the thousands for
+// this research tool, so fetching it whole stays cheap.
 export function useSystemDescriptions(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.systemDescriptions.list(params),
-    queryFn: () => fetchList('/system-descriptions/', params),
+    queryFn: () => fetchAllPagesEnvelope('/system-descriptions/', params),
     ...options,
   });
 }
@@ -525,10 +597,17 @@ export function useUpdateSystemDescription() {
   });
 }
 
+// FETCH-ALL, not visible paging (task 10.1): the confirmed bug this task
+// exists to fix - a probe against Labels' own scenario rows drew 50 of 60,
+// so labels for rows 51+ were fetched by `useAllLabels` but never had a
+// scenario row to render next to. Also backs the Prompt editor's phase-3
+// scenario picker (an unreachable scenario past row 50 is simply
+// unselectable) and Corpus's own scenario list, which must show every
+// scenario a filter matches, not a first page of them.
 export function useScenarios(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.scenarios.list(params),
-    queryFn: () => fetchList('/scenarios/', params),
+    queryFn: () => fetchAllPagesEnvelope('/scenarios/', params),
     ...options,
   });
 }
@@ -587,10 +666,19 @@ export function usePhaseRun(id, options = {}) {
 // (201, spec §5.3/§9) - so every caller of `useUpdatePromptTemplate` must
 // re-point whatever it considers "the current template" at the response's
 // own `id`, never assume the id it patched is still the live one.
+// FETCH-ALL, not visible paging (task 10.1): `PATCH` never mutates a
+// version in place, it creates the next one (see this hook's own file
+// comment above), so a template edited often is GUARANTEED to eventually
+// pass PAGE_SIZE=50 versions - unlike most lists here, this one's growth is
+// not merely plausible but built into how templates work. Backs the Prompt
+// editor's own template picker/version history AND the builder's phase-2/
+// phase-3 prompt selects, all of which need the complete set: a picker
+// that silently hid version 51 would let a researcher believe they were
+// looking at the full history when they were not.
 export function usePromptTemplates(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.prompts.list(params),
-    queryFn: () => fetchList('/prompts/', params),
+    queryFn: () => fetchAllPagesEnvelope('/prompts/', params),
     ...options,
   });
 }
@@ -667,11 +755,16 @@ export function useCreatePhaseRun() {
 
 // Every LLMCall archived under one phase run, in full (LLMCallSerializer -
 // rendered_system_prompt/rendered_user_prompt/raw_response, untruncated).
-// Paginated like every other list endpoint; callers read `.results`.
+// FETCH-ALL, not visible paging (task 10.1): spec §9 promises this endpoint
+// is "every call" - a phase run driving `n_systems x n_scenarios_per_system`
+// (up to 50x50 per the iterate-mode override cap) can pass PAGE_SIZE=50
+// calls well within one ordinary run, and Run detail's call inspector
+// exists specifically so a researcher can audit every one of them, not a
+// first page.
 export function usePhaseRunCalls(phaseRunId, options = {}) {
   return useQuery({
     queryKey: queryKeys.phaseRuns.detailSub(phaseRunId, 'calls'),
-    queryFn: () => fetchList(`/phase-runs/${phaseRunId}/calls/`),
+    queryFn: () => fetchAllPagesEnvelope(`/phase-runs/${phaseRunId}/calls/`),
     enabled: phaseRunId != null,
     ...options,
   });
@@ -690,32 +783,30 @@ export function usePhaseRunCalls(phaseRunId, options = {}) {
 // PhaseRun (`pipeline_run` null) is deliberately unreachable through it;
 // `?phase_run=` still reaches it directly.
 //
-// `useLabels` is the plain single-PAGE hook every other resource gets -
-// correct for a caller whose own scope (e.g. one known `phase_run`, or
-// `source=` narrowing further) safely stays under `PAGE_SIZE` (50).
-export function useLabels(params = {}, options = {}) {
-  return useQuery({
-    queryKey: queryKeys.labels.list(params),
-    queryFn: () => fetchList('/labels/', params),
-    ...options,
-  });
-}
-
 // The Labels screen renders one scenario x HCV matrix PER VARIANT, each
 // scoped to one repetition via `?run=<id>&variant=<A|B>` directly on
 // `/api/labels/` - no more resolving a PhaseRun id through `/api/phase-runs/`
 // first. But a single repetition's phase-3 labelling run can produce far
 // more than one page of labels (at the app's own defaults, 3 systems x 5
 // scenarios x 21 HCVs = 315 - more than six pages of PAGE_SIZE=50), so
-// reading only `useLabels`'s first page here would silently render a "no
-// label" marker for cells that WERE labelled past row 50 - exactly the
-// false negative this screen must never produce. `useAllLabels` walks
-// every page via `fetchAllPages` and returns the complete result set for
-// these params, not just what fit on page one.
+// FETCH-ALL is the only correct choice here: a first-page-only read would
+// silently render a "no label" marker for cells that WERE labelled past
+// row 50 - exactly the false negative this screen must never produce (task
+// 10.1's own confirmed finding: a probe drew 50 of 60 rows). `useAllLabels`
+// is the ONLY hook that reads `queryKeys.labels.list(params)` - there used
+// to be a plain single-page `useLabels` sharing this exact cache key with a
+// different fetcher (a classic key collision: whichever hook's query
+// happened to populate the cache first would silently win for every
+// caller, including this one). `useLabels` had no callers anywhere in the
+// app, so task 10.1 deleted it outright rather than leaving live bait for
+// a future caller to reintroduce the shipped bug by innocently reaching
+// for "the plain list hook every other resource gets" - if a genuinely
+// page-bounded labels read is ever needed, give it its OWN key (e.g. via
+// `detailSub`), never this one.
 export function useAllLabels(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.labels.list(params),
-    queryFn: async () => ({ results: await fetchAllPages('/labels/', params) }),
+    queryFn: () => fetchAllPagesEnvelope('/labels/', params),
     ...options,
   });
 }

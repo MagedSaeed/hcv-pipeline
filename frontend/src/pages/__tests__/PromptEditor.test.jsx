@@ -2,13 +2,30 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { authState, server } from '../../test/server';
+import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 import { RUN_POLL_INTERVAL_MS } from '../../api/queries';
 
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
+// 55 versions of ONE template name, deliberately kept separate from every
+// other fixture template above (`generation-baseline`/`phase2-safe`) so it
+// never perturbs an existing test's version-count assertions. `PATCH
+// /api/prompts/{id}/` never mutates a version in place, it always creates
+// the next one - task 10.1's own reasoning for why `usePromptTemplates`
+// must fetch every page: an actively-tuned template is GUARANTEED to pass
+// PAGE_SIZE=50 versions eventually, not merely plausible to.
+const PAGINATION_TEMPLATE_VERSIONS = Array.from({ length: 55 }, (_, index) => ({
+  id: 500 + index,
+  phase: 2,
+  name: 'pagination-fixture',
+  version: index + 1,
+  system_prompt: '',
+  user_prompt: `Version ${index + 1} of the pagination fixture template.`,
+  output_schema: {},
+  is_active: false,
+  created_by: 3,
+  created_at: '2026-01-01T00:00:00Z',
+}));
 
 // Mirrors prompts/serializers.py's PromptTemplateSerializer field set and
 // prompts/models.py's PromptTemplate.Meta.ordering ((phase, name,
@@ -79,6 +96,31 @@ const SCENARIOS_SEED = [
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   },
+  // 54 filler scenarios (ids 11-64) so this fixture passes PAGE_SIZE=50 -
+  // task 10.1's confirmed finding: the phase-3 scenario picker
+  // (`useScenarios`) must offer every scenario, not a first page of them,
+  // or a real one past row 50 is simply unselectable.
+  ...Array.from({ length: 54 }, (_, index) => ({
+    id: 11 + index,
+    system_description: 1,
+    scenario_id: `filler_${String(11 + index).padStart(2, '0')}`,
+    actor: '',
+    trigger: '',
+    standing_state: '',
+    asset: '',
+    threat: '',
+    outcome: '',
+    narrative: `Filler scenario ${11 + index}.`,
+    intended_hcvs: [],
+    abox: null,
+    card: {},
+    origin: 'seed',
+    is_editable: true,
+    order: 1,
+    created_by: 1,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  })),
 ];
 
 let templates;
@@ -93,7 +135,7 @@ let nextPhaseRunId;
 let promptWriteCount;
 
 function resetFixtures() {
-  templates = TEMPLATES_SEED.map((row) => ({ ...row }));
+  templates = [...TEMPLATES_SEED, ...PAGINATION_TEMPLATE_VERSIONS].map((row) => ({ ...row }));
   nextTemplateId = 100;
   phaseRuns = [];
   nextPhaseRunId = 900;
@@ -177,10 +219,18 @@ beforeEach(() => {
       rows = [...rows].sort(
         (a, b) => a.phase - b.phase || a.name.localeCompare(b.name) || b.version - a.version
       );
-      return HttpResponse.json(paginated(rows));
+      // `paginate`, not the single-page `paginated`: PAGINATION_TEMPLATE_
+      // VERSIONS above pushes phase 2's own row count past PAGE_SIZE=50, so
+      // `usePromptTemplates` (now fetch-all, task 10.1) has something real
+      // to prove itself against.
+      return HttpResponse.json(paginate(rows, url));
     }),
 
     http.post('/api/prompts/', async ({ request }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       promptWriteCount += 1;
       const body = await request.json();
       const created = {
@@ -200,6 +250,10 @@ beforeEach(() => {
     }),
 
     http.patch('/api/prompts/:id/', async ({ request, params }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       promptWriteCount += 1;
       const existing = templates.find((t) => t.id === Number(params.id));
       if (!existing) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
@@ -229,6 +283,10 @@ beforeEach(() => {
     // `prompts/views.py::_resolve_template`'s own "never .save()'d or
     // .create()'d" guarantee.
     http.post('/api/prompts/:id/preview/', async ({ request, params }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const template = templates.find((t) => t.id === Number(params.id));
       if (!template) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
       const body = await request.json();
@@ -243,6 +301,10 @@ beforeEach(() => {
     }),
 
     http.post('/api/prompts/preview/', async ({ request }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const body = await request.json();
       if (!body.phase) {
         return HttpResponse.json(
@@ -265,9 +327,13 @@ beforeEach(() => {
       });
     }),
 
-    http.get('/api/scenarios/', () => HttpResponse.json(paginated(SCENARIOS_SEED))),
+    http.get('/api/scenarios/', ({ request }) => HttpResponse.json(paginate(SCENARIOS_SEED, request))),
 
     http.post('/api/phase-runs/', async ({ request }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const body = await request.json();
       if (!body.model) {
         return HttpResponse.json({ model: ['This field is required.'] }, { status: 400 });
@@ -422,7 +488,7 @@ describe('PromptEditor', () => {
     // write request was ever issued: no new row, no version bump. This is
     // the whole point of a real, non-persisting draft preview.
     expect(promptWriteCount).toBe(0);
-    expect(templates).toHaveLength(TEMPLATES_SEED.length);
+    expect(templates).toHaveLength(TEMPLATES_SEED.length + PAGINATION_TEMPLATE_VERSIONS.length);
     expect(templates.find((t) => t.id === 1).version).toBe(1);
 
     // Changing the draft is what lifts the block, not a page reload -
@@ -584,5 +650,38 @@ describe('PromptEditor', () => {
     // guard) - assert the reason is shown rather than nothing happening.
     expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled();
     expect(screen.getByText(/enter a model id/i)).toBeInTheDocument();
+  });
+
+  it('the version history follows every page of a template with more than 50 versions (fails if only page 1 is read)', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    // `pagination-fixture` has 55 versions (PAGINATION_TEMPLATE_VERSIONS) -
+    // combined with the two OTHER phase-2 templates, the full phase-2 list
+    // is 57 rows: one page (50) would miss this template's own oldest
+    // versions AND the alphabetically-last `phase2-safe` template entirely.
+    await selectTemplate(user, 'pagination-fixture');
+
+    expect(await screen.findByText('Version 55')).toBeInTheDocument(); // the newest, loaded by default
+    expect(screen.getByText('Version 1')).toBeInTheDocument(); // the oldest - lands on page 2
+
+    // `phase2-safe` (sorted after `pagination-fixture`) is entirely on page
+    // 2 too - proof the picker itself, not only this template's own
+    // history, reflects every page.
+    const templateSelect = screen.getByLabelText(/^template$/i);
+    expect(within(templateSelect).getByText(/phase2-safe/)).toBeInTheDocument();
+  });
+
+  it("the phase-3 scenario picker offers every scenario, not just the first 50 (fails if only page 1 is read)", async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    // SCENARIOS_SEED has 55 rows - one page (50) would drop the last 5. The
+    // scenario picker only renders once a phase-3 template is loaded.
+    const phaseSelect = await screen.findByLabelText(/^phase$/i);
+    await user.selectOptions(phaseSelect, '3');
+    await selectTemplate(user, 'labelling-default');
+    const scenarioSelect = await screen.findByLabelText(/^scenario$/i);
+    expect(await within(scenarioSelect).findByText(/filler_64/)).toBeInTheDocument();
   });
 });

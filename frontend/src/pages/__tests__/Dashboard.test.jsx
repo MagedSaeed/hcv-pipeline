@@ -3,11 +3,8 @@ import { act, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
+import { paginate, paginated } from '../../test/mockApi';
 import { RUN_POLL_INTERVAL_MS } from '../../api/queries';
-
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
 
 function run(overrides) {
   return {
@@ -143,4 +140,62 @@ describe('Dashboard', () => {
       vi.useRealTimers();
     }
   });
+
+  // REAL timers throughout, deliberately - unlike the fake-timer poll test
+  // above, fetching 55 rows at PAGE_SIZE=50 takes TWO sequential HTTP round
+  // trips per logical fetch (page 1, then page 2, `fetchAllPages` in
+  // api/queries.js), and a fake clock advanced by a fixed amount between
+  // `act()` calls proved unreliable at flushing more than one such round
+  // trip at a time - the same reasoning PromptEditor.test.jsx's own iterate-
+  // mode tests give for using real timers over fake ones once more than one
+  // async hop is involved. A real wait is slower but unambiguous.
+  it(
+    'fetches every page of the run list, and the poll gate keeps polling for a run past row 50 ' +
+      '(fails if only page 1 is read)',
+    async () => {
+      // Counts logical fetch-ALL cycles (one per poll), not raw HTTP
+      // requests - this only advances when a new cycle STARTS (`?page=`
+      // absent or `1`), the same walk `fetchAllPages` performs.
+      let fetchCycle = 0;
+      server.use(
+        http.get('/api/experiments/', () => HttpResponse.json(paginated([]))),
+        // 55 runs: rows 1-50 are ALWAYS terminal ("completed"); rows 51-55
+        // start "running" and only turn terminal on the SECOND poll cycle -
+        // the exact task 10.1 finding (n_repetitions allows up to 100, so a
+        // batch's own later repetitions land past PAGE_SIZE=50). A
+        // first-page-only read would see nothing but terminal rows on
+        // page 1 and never even ask for page 2, so the poll gate would
+        // wrongly stop after the very first fetch.
+        http.get('/api/pipeline-runs/', ({ request }) => {
+          const url = new URL(request.url);
+          const page = url.searchParams.get('page');
+          if (!page || page === '1') fetchCycle += 1;
+          const tailStatus = fetchCycle === 1 ? 'running' : 'completed';
+          const runs = [
+            ...Array.from({ length: 50 }, (_, index) => run({ id: index + 1, repetition_index: index + 1, status: 'completed' })),
+            ...Array.from({ length: 5 }, (_, index) => run({ id: 51 + index, repetition_index: 51 + index, status: tailStatus })),
+          ];
+          return HttpResponse.json(paginate(runs, url));
+        })
+      );
+
+      renderApp({ initialEntries: ['/dashboard'] });
+
+      // The run list itself must show every row, not just page 1's 50 -
+      // and this only resolves once BOTH page requests of the first cycle
+      // have completed.
+      expect(await screen.findByText('Repetition 55')).toBeInTheDocument();
+      expect(fetchCycle).toBe(1);
+
+      // Repetition 55 (on page 2) is still "running" - the poll gate must
+      // have seen it and scheduled another poll cycle.
+      await vi.waitFor(() => expect(fetchCycle).toBe(2), { timeout: RUN_POLL_INTERVAL_MS + 3000 });
+
+      // Every row is terminal as of the second cycle - no further poll,
+      // no matter how much more real time passes.
+      await new Promise((resolve) => setTimeout(resolve, RUN_POLL_INTERVAL_MS + 500));
+      expect(fetchCycle).toBe(2);
+    },
+    15000
+  );
 });

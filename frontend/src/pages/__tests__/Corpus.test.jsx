@@ -4,10 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
-
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
+import { paginate, requireCsrf } from '../../test/mockApi';
 
 // Mirrors backend/corpus/tests/test_corpus_filters.py's own `corpus_runs`
 // fixture shape: two repetitions (pipeline runs 101/102, behind phase runs
@@ -27,6 +24,28 @@ const SYSTEM_ROWS = [
   { id: 3, title: 'System A', slug: 'system-a', body: 'model output A', origin: 'generated', is_editable: false, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'A', _pipelineRunId: 101, _generationRunId: 201 },
   { id: 4, title: 'System B', slug: 'system-b', body: 'model output B', origin: 'generated', is_editable: false, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'B', _pipelineRunId: 102, _generationRunId: 202 },
   { id: 5, title: 'System adhoc', slug: 'system-adhoc', body: 'tuning output', origin: 'generated', is_editable: false, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'A', _pipelineRunId: null, _generationRunId: 203 },
+  // 55 filler rows (ids 6-60) so the UNFILTERED system-descriptions list
+  // passes PAGE_SIZE=50 (task 10.1: Corpus must show the complete corpus,
+  // not a first page of it). `_pipelineRunId`/`_generationRunId: null`
+  // keeps them out of every `?run=`/`?phase_run=` filtered assertion above;
+  // `origin: 'manual'` keeps them out of the `origin=generated` filter test
+  // too - they only ever surface on an UNFILTERED (or `origin=manual`)
+  // request, which is exactly the request the new pagination test below
+  // makes.
+  ...Array.from({ length: 55 }, (_, index) => ({
+    id: 6 + index,
+    title: `Filler system ${6 + index}`,
+    slug: `filler-system-${6 + index}`,
+    body: 'filler body',
+    origin: 'manual',
+    is_editable: true,
+    created_by: 1,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    _variant: null,
+    _pipelineRunId: null,
+    _generationRunId: null,
+  })),
 ];
 
 const CARD_BLANKS = { actor: '', trigger: '', standing_state: '', asset: '', threat: '', outcome: '' };
@@ -36,6 +55,27 @@ const SCENARIO_ROWS = [
   { id: 2, system_description: 3, scenario_id: 'sc_01', ...CARD_BLANKS, narrative: 'Generated narrative A', intended_hcvs: [], abox: null, card: CARD_BLANKS, origin: 'generated', is_editable: false, order: 1, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'A', _pipelineRunId: 101, _generationRunId: 201 },
   { id: 3, system_description: 4, scenario_id: 'sc_01', ...CARD_BLANKS, narrative: 'Generated narrative B', intended_hcvs: [], abox: null, card: CARD_BLANKS, origin: 'generated', is_editable: false, order: 1, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'B', _pipelineRunId: 102, _generationRunId: 202 },
   { id: 4, system_description: 5, scenario_id: 'sc_01', ...CARD_BLANKS, narrative: 'Adhoc narrative', intended_hcvs: [], abox: null, card: CARD_BLANKS, origin: 'generated', is_editable: false, order: 1, created_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', _variant: 'A', _pipelineRunId: null, _generationRunId: 203 },
+  // 55 filler rows, same reasoning as SYSTEM_ROWS' own filler above - the
+  // unfiltered scenarios list must also pass PAGE_SIZE=50.
+  ...Array.from({ length: 55 }, (_, index) => ({
+    id: 5 + index,
+    system_description: 1,
+    scenario_id: `filler_${String(5 + index).padStart(2, '0')}`,
+    ...CARD_BLANKS,
+    narrative: `Filler narrative ${5 + index}`,
+    intended_hcvs: [],
+    abox: null,
+    card: CARD_BLANKS,
+    origin: 'manual',
+    is_editable: true,
+    order: 1,
+    created_by: 1,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    _variant: null,
+    _pipelineRunId: null,
+    _generationRunId: null,
+  })),
 ];
 
 const PHASE_RUNS = {
@@ -85,11 +125,17 @@ beforeEach(() => {
   resetFixtures();
 
   server.use(
+    // Built through the shared `paginate` (test/mockApi.js), not a
+    // single-page envelope - `useSystemDescriptions`/`useScenarios` now
+    // fetch every page (task 10.1), and this handler's own >50-row filler
+    // fixture above is what gives that something real to prove against.
     http.get('/api/system-descriptions/', ({ request }) => {
       const url = new URL(request.url);
-      return HttpResponse.json(paginated(applyFilters(systems, url).map(toWire)));
+      return HttpResponse.json(paginate(applyFilters(systems, url).map(toWire), request));
     }),
     http.patch('/api/system-descriptions/:id/', async ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const id = Number(params.id);
       const body = await request.json();
       const row = systems.find((system) => system.id === id);
@@ -98,9 +144,11 @@ beforeEach(() => {
     }),
     http.get('/api/scenarios/', ({ request }) => {
       const url = new URL(request.url);
-      return HttpResponse.json(paginated(applyFilters(scenarios, url).map(toWire)));
+      return HttpResponse.json(paginate(applyFilters(scenarios, url).map(toWire), request));
     }),
     http.patch('/api/scenarios/:id/', async ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
       const id = Number(params.id);
       const body = await request.json();
       const row = scenarios.find((scenario) => scenario.id === id);
@@ -245,5 +293,15 @@ describe('Corpus', () => {
 
     expect(screen.queryByText('Generated narrative A')).not.toBeInTheDocument();
     expect(screen.queryByText('Generated narrative B')).not.toBeInTheDocument();
+  });
+
+  it('fetches every page of the unfiltered corpus, not just the first 50 (fails if only page 1 is read)', async () => {
+    renderApp({ initialEntries: ['/corpus'] });
+
+    // 60 system-description rows and 59 scenario rows total - one page (50)
+    // could never show either "last" row below.
+    await screen.findByText('Seed system');
+    expect(await screen.findByText('Filler system 60')).toBeInTheDocument();
+    expect(await screen.findByText('Filler narrative 59')).toBeInTheDocument();
   });
 });

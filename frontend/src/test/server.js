@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
+import { NOT_AUTHENTICATED_BODY, PERMISSION_DENIED_BODY, paginate, requireCsrf } from './mockApi';
 
 // Response shapes here mirror backend/core/serializers.py's UserSerializer
 // (id, email, name, is_staff, must_change_password) and the actual status
@@ -12,17 +13,12 @@ import { setupServer } from 'msw/node';
 //   - a bad login is a whole-serializer ValidationError, which DRF reports
 //     as {"non_field_errors": [...]}, per LoginSerializer.validate() in
 //     backend/core/serializers.py.
-export const NOT_AUTHENTICATED_BODY = {
-  detail: 'Authentication credentials were not provided.',
-};
-
-// A non-staff user hitting a staff-only endpoint (IsAdminUser) also gets a
-// 403, but with THIS detail, not the "not authenticated" one above - real
-// permission denial, distinct from a session that never existed. See
-// client.test.js's "leaves a non-auth 403 (real permission denial) alone".
-const PERMISSION_DENIED_BODY = {
-  detail: 'You do not have permission to perform this action.',
-};
+// NOT_AUTHENTICATED_BODY/PERMISSION_DENIED_BODY now live in ./mockApi (the
+// one place every test file's CSRF/staff mock guards read them from too,
+// so this file and every screen test always agree on the exact wording);
+// re-exported here unchanged so anything already importing them from
+// `test/server` keeps working.
+export { NOT_AUTHENTICATED_BODY };
 
 const SEED_USERS = {
   'researcher@example.com': {
@@ -72,19 +68,25 @@ function toUserResponse(user) {
   return rest;
 }
 
-function currentUser() {
+// Exported so a screen test's OWN write handlers (Corpus.test.jsx,
+// PromptEditor.test.jsx, etc.) can build an accurate `requireStaff`/
+// `requireAuth` guard (test/mockApi.js) off the CURRENT logged-in user's
+// real `is_staff`, rather than each file hardcoding "admin@example.com is
+// staff" as a second, separately-maintained fact.
+export function currentUser() {
   return authState.currentUserEmail ? users[authState.currentUserEmail] : null;
 }
 
-// Every list endpoint in the real API returns this exact envelope (spec
-// §9) - {count, next, previous, results} - never a bare array. `next`/
-// `previous` stay null here: every fixture list below is small enough to
-// fit on one page (the real PAGE_SIZE is 50), so there is nothing to
-// paginate to, which is itself a faithful single-page response, not a
-// shortcut around the shape.
-function paginated(results) {
-  return { count: results.length, next: null, previous: null, results };
-}
+// Every default list handler below (taxonomies, experiments, pipeline
+// runs) builds its response through `paginate` (./mockApi) - DRF's real
+// PageNumberPagination shape, honouring `?page=`. These fixtures are small
+// today (they stay under PAGE_SIZE=50), so `paginate` returns the same
+// single-page envelope a hand-rolled `{count, next: null, previous: null,
+// results}` would - but using the real implementation here too means this
+// default handler stays correct even if a fixture ever grows past one
+// page, rather than only the bespoke handlers a screen test installs via
+// `server.use()` (see e.g. Corpus.test.jsx/Labels.test.jsx) being trusted
+// to get pagination right.
 
 // ---------------------------------------------------------------------
 // AppSettings (backend/core/models.py / core/keys.py). Mirrors
@@ -256,10 +258,15 @@ export const handlers = [
     return HttpResponse.json(toUserResponse(user));
   }),
 
-  http.post('/api/auth/logout/', () => {
+  http.post('/api/auth/logout/', ({ request }) => {
     if (!currentUser()) {
       return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
     }
+    // Logout is the exact case the real backend test cited above (spec:
+    // "an unsafe request on a real session needs a CSRF token") exercises -
+    // authenticated, unsafe, and CSRF-checked.
+    const csrfRefusal = requireCsrf(request);
+    if (csrfRefusal) return csrfRefusal;
     authState.currentUserEmail = null;
     return new HttpResponse(null, { status: 204 });
   }),
@@ -269,6 +276,8 @@ export const handlers = [
     if (!user) {
       return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
     }
+    const csrfRefusal = requireCsrf(request);
+    if (csrfRefusal) return csrfRefusal;
     const body = await request.json();
     if (body.current_password !== user.password) {
       return HttpResponse.json({ current_password: ['Current password is incorrect.'] }, { status: 400 });
@@ -290,6 +299,8 @@ export const handlers = [
     const user = currentUser();
     if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
     if (!user.is_staff) return HttpResponse.json(PERMISSION_DENIED_BODY, { status: 403 });
+    const csrfRefusal = requireCsrf(request);
+    if (csrfRefusal) return csrfRefusal;
     const body = await request.json();
     if (typeof body.openrouter_key === 'string') {
       appSettings.storedKey = body.openrouter_key;
@@ -300,31 +311,42 @@ export const handlers = [
 
   // Read: any authenticated user (backend/taxonomy/views.py's
   // TaxonomyViewSet is a ReadOnlyModelViewSet, no extra permission class).
-  http.get('/api/taxonomies/', () => {
+  // Built through `paginate` (./mockApi), not the single-page `paginated`:
+  // these fixtures are small today, but a caller (Labels.jsx,
+  // PromptEditor.jsx) that ever paged past one page must see this handler
+  // actually honour `?page=`, the same as every other list endpoint here.
+  http.get('/api/taxonomies/', ({ request }) => {
     const user = currentUser();
     if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
-    return HttpResponse.json(paginated(TAXONOMIES_SEED));
+    return HttpResponse.json(paginate(TAXONOMIES_SEED, request));
   }),
 
-  http.get('/api/taxonomies/:id/hcvs/', ({ params }) => {
+  http.get('/api/taxonomies/:id/hcvs/', ({ request, params }) => {
     const user = currentUser();
     if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
     const hcvs = HCVS_BY_TAXONOMY[Number(params.id)] ?? [];
-    return HttpResponse.json(paginated(hcvs));
+    return HttpResponse.json(paginate(hcvs, request));
   }),
 
   // Read: any authenticated user (backend/pipeline/views.py's
   // ExperimentViewSet/PipelineRunViewSet use StaffWrites - reads are open).
-  http.get('/api/experiments/', () => {
+  http.get('/api/experiments/', ({ request }) => {
     const user = currentUser();
     if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
-    return HttpResponse.json(paginated(experiments));
+    return HttpResponse.json(paginate(experiments, request));
   }),
 
-  http.get('/api/pipeline-runs/', () => {
+  // usePipelineRuns (api/queries.js) now fetches every page - it backs both
+  // the Dashboard's run list AND the poll-gate decision of when to stop
+  // polling (task 10.1: with n_repetitions allowing up to 100, a run list
+  // truncated at PAGE_SIZE=50 could report "nothing left running" while
+  // repetitions 51-100 are still queued/running). `paginate` here means
+  // this default handler is itself correct if a test's own fixture ever
+  // grows past 50 rows, not only the bespoke ones screen tests install.
+  http.get('/api/pipeline-runs/', ({ request }) => {
     const user = currentUser();
     if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
-    return HttpResponse.json(paginated(pipelineRuns));
+    return HttpResponse.json(paginate(pipelineRuns, request));
   }),
 ];
 

@@ -8,6 +8,21 @@
 //   - a permission/auth failure comes back as {"detail": "..."}
 // Task 1 has no per-field form to route these onto yet (that lands in Task
 // 6's experiment builder); until then, surface the first message found.
+// The keys a DRF error body can carry that are NOT about one specific
+// field - `detail` (a permission/auth failure, or a plain-string
+// ValidationError DRF coerced into `{"detail": ...}`), `non_field_errors`
+// (a whole-serializer ValidationError, e.g. Experiment.clean() raising
+// against no field in particular), and `code` (the machine-readable
+// 409/503 marker this API attaches - see pipeline/views.py's
+// ConflictCodeMixin/_service_unavailable). Everything else in the body is
+// a field name from the serializer that was actually being validated.
+// Declared before `extractErrorMessage` below (not just `extractFieldErrors`
+// further down) so that function can also skip these when scanning for a
+// field-level error to show, rather than ever reading `code`'s own short
+// machine token (e.g. "missing_api_key") as if it were human-readable
+// error text.
+const NON_FIELD_KEYS = new Set(['detail', 'non_field_errors', 'code']);
+
 export function extractErrorMessage(error, fallback = 'Something went wrong. Please try again.') {
   const data = error?.response?.data;
   if (!data) return error?.message || fallback;
@@ -31,22 +46,28 @@ export function extractErrorMessage(error, fallback = 'Something went wrong. Ple
   if (Array.isArray(data.non_field_errors) && data.non_field_errors.length > 0) {
     return data.non_field_errors[0];
   }
-  const firstFieldError = Object.values(data).find(
-    (value) => Array.isArray(value) && value.length > 0 && typeof value[0] === 'string'
-  );
-  if (firstFieldError) return firstFieldError[0];
+  // A field-level ValidationError raised DIRECTLY (not through a
+  // serializer) with a bare string value - e.g. `prompts/views.py::
+  // PromptPreviewMixin._resolve_template` raising
+  // `ValidationError({"user_prompt": "Previewing a template with no id
+  // requires user_prompt."})`, or `pipeline/views.py::_export_format`
+  // raising `ValidationError({"format": "Use format=json or format=csv."})`.
+  // DRF's `ValidationError.__init__` only coerces a LIST value's own
+  // entries into `ErrorDetail`s; a bare string value is coerced into a
+  // single `ErrorDetail` (a str subclass), never wrapped in a list - so the
+  // response body is `{"user_prompt": "..."}`, not `{"user_prompt":
+  // ["..."]}`. The array-shaped check below alone missed this entirely and
+  // fell through to the generic fallback, hiding the server's real
+  // refusal - `extractFieldErrors` (below) already handled this shape
+  // correctly via `joinMessages`; this is the same fix for the single
+  // human-readable string this function returns.
+  for (const [key, value] of Object.entries(data)) {
+    if (NON_FIELD_KEYS.has(key)) continue;
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') return value[0];
+    if (typeof value === 'string' && value) return value;
+  }
   return fallback;
 }
-
-// The keys a DRF error body can carry that are NOT about one specific
-// field - `detail` (a permission/auth failure, or a plain-string
-// ValidationError DRF coerced into `{"detail": ...}`), `non_field_errors`
-// (a whole-serializer ValidationError, e.g. Experiment.clean() raising
-// against no field in particular), and `code` (the machine-readable
-// 409/503 marker this API attaches - see pipeline/views.py's
-// ConflictCodeMixin/_service_unavailable). Everything else in the body is
-// a field name from the serializer that was actually being validated.
-const NON_FIELD_KEYS = new Set(['detail', 'non_field_errors', 'code']);
 
 function joinMessages(value) {
   if (Array.isArray(value)) {
