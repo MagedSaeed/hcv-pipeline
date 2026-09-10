@@ -840,6 +840,14 @@ class LabelViewSet(viewsets.ReadOnlyModelViewSet):
         for name, field in (
             ("scenario", "scenario_id"),
             ("phase_run", "phase_run_id"),
+            # `run` is the REPETITION (`PipelineRun`), reached by traversing
+            # `phase_run__pipeline_run_id` — same shape as
+            # `corpus.views.SystemDescriptionViewSet`/`ScenarioViewSet`'s own
+            # `?run=`. `is not None`, not truthiness: `run=0` is a real (if
+            # nonexistent) id and must filter to nothing, not fall through to
+            # "no filter was given" — that exact bug was fixed here once
+            # already (see `core.params.integer_param`'s docstring).
+            ("run", "phase_run__pipeline_run_id"),
         ):
             if (value := integer_param(params, name)) is not None:
                 queryset = queryset.filter(**{field: value})
@@ -860,4 +868,10 @@ class LabelViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset = queryset.filter(hcv__hcv_id=hcv)
         if source := params.get("source"):
             queryset = queryset.filter(source=source)
+        # `?variant=` — via `phase_run__variant`; same shape as
+        # `corpus.views.SystemDescriptionViewSet`/`ScenarioViewSet`'s own
+        # `?variant=` (blank/absent means unfiltered; an unknown variant is
+        # simply an empty result, never a 500).
+        if variant := params.get("variant"):
+            queryset = queryset.filter(phase_run__variant=variant)
         return queryset

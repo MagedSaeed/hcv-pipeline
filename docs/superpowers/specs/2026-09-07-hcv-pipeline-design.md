@@ -731,6 +731,7 @@ POST   /api/phase-runs/{id}/retry/            staff; phase 3 (labelling) only
 GET    /api/phase-runs/{id}/calls/            LLMCall inspector
 
 GET    /api/labels/                           ?scenario=&phase_run=&hcv=&source=
+                                              &run=&variant=
 ```
 
 Every list endpoint above returns a paginated envelope
