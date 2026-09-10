@@ -319,6 +319,15 @@ export function useUpdateScenario() {
 // runs"). Reading any authenticated user can do - PhaseRunViewSet is
 // ReadOnlyModelViewSet plus two staff-only exceptions that don't include
 // retrieve (pipeline/views.py).
+//
+// `refetchInterval` reuses the exact same "stop once terminal" decision
+// every other run-status poll in this app uses (`runsRefetchInterval`,
+// above) - wrapping the single fetched row in a one-element array is all
+// that function needs, so there is still only ONE place that decides when
+// polling stops. Corpus (task 4) only ever looks at rows that are already
+// terminal, so this is a no-op there; the iterate panel (task 5) is what
+// actually needs a phase run's status to keep moving while a worker runs
+// it, without polling forever once it lands on completed/failed/cancelled.
 export function usePhaseRun(id, options = {}) {
   return useQuery({
     queryKey: queryKeys.phaseRuns.detail(id),
@@ -327,6 +336,100 @@ export function usePhaseRun(id, options = {}) {
       return data;
     },
     enabled: id != null,
+    refetchInterval: (query) => runsRefetchInterval(query.state.data ? [query.state.data] : undefined),
+    ...options,
+  });
+}
+
+// -----------------------------------------------------------------------
+// Prompt templates (prompts.PromptTemplate) - versioned, phase 2 or 3.
+// Read: any authenticated user; create/update/preview: staff only
+// (prompts.views.StaffWrites). `PATCH /api/prompts/{id}/` never mutates the
+// addressed row - the view creates and returns the NEXT version instead
+// (201, spec §5.3/§9) - so every caller of `useUpdatePromptTemplate` must
+// re-point whatever it considers "the current template" at the response's
+// own `id`, never assume the id it patched is still the live one.
+export function usePromptTemplates(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.prompts.list(params),
+    queryFn: () => fetchList('/prompts/', params),
+    ...options,
+  });
+}
+
+export function useCreatePromptTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/prompts/', payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.prompts.all });
+    },
+  });
+}
+
+export function useUpdatePromptTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/prompts/${id}/`, payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.prompts.all });
+    },
+  });
+}
+
+// `POST /api/prompts/{id}/preview/` renders exactly what a real run would
+// send - the SAME renderer, against the addressed template's own PERSISTED
+// `system_prompt`/`user_prompt`/`output_schema` (spec §9: preview "does not
+// diverge from what a real run sends"). It carries no way to render
+// not-yet-saved text - see PromptEditor.jsx's own comment on `handleSave`
+// for how the editor works with that constraint rather than inventing a
+// client-side renderer to paper over it. A 400 here (StrictUndefined's
+// `PromptRenderError`, or a TaxonomyLeak) is not a mutation failure to
+// recover from - it is the guarantee working - so this deliberately has no
+// `onError`/retry handling beyond what the caller does with the rejected
+// promise.
+export function usePreviewPromptTemplate() {
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.post(`/prompts/${id}/preview/`, payload);
+      return data;
+    },
+  });
+}
+
+// -----------------------------------------------------------------------
+// Iterate mode - `POST /api/phase-runs/` (staff only): one phase, ad-hoc,
+// outside any Experiment/PipelineRun (spec §9/§5.4). Deliberately never
+// archived and never in an export bundle - PromptEditor.jsx's iterate panel
+// is the one place in this app that says so, every time it is shown, not
+// only after a run finishes.
+export function useCreatePhaseRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/phase-runs/', payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.phaseRuns.all });
+    },
+  });
+}
+
+// Every LLMCall archived under one phase run, in full (LLMCallSerializer -
+// rendered_system_prompt/rendered_user_prompt/raw_response, untruncated).
+// Paginated like every other list endpoint; callers read `.results`.
+export function usePhaseRunCalls(phaseRunId, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.phaseRuns.detailSub(phaseRunId, 'calls'),
+    queryFn: () => fetchList(`/phase-runs/${phaseRunId}/calls/`),
+    enabled: phaseRunId != null,
     ...options,
   });
 }
