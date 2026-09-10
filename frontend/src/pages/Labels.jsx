@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
-  useLabelsForPhaseRuns,
-  usePhaseRuns,
+  useAllLabels,
   useScenarios,
   useSystemDescriptions,
   useTaxonomies,
@@ -89,13 +88,16 @@ function LabelCell({ label, cellLabel, testId }) {
 // row index.
 function VariantMatrix({ variant, runId, hcvFilter, hcvs, systemTitleById }) {
   const scenariosQuery = useScenarios({ variant, run: runId });
-  // `/api/labels/` has no `?run=`/`?variant=` of its own (spec §9) - both
-  // live one hop away, on the labelling PhaseRun. Resolve THIS variant's
-  // phase-3 PhaseRun(s) for this run first, then fan out `?phase_run=`
-  // label requests across whatever comes back (ordinarily exactly one).
-  const phaseRunsQuery = usePhaseRuns({ pipeline_run: runId, phase: 3, variant });
-  const phaseRunIds = (phaseRunsQuery.data?.results ?? []).map((phaseRunRow) => phaseRunRow.id);
-  const labelsResult = useLabelsForPhaseRuns(phaseRunIds, hcvFilter ? { hcv: hcvFilter } : {});
+  // `/api/labels/` filters directly by `?run=&variant=` now (the labelling
+  // PhaseRun's own `pipeline_run`/`variant`, resolved server-side -
+  // pipeline/views.py::LabelViewSet.get_queryset) - no more resolving this
+  // variant's phase-3 PhaseRun id(s) through `/api/phase-runs/` first and
+  // fanning out one `?phase_run=` label request per id. `useAllLabels`,
+  // not `useLabels`: a single repetition can label far more than one page
+  // (PAGE_SIZE=50) of scenario x HCV pairs, and a matrix built from only
+  // the first page would render a labelled cell as blank - see that
+  // hook's own comment in queries.js.
+  const labelsQuery = useAllLabels({ run: runId, variant, ...(hcvFilter ? { hcv: hcvFilter } : {}) });
 
   const scenarios = scenariosQuery.data?.results ?? [];
   // The HCV filter narrows which COLUMN is shown, never which columns
@@ -103,15 +105,16 @@ function VariantMatrix({ variant, runId, hcvFilter, hcvs, systemTitleById }) {
   // truth for the column set, regardless of which HCVs happen to have a
   // label in this variant. This is the one line responsible for "an HCV
   // with no labels in a variant is visibly empty rather than absent": it
-  // is never filtered down to only the HCVs `labelsResult.results`
-  // happens to mention.
+  // is never filtered down to only the HCVs the fetched labels happen to
+  // mention.
   const columns = hcvFilter ? hcvs.filter((hcv) => hcv.hcv_id === hcvFilter) : hcvs;
 
-  const labelByKey = new Map(labelsResult.results.map((label) => [`${label.scenario}:${label.hcv_id}`, label]));
+  const labels = labelsQuery.data?.results ?? [];
+  const labelByKey = new Map(labels.map((label) => [`${label.scenario}:${label.hcv_id}`, label]));
 
-  const isLoading = scenariosQuery.isLoading || phaseRunsQuery.isLoading || labelsResult.isLoading;
-  const queryError = scenariosQuery.error || phaseRunsQuery.error || labelsResult.error;
-  const isError = scenariosQuery.isError || phaseRunsQuery.isError || labelsResult.isError;
+  const isLoading = scenariosQuery.isLoading || labelsQuery.isLoading;
+  const queryError = scenariosQuery.error || labelsQuery.error;
+  const isError = scenariosQuery.isError || labelsQuery.isError;
 
   return (
     <section aria-labelledby={`variant-${variant}-heading`} data-testid={`variant-${variant}-matrix`} className="space-y-3">
@@ -292,10 +295,19 @@ export default function Labels() {
       {hcvsQuery.isError && <ErrorBanner error={hcvsQuery.error} />}
       {systemsQuery.isError && <ErrorBanner error={systemsQuery.error} />}
 
+      {/* A run stays required even though `/api/labels/` can now filter by
+          `?variant=` alone. This is not about bounding a request fan-out
+          anymore (there is none) - it is that a scenario x HCV matrix is a
+          read of ONE repetition's variant A vs variant B. Drop the run
+          scope and a single "variant A" matrix would mix scenarios (and
+          possibly taxonomy versions) from every repetition ever run into
+          one table - not a comparison a researcher could draw anything
+          from, and a real risk of paging through thousands of rows for no
+          reason. */}
       {runId == null && (
         <EmptyState
           title="Select a run"
-          message="Enter a repetition (run) id above and click Apply to see its labels. Labels have no run/variant filter of their own on the API, so this screen resolves them through that run's own phase-3 runs."
+          message="Enter a repetition (run) id above and click Apply to see its labels. A scenario x HCV matrix reads one repetition's variant A against its variant B; without a run to scope it, the matrix would mix scenarios from every repetition ever run into one table."
         />
       )}
 

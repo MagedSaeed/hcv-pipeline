@@ -9,6 +9,29 @@ function paginated(results) {
   return { count: results.length, next: null, previous: null, results };
 }
 
+// `/api/labels/` is the one endpoint this screen actually pages through
+// (`fetchAllPages` in api/queries.js) - real PAGE_SIZE is 50, and a single
+// repetition's phase-3 run can label far more than that. The other
+// endpoints below keep using the single-page `paginated()` helper above
+// (every fixture fits on one page, matching the house style every other
+// screen's tests already use) - this one alone slices into real pages with
+// a real `next` cursor, so a client that reads only page 1 has something to
+// actually fail against.
+const LABELS_PAGE_SIZE = 50;
+
+function paginateLabels(rows, url) {
+  const page = Number(url.searchParams.get('page') || '1');
+  const start = (page - 1) * LABELS_PAGE_SIZE;
+  const results = rows.slice(start, start + LABELS_PAGE_SIZE);
+  const hasNext = start + LABELS_PAGE_SIZE < rows.length;
+  return {
+    count: rows.length,
+    next: hasNext ? `http://localhost/api/labels/?page=${page + 1}` : null,
+    previous: page > 1 ? `http://localhost/api/labels/?page=${page - 1}` : null,
+    results,
+  };
+}
+
 // A deliberately small taxonomy (3 HCVs, not the real 21) - Labels.jsx must
 // treat this as "the whole taxonomy" and render every one of them as a
 // column regardless of whether any label landed on it, so a small, fully
@@ -47,6 +70,22 @@ function scenarioRow(overrides) {
   };
 }
 
+// Run 601 / variant A: 17 scenarios feeding PAGINATION_LABELS below (17 x 3
+// HCVs = 51 labels - one past PAGE_SIZE=50). Ordered scenario-major,
+// HCV-minor there, so the 51st (last) label - scenario page_17's HCV-03 -
+// lands on page 2 once the mock slices by 50, and is only visible to a
+// client that actually followed `next` there. Declared before SCENARIOS so
+// it can be spread straight into it.
+const PAGINATION_SCENARIOS = Array.from({ length: 17 }, (_, index) =>
+  scenarioRow({
+    id: 8001 + index,
+    system_description: 11,
+    scenario_id: `page_${String(index + 1).padStart(2, '0')}`,
+    _variant: 'A',
+    _pipelineRunId: 601,
+  })
+);
+
 // Run 101 variant A has TWO scenarios; run 101 variant B has THREE - a
 // deliberate mismatch. If Labels.jsx ever tried to zip the two variants'
 // rows together by index (the exact merged view spec §10 forbids), B's
@@ -61,13 +100,43 @@ const SCENARIOS = [
   scenarioRow({ id: 2003, system_description: 12, scenario_id: 'sc_03', _variant: 'B', _pipelineRunId: 101 }),
   // A decoy from a different run - must never appear once `run=101` is applied.
   scenarioRow({ id: 3001, system_description: 13, scenario_id: 'sc_01', _variant: 'A', _pipelineRunId: 102 }),
+  // Run 601's own 17 pagination-fixture scenarios (see PAGINATION_SCENARIOS above).
+  ...PAGINATION_SCENARIOS,
 ];
 
 const PHASE_RUNS = [
   { id: 301, pipeline_run: 101, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 201, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 2, total: 2, failed: 0, percent: 100 }, total_children: 2, completed_children: 2, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
   { id: 302, pipeline_run: 101, phase: 3, variant: 'B', model: 'm', temperature: 0, prompt_template: 2, taxonomy: 9, source_phase_run: 202, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 3, total: 3, failed: 0, percent: 100 }, total_children: 3, completed_children: 3, failed_children: 0, leak_scan_ran: false, guarded_by: [], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
   { id: 303, pipeline_run: 102, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 204, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+  // Iterate-mode (ad-hoc): `pipeline_run: null`, like an operator tuning a
+  // labelling prompt outside any repetition. `label_adhoc` below sits on
+  // this phase run - no value of `?run=` may ever surface it.
+  { id: 399, pipeline_run: null, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 205, experiment: 1, n_systems: 1, n_scenarios_per_system: 1, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+  // Run 601 / variant A - the pagination fixture's own phase run (see
+  // PAGINATION_LABELS below).
+  { id: 701, pipeline_run: 601, phase: 3, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 9, source_phase_run: 206, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 17, total: 17, failed: 0, percent: 100 }, total_children: 17, completed_children: 17, failed_children: 0, leak_scan_ran: true, guarded_by: [9], started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
 ];
+
+// Feeds run 601 / variant A's phase run (701) - see PAGINATION_SCENARIOS
+// above. 17 scenarios x 3 HCVs = 51 labels - one past PAGE_SIZE (50).
+// Declared before LABELS so it can be spread straight into it.
+const PAGINATION_LABELS = PAGINATION_SCENARIOS.flatMap((scenario, sIndex) =>
+  HCVS.map((hcv, hIndex) => ({
+    id: 80000 + sIndex * 10 + hIndex,
+    phase_run: 701,
+    scenario: scenario.id,
+    scenario_id: scenario.scenario_id,
+    hcv: hcv.id,
+    hcv_id: hcv.hcv_id,
+    hcv_name: hcv.name,
+    evidence: `Pagination evidence ${scenario.scenario_id} ${hcv.hcv_id}.`,
+    rationale: `Pagination rationale ${scenario.scenario_id} ${hcv.hcv_id}.`,
+    source: 'llm',
+    llm_call: 90000 + sIndex * 10 + hIndex,
+    created_by: null,
+    created_at: '2026-01-01T00:00:00Z',
+  }))
+);
 
 // HCV-02 gets NO label anywhere in run 101 - on purpose, for both variants -
 // the exact "an HCV with no labels in a variant" case spec §10 requires to
@@ -79,6 +148,25 @@ const LABELS = [
   { id: 9102, phase_run: 302, scenario: 2003, scenario_id: 'sc_03', hcv: 903, hcv_id: 'HCV-03', hcv_name: 'Displacement risk', evidence: 'Variant B sc_03 evidence text.', rationale: 'Variant B sc_03 rationale text.', source: 'llm', llm_call: 5102, created_by: null, created_at: '2026-01-01T00:00:00Z' },
   // A decoy from run 102's phase run (303) - must never appear once `run=101` is applied.
   { id: 9201, phase_run: 303, scenario: 3001, scenario_id: 'sc_01', hcv: 901, hcv_id: 'HCV-01', hcv_name: 'Physical exposure', evidence: 'Run 102 decoy evidence.', rationale: 'Run 102 decoy rationale.', source: 'llm', llm_call: 5201, created_by: null, created_at: '2026-01-01T00:00:00Z' },
+  // Ad-hoc (phase_run 399, pipeline_run: null) - unreachable via ANY
+  // `?run=`. Doubles as a canary for the labels `?run=` filter itself:
+  // it sits on scenario 1001 / HCV-02 - a cell the "visibly empty" test
+  // below asserts stays empty for run 101 - so if `?run=` were ever
+  // dropped from the labels request, this ad-hoc row (querying by
+  // `?variant=A` alone would still include it) would leak into that cell
+  // and the assertion would fail.
+  { id: 9301, phase_run: 399, scenario: 1001, scenario_id: 'sc_01', hcv: 902, hcv_id: 'HCV-02', hcv_name: 'Social isolation', evidence: 'Ad-hoc iterate-mode evidence.', rationale: 'Ad-hoc iterate-mode rationale.', source: 'llm', llm_call: 5301, created_by: null, created_at: '2026-01-01T00:00:00Z' },
+  // Deliberately cross-wired: attached to phase_run 302 (run 101, variant
+  // B) but pointed at scenario 1002, which belongs to variant A. Nothing
+  // in the DB schema forbids this (only app-level convention does), and
+  // it exists purely as a canary for the labels `?variant=` filter: under
+  // the correct `?run=101&variant=A` query this is excluded (wrong
+  // variant), so the "visibly empty" test's scenario-1002/HCV-02 check
+  // stays green; drop `?variant=` from that request (while keeping
+  // `?run=`) and this row leaks straight into that same cell.
+  { id: 9302, phase_run: 302, scenario: 1002, scenario_id: 'sc_02', hcv: 902, hcv_id: 'HCV-02', hcv_name: 'Social isolation', evidence: 'Cross-variant decoy evidence.', rationale: 'Cross-variant decoy rationale.', source: 'llm', llm_call: 5302, created_by: null, created_at: '2026-01-01T00:00:00Z' },
+  // Run 601's own 51 pagination-fixture labels (see PAGINATION_LABELS above).
+  ...PAGINATION_LABELS,
 ];
 
 function toScenarioWire(row) {
@@ -107,6 +195,17 @@ function applyPhaseRunFilters(rows, url) {
   return result;
 }
 
+function phaseRunById(id) {
+  return PHASE_RUNS.find((phaseRun) => phaseRun.id === id);
+}
+
+// Mirrors pipeline/views.py::LabelViewSet.get_queryset exactly: `?run=` and
+// `?variant=` are NOT fields on Label itself - both reach through the
+// labelling PhaseRun that produced the row (`phase_run__pipeline_run_id` /
+// `phase_run__variant`). An ad-hoc PhaseRun's `pipeline_run` is `null`, so
+// `String(phaseRunRow.pipeline_run) === run` is never true for it no matter
+// what `run` is - `?phase_run=` (already handled below) is its only route in,
+// same as the real API.
 function applyLabelFilters(rows, url) {
   let result = rows;
   const phaseRun = url.searchParams.get('phase_run');
@@ -119,6 +218,17 @@ function applyLabelFilters(rows, url) {
   if (scenario !== null && scenario !== '') result = result.filter((row) => String(row.scenario) === scenario);
   const source = url.searchParams.get('source');
   if (source) result = result.filter((row) => row.source === source);
+  const run = url.searchParams.get('run');
+  if (run !== null && run !== '') {
+    result = result.filter((row) => {
+      const phaseRunRow = phaseRunById(row.phase_run);
+      return phaseRunRow != null && phaseRunRow.pipeline_run != null && String(phaseRunRow.pipeline_run) === run;
+    });
+  }
+  const variant = url.searchParams.get('variant');
+  if (variant) {
+    result = result.filter((row) => phaseRunById(row.phase_run)?.variant === variant);
+  }
   return result;
 }
 
@@ -142,7 +252,15 @@ beforeEach(() => {
     }),
     http.get('/api/labels/', ({ request }) => {
       const url = new URL(request.url);
-      return HttpResponse.json(paginated(applyLabelFilters(LABELS, url)));
+      // A non-integer `?run=` is a 400 on the real API (`core.params.
+      // integer_param`), not a silently-ignored filter - matched here so a
+      // client that ever sent a malformed value would see the real failure
+      // mode in a test, not a mock that is more permissive than the API.
+      const run = url.searchParams.get('run');
+      if (run !== null && run !== '' && Number.isNaN(Number(run))) {
+        return HttpResponse.json({ run: ['A valid integer is required.'] }, { status: 400 });
+      }
+      return HttpResponse.json(paginateLabels(applyLabelFilters(LABELS, url), url));
     })
   );
 });
@@ -323,5 +441,29 @@ describe('Labels', () => {
     expect(text).not.toMatch(/\d+\s+scenarios?\b/i);
     expect(text).not.toMatch(/\d+\s+labels?\b/i);
     expect(text).not.toMatch(/\d+\s+hcvs?\b/i);
+  });
+
+  it('fetches every page of a variant\'s labels, not just the first 50 (fails if only page 1 is read)', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/labels'] });
+
+    // Run 601 / variant A has 51 labels (PAGINATION_LABELS) - one past the
+    // mock's own PAGE_SIZE of 50. The very last one, scenario page_17's
+    // HCV-03, is only ever returned on page 2.
+    await applyRunFilter(user, { run: 601, variant: 'A' });
+    const matrix = await screen.findByTestId('variant-A-matrix');
+
+    // Every one of the 17 scenario rows renders regardless (scenarios are
+    // not paginated in this fixture) - the row existing is not what proves
+    // pagination was followed; the CELL being filled is.
+    expect(within(matrix).getAllByRole('row')).toHaveLength(1 + 17);
+
+    const lastScenario = PAGINATION_SCENARIOS[PAGINATION_SCENARIOS.length - 1];
+    const cell = within(matrix).getByTestId(`cell-${lastScenario.id}-HCV-03`);
+    const marker = within(cell).getByRole('button');
+
+    await user.hover(marker);
+    const tooltip = await screen.findByRole('tooltip');
+    expect(within(tooltip).getByText(/Pagination evidence page_17 HCV-03/)).toBeInTheDocument();
   });
 });

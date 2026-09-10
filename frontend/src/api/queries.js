@@ -1,4 +1,4 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from './client';
 
 // -----------------------------------------------------------------------
@@ -110,6 +110,37 @@ export function runsRefetchInterval(runs) {
 async function fetchList(url, params) {
   const { data } = await apiClient.get(url, { params });
   return data;
+}
+
+// -----------------------------------------------------------------------
+// A handful of lists can genuinely outgrow one page (`PAGE_SIZE=50`) in a
+// way a caller cannot safely ignore - see `useAllLabels` below for the
+// concrete case. `fetchList` above deliberately stays a single fetch, same
+// as every other list hook in this app (reading only the first page is the
+// house style, and is fine when a screen's own scope keeps results well
+// under 50). `fetchAllPages` is the one place that instead walks DRF's own
+// `next` cursor to exhaustion, re-issuing each page through `apiClient`
+// itself (never the raw absolute/relative URL the server handed back) so
+// its baseURL and interceptors stay in the loop for every page, not only
+// the first.
+function nextPageNumber(next) {
+  if (!next) return null;
+  try {
+    return new URL(next, 'http://placeholder.invalid').searchParams.get('page');
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAllPages(url, params) {
+  const results = [];
+  let page = null;
+  for (;;) {
+    const { data } = await apiClient.get(url, { params: page ? { ...params, page } : params });
+    results.push(...data.results);
+    page = nextPageNumber(data.next);
+    if (!page) return results;
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -620,12 +651,21 @@ export function usePhaseRunCalls(phaseRunId, options = {}) {
 }
 
 // -----------------------------------------------------------------------
-// Labels (pipeline.Label) - `?scenario=&phase_run=&hcv=&source=` only (spec
-// §9). Deliberately no `?run=`/`?variant=` here: neither lives on Label
-// itself - both are one hop away, on the labelling PhaseRun that produced
-// it (`PhaseRun.variant`, `PhaseRun.pipeline_run`). `useLabels` is the
-// plain single-query hook every other resource gets, for a caller that
-// already has one `phase_run` id in hand.
+// Labels (pipeline.Label) - `?scenario=&phase_run=&hcv=&source=&run=
+// &variant=`. `run`/`variant` reach the label through the labelling
+// PhaseRun that produced it (`phase_run__pipeline_run_id`/`phase_run__
+// variant` - pipeline/views.py::LabelViewSet.get_queryset): Label itself
+// carries neither field, but the backend does that hop server-side now, so
+// a caller no longer has to resolve a PhaseRun id first and fan out one
+// `?phase_run=` request per id the way the Labels screen originally had
+// to (see `useAllLabels` below for the hook that replaced that fan-out).
+// `?run=` is the REPETITION (`PipelineRun`) - an ad-hoc iterate-mode
+// PhaseRun (`pipeline_run` null) is deliberately unreachable through it;
+// `?phase_run=` still reaches it directly.
+//
+// `useLabels` is the plain single-PAGE hook every other resource gets -
+// correct for a caller whose own scope (e.g. one known `phase_run`, or
+// `source=` narrowing further) safely stays under `PAGE_SIZE` (50).
 export function useLabels(params = {}, options = {}) {
   return useQuery({
     queryKey: queryKeys.labels.list(params),
@@ -634,32 +674,21 @@ export function useLabels(params = {}, options = {}) {
   });
 }
 
-// The Labels screen (task 8) resolves "run + variant" to the matching
-// phase-3 PhaseRun id(s) FIRST (via `usePhaseRuns`), then needs one
-// `?phase_run=` labels request per id - a count that is 0, 1, or
-// (defensively) more, and only known once that first query has resolved.
-// `useQueries` (not a loop of `useLabels` calls) is what lets the NUMBER of
-// requests vary between renders without breaking the rules of hooks.
-// Returns one flattened array of label rows across every matching phase
-// run, plus combined loading/error state - callers never see the
-// per-phase-run split. Reuses the exact same `queryKeys.labels.list` cache
-// key `useLabels` does (just with `phase_run` folded into its params), so a
-// row fetched here and a row fetched through `useLabels` for the same
-// phase run share one cache entry rather than two.
-export function useLabelsForPhaseRuns(phaseRunIds = [], params = {}) {
-  const queries = useQueries({
-    queries: phaseRunIds.map((phaseRunId) => {
-      const queryParams = { ...params, phase_run: phaseRunId };
-      return {
-        queryKey: queryKeys.labels.list(queryParams),
-        queryFn: () => fetchList('/labels/', queryParams),
-      };
-    }),
+// The Labels screen renders one scenario x HCV matrix PER VARIANT, each
+// scoped to one repetition via `?run=<id>&variant=<A|B>` directly on
+// `/api/labels/` - no more resolving a PhaseRun id through `/api/phase-runs/`
+// first. But a single repetition's phase-3 labelling run can produce far
+// more than one page of labels (at the app's own defaults, 3 systems x 5
+// scenarios x 21 HCVs = 315 - more than six pages of PAGE_SIZE=50), so
+// reading only `useLabels`'s first page here would silently render a "no
+// label" marker for cells that WERE labelled past row 50 - exactly the
+// false negative this screen must never produce. `useAllLabels` walks
+// every page via `fetchAllPages` and returns the complete result set for
+// these params, not just what fit on page one.
+export function useAllLabels(params = {}, options = {}) {
+  return useQuery({
+    queryKey: queryKeys.labels.list(params),
+    queryFn: async () => ({ results: await fetchAllPages('/labels/', params) }),
+    ...options,
   });
-  return {
-    isLoading: queries.some((query) => query.isLoading),
-    isError: queries.some((query) => query.isError),
-    error: queries.find((query) => query.isError)?.error,
-    results: queries.flatMap((query) => query.data?.results ?? []),
-  };
 }
