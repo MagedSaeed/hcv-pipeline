@@ -16,6 +16,14 @@ export const NOT_AUTHENTICATED_BODY = {
   detail: 'Authentication credentials were not provided.',
 };
 
+// A non-staff user hitting a staff-only endpoint (IsAdminUser) also gets a
+// 403, but with THIS detail, not the "not authenticated" one above - real
+// permission denial, distinct from a session that never existed. See
+// client.test.js's "leaves a non-auth 403 (real permission denial) alone".
+const PERMISSION_DENIED_BODY = {
+  detail: 'You do not have permission to perform this action.',
+};
+
 const SEED_USERS = {
   'researcher@example.com': {
     id: 1,
@@ -32,6 +40,14 @@ const SEED_USERS = {
     is_staff: false,
     must_change_password: true,
     password: 'temp-password',
+  },
+  'admin@example.com': {
+    id: 3,
+    email: 'admin@example.com',
+    name: 'Admin',
+    is_staff: true,
+    must_change_password: false,
+    password: 'admin-pass',
   },
 };
 
@@ -58,6 +74,154 @@ function toUserResponse(user) {
 
 function currentUser() {
   return authState.currentUserEmail ? users[authState.currentUserEmail] : null;
+}
+
+// Every list endpoint in the real API returns this exact envelope (spec
+// §9) - {count, next, previous, results} - never a bare array. `next`/
+// `previous` stay null here: every fixture list below is small enough to
+// fit on one page (the real PAGE_SIZE is 50), so there is nothing to
+// paginate to, which is itself a faithful single-page response, not a
+// shortcut around the shape.
+function paginated(results) {
+  return { count: results.length, next: null, previous: null, results };
+}
+
+// ---------------------------------------------------------------------
+// AppSettings (backend/core/models.py / core/keys.py). Mirrors
+// AppSettingsSerializer: `openrouter_key` is write_only (a PATCH never
+// echoes it back), `openrouter_key_masked` is `core.keys.mask_key` - first
+// and last 4 characters, "..." between, or 8 asterisks for anything
+// shorter - and `key_source` is exactly "settings" | "environment" |
+// "none", matching `core.keys.key_source()`'s resolution order (the
+// stored key wins over the environment variable).
+function maskKey(value) {
+  const trimmed = (value || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= 8) return '*'.repeat(8);
+  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+}
+
+const APP_SETTINGS_SEED = {
+  storedKey: '',
+  environmentConfigured: false,
+  updatedAt: '2026-09-01T00:00:00Z',
+};
+
+let appSettings = { ...APP_SETTINGS_SEED };
+
+function appSettingsKeySource() {
+  if (appSettings.storedKey) return 'settings';
+  if (appSettings.environmentConfigured) return 'environment';
+  return 'none';
+}
+
+function appSettingsResponse() {
+  return {
+    openrouter_key_masked: maskKey(appSettings.storedKey),
+    key_source: appSettingsKeySource(),
+    updated_at: appSettings.updatedAt,
+  };
+}
+
+// ---------------------------------------------------------------------
+// Taxonomy (backend/taxonomy/serializers.py). A real HCV-21 import has 21
+// rows per taxonomy version; the fixture below matches that count so a
+// test can assert nothing arbitrarily truncates the list.
+function buildHcvs(taxonomyId, count = 21) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: taxonomyId * 100 + index + 1,
+    hcv_id: `HCV-${String(index + 1).padStart(2, '0')}`,
+    name: `Vulnerability condition ${index + 1}`,
+    definition: `Definition text for HCV ${index + 1}.`,
+    condition_classes: ['physical'],
+    order: index + 1,
+  }));
+}
+
+const TAXONOMIES_SEED = [
+  {
+    id: 1,
+    vocabulary_id: 'hcv-21',
+    version: '1',
+    notes: '',
+    is_active: false,
+    hcv_count: 21,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 2,
+    vocabulary_id: 'hcv-21',
+    version: '2',
+    notes: 'Current release',
+    is_active: true,
+    hcv_count: 21,
+    created_at: '2026-02-01T00:00:00Z',
+  },
+];
+
+const HCVS_BY_TAXONOMY = {
+  1: buildHcvs(1),
+  2: buildHcvs(2),
+};
+
+// ---------------------------------------------------------------------
+// Pipeline (backend/pipeline/serializers.py). Deliberately an ALL-TERMINAL
+// baseline: Login/client tests that incidentally render past Dashboard
+// must not pick up a live poll loop they never asked for. A test that
+// specifically exercises "runs while active, stops once terminal" installs
+// its own handler via `server.use()` instead of relying on this default.
+const EXPERIMENTS_SEED = [
+  {
+    id: 1,
+    name: 'Baseline HCV-21 comparison',
+    description: 'Variant A vs B over the default seed corpus.',
+    taxonomy: 2,
+    phase2_model: 'openai/gpt-4o-mini',
+    phase2_temperature: 0.7,
+    phase2_prompt_a: 1,
+    phase2_prompt_b: 2,
+    phase3_model: 'openai/gpt-4o-mini',
+    phase3_temperature: 0,
+    phase3_prompt: 3,
+    seed_systems: [],
+    fewshots: [],
+    generate_systems: true,
+    generate_scenarios: true,
+    target_system: null,
+    n_systems: 3,
+    n_scenarios_per_system: 5,
+    variants: ['A', 'B'],
+    progress: { done: 32, total: 32, failed: 0, percent: 100 },
+    run_count: 1,
+    created_by: 3,
+    created_at: '2026-03-01T00:00:00Z',
+  },
+];
+
+const PIPELINE_RUNS_SEED = [
+  {
+    id: 1,
+    experiment: 1,
+    repetition_index: 1,
+    status: 'completed',
+    config: {},
+    progress: { done: 32, total: 32, failed: 0, percent: 100 },
+    started_at: '2026-03-01T00:01:00Z',
+    finished_at: '2026-03-01T00:24:00Z',
+  },
+];
+
+let experiments = EXPERIMENTS_SEED.map((experiment) => ({ ...experiment, progress: { ...experiment.progress } }));
+let pipelineRuns = PIPELINE_RUNS_SEED.map((run) => ({ ...run, progress: { ...run.progress } }));
+
+// Resets everything this file added beyond auth (AppSettings, experiments,
+// pipeline runs) back to its seed state. Auth itself stays under
+// `resetAuthState` above, unchanged from task 1, since nothing here needs
+// to touch it.
+export function resetFixtures() {
+  appSettings = { ...APP_SETTINGS_SEED };
+  experiments = EXPERIMENTS_SEED.map((experiment) => ({ ...experiment, progress: { ...experiment.progress } }));
+  pipelineRuns = PIPELINE_RUNS_SEED.map((run) => ({ ...run, progress: { ...run.progress } }));
 }
 
 export const handlers = [
@@ -114,20 +278,53 @@ export const handlers = [
     return HttpResponse.json(toUserResponse(user));
   }),
 
-  // Staff-only; used by tests exercising the response interceptor against a
-  // real, non-auth endpoint. Mirrors backend/core/views.AppSettingsView
-  // (IsAdminUser) closely enough for that purpose: anonymous is 403 with
-  // the same NotAuthenticated-coerced-to-403 body used everywhere else.
+  // Staff only (IsAdminUser) - GET/PATCH backend/core/views.AppSettingsView.
   http.get('/api/settings/', () => {
     const user = currentUser();
-    if (!user || !user.is_staff) {
-      return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    if (!user.is_staff) return HttpResponse.json(PERMISSION_DENIED_BODY, { status: 403 });
+    return HttpResponse.json(appSettingsResponse());
+  }),
+
+  http.patch('/api/settings/', async ({ request }) => {
+    const user = currentUser();
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    if (!user.is_staff) return HttpResponse.json(PERMISSION_DENIED_BODY, { status: 403 });
+    const body = await request.json();
+    if (typeof body.openrouter_key === 'string') {
+      appSettings.storedKey = body.openrouter_key;
     }
-    return HttpResponse.json({
-      openrouter_key_masked: '••••1234',
-      key_source: 'database',
-      updated_at: '2026-09-01T00:00:00Z',
-    });
+    appSettings.updatedAt = new Date().toISOString();
+    return HttpResponse.json(appSettingsResponse());
+  }),
+
+  // Read: any authenticated user (backend/taxonomy/views.py's
+  // TaxonomyViewSet is a ReadOnlyModelViewSet, no extra permission class).
+  http.get('/api/taxonomies/', () => {
+    const user = currentUser();
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    return HttpResponse.json(paginated(TAXONOMIES_SEED));
+  }),
+
+  http.get('/api/taxonomies/:id/hcvs/', ({ params }) => {
+    const user = currentUser();
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    const hcvs = HCVS_BY_TAXONOMY[Number(params.id)] ?? [];
+    return HttpResponse.json(paginated(hcvs));
+  }),
+
+  // Read: any authenticated user (backend/pipeline/views.py's
+  // ExperimentViewSet/PipelineRunViewSet use StaffWrites - reads are open).
+  http.get('/api/experiments/', () => {
+    const user = currentUser();
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    return HttpResponse.json(paginated(experiments));
+  }),
+
+  http.get('/api/pipeline-runs/', () => {
+    const user = currentUser();
+    if (!user) return HttpResponse.json(NOT_AUTHENTICATED_BODY, { status: 403 });
+    return HttpResponse.json(paginated(pipelineRuns));
   }),
 ];
 

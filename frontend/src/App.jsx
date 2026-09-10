@@ -1,9 +1,12 @@
 import { useEffect } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
+import Layout from './components/Layout';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
 import Dashboard from './pages/Dashboard';
+import Taxonomy from './pages/Taxonomy';
+import Settings from './pages/Settings';
 
 // The axios response interceptor (src/api/client.js) has no Router context
 // of its own - it is plain JS, not a component - so on a genuine
@@ -40,13 +43,16 @@ export default function App() {
           }
         />
         <Route
-          path="/dashboard"
           element={
             <ProtectedRoute>
-              <Dashboard />
+              <Layout />
             </ProtectedRoute>
           }
-        />
+        >
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/taxonomy" element={<Taxonomy />} />
+          <Route path="/settings" element={<Settings />} />
+        </Route>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
