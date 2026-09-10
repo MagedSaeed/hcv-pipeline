@@ -108,16 +108,58 @@ class PromptTemplateViewSet(
             template.save(update_fields=["is_active"])
         return Response(self.get_serializer(template).data)
 
+    # The three fields PromptTemplate.COPIED_FIELDS calls "the text" (everything
+    # except phase/name, which a draft preview gets from elsewhere — see
+    # `_resolve_template`). Presence of these in a preview request is what
+    # signals "render a draft", not the stored template's own row.
+    DRAFT_FIELDS = ("system_prompt", "user_prompt", "output_schema")
+
     @action(detail=True, methods=["post"])
     def preview(self, request, pk=None, format=None):
         """Render this template exactly as a run would, and return both strings.
 
+        If the body carries `user_prompt` (optionally alongside `system_prompt`
+        and/or `output_schema`), that DRAFT body is rendered instead of the
+        stored one — this row is then read only for `phase`/`name`, never for
+        its own text, and nothing is ever written: no new version, no
+        mutation, not even on a refused draft. This is what lets the editor
+        validate an in-progress edit before saving it (spec §10) rather than
+        having to save first — creating a version — to find out it was broken.
+
         `format=None`: see `activate` above for why every `@action` needs it.
         """
         template = self.get_object()
+        return self._preview(request, template)
+
+    @action(detail=False, methods=["post"], url_path="preview")
+    def preview_unsaved(self, request, format=None):
+        """Preview a template that has no id yet.
+
+        The other half of "validate before saving": a template being authored
+        for the first time has no persisted row to hang a detail route off,
+        so `preview` above cannot reach it via `get_object()`. The body must
+        supply `phase` and `user_prompt` (`system_prompt`/`output_schema` are
+        optional, defaulting the same way a freshly-built `PromptTemplate`
+        would); everything past that point — context building, `render()`,
+        every isolation guard — is identical to `preview`, via `_preview`
+        below, and nothing is ever persisted here either.
+
+        `format=None`: see `activate` above for why every `@action` needs it.
+        """
+        return self._preview(request, None)
+
+    def _preview(self, request, template):
+        """The one preview implementation. `preview` and `preview_unsaved` are
+        two ways of arriving here — a persisted row, or none at all — but from
+        this point on there is exactly one code path: one `PreviewSerializer`,
+        one `_context()`, one `render()`. A second, subtly different path for
+        drafts is exactly how this project has produced taxonomy leaks before
+        (see `prompts.rendering`'s module docstring); this keeps it to one.
+        """
         options = PreviewSerializer(data=request.data)
         options.is_valid(raise_exception=True)
         config = options.validated_data
+        template = self._resolve_template(template, config)
 
         taxonomy = (
             get_object_or_404(Taxonomy, pk=config["taxonomy"]) if config.get("taxonomy") else None
@@ -143,6 +185,59 @@ class PromptTemplateViewSet(
                 "guarded_by": rendered.guarded_by,
                 "leak_scan_ran": rendered.leak_scan_ran,
             }
+        )
+
+    def _resolve_template(self, template, config):
+        """The PromptTemplate render() actually sees: the persisted `template`
+        row, or an UNSAVED stand-in built from a draft body. Neither branch
+        ever touches the database — `PromptTemplate(...)` below constructs an
+        ordinary Python object, never `.save()`d or `.create()`d — so a
+        refused draft (a `StrictUndefined` error, a `TaxonomyLeak`) leaves no
+        row behind and bumps no version. That is what makes "nothing
+        persisted" true by construction rather than by a cleanup step that
+        could be forgotten on some error path.
+
+        A draft is signalled by `user_prompt` being present, not merely any
+        of the three DRAFT_FIELDS: it is the one field a real PromptTemplate
+        actually requires (`system_prompt`/`output_schema` both have model
+        defaults), so a request that supplies one of those two WITHOUT
+        `user_prompt` is refused rather than silently rendering a hybrid of
+        "half draft, half whatever the stored row happens to have" that
+        nobody asked for and the editor never sends.
+        """
+        overrides = {field: config[field] for field in self.DRAFT_FIELDS if field in config}
+        if overrides and "user_prompt" not in overrides:
+            raise ValidationError(
+                {
+                    "user_prompt": "A draft preview needs user_prompt alongside "
+                    "system_prompt/output_schema, not just one of them."
+                }
+            )
+        if template is None and "user_prompt" not in overrides:
+            raise ValidationError(
+                {"user_prompt": "Previewing a template with no id requires user_prompt."}
+            )
+        if not overrides:
+            # No draft body at all: unchanged behaviour, the persisted row's
+            # own stored text is what gets rendered.
+            return template
+
+        if template is None:
+            if "phase" not in config:
+                raise ValidationError(
+                    {"phase": "Previewing a template with no id requires phase."}
+                )
+            phase, name = config["phase"], ""
+        else:
+            phase, name = template.phase, template.name
+
+        return PromptTemplate(
+            phase=phase,
+            name=name,
+            version=0,
+            system_prompt=overrides.get("system_prompt", ""),
+            user_prompt=overrides["user_prompt"],
+            output_schema=overrides.get("output_schema", {}),
         )
 
     def _context(self, template, config, taxonomy):

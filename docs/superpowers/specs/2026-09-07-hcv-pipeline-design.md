@@ -688,7 +688,16 @@ POST   /api/prompts/{id}/activate/            staff; makes this version the
                                               active one for its (phase, name)
 POST   /api/prompts/{id}/preview/             → exact rendered system+user
                                               strings, plus leak_scan_ran/
-                                              guarded_by for a variant-A preview
+                                              guarded_by for a variant-A preview;
+                                              system_prompt/user_prompt/
+                                              output_schema in the body preview
+                                              that DRAFT instead of the row's
+                                              stored version — nothing is ever
+                                              written, whether the draft
+                                              renders or is refused
+POST   /api/prompts/preview/                  same, for a template with no id
+                                              yet; body must also carry phase
+                                              (no persisted row to read it from)
 GET    /api/models/                           OpenRouter model list, cached 1h
 
 CRUD   /api/experiments/                      read: any authenticated;
@@ -806,6 +815,25 @@ Unlike a real run's guard taxonomy, which is always derived (§5.3),
 archives no isolation evidence, so there is nothing for a freely-chosen
 value to falsify — an admin previewing is allowed to check a variant-A
 render against a taxonomy other than the active one on purpose.
+
+Both preview routes can also render a DRAFT rather than a persisted
+template's stored text — the mechanism behind §10's "a template is
+validated against its own variant before it can be saved". The body may
+carry `system_prompt`/`user_prompt`/`output_schema` (the same three fields
+`PromptTemplate.COPIED_FIELDS` treats as "the text", minus `phase`/`name`);
+when `user_prompt` is present, that draft is rendered instead of the row's
+stored version. Two shapes cover the editor's two cases: `POST
+/api/prompts/{id}/preview/` supplies `phase`/`name` from the existing row
+and takes only the draft override, while `POST /api/prompts/preview/` — a
+list-level action, since a template with no id yet has no detail route to
+hang a preview off — takes `phase` in the body too. Either way the row
+(persisted or not) is built and handed to the *exact same* `_context()`/
+`render()` call a persisted preview and a real run use — never a second,
+looser check — so a draft variant-A template referencing `taxonomy`, or
+pulling in a TAXONOMY-kind resource or few-shot, is refused exactly as a
+saved one would be, and refusing it writes nothing: no `PromptTemplate`
+row, no version bump, whether the draft is for an existing template or a
+brand-new one.
 
 `PATCH` and `DELETE` on a system description or scenario with
 `origin="generated"` return 403. Generated material is only removed by deleting

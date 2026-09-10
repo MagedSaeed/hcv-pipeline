@@ -1,8 +1,9 @@
 import pytest
 from django.contrib.auth import get_user_model
 
-from corpus.models import Origin, SystemDescription
+from corpus.models import FewShotExample, Origin, ResourceFile, ResourceKind, SystemDescription
 from prompts.models import PromptTemplate
+from prompts.rendering import format_hcv_table
 from taxonomy.models import HCV, Taxonomy
 
 User = get_user_model()
@@ -484,3 +485,261 @@ def test_a_failed_activation_leaves_the_previous_active_version_alone(
     template.refresh_from_db()
     assert template.is_active is True
     assert PromptTemplate.objects.filter(phase=2, name="generate", is_active=True).count() == 1
+
+
+# --- Draft preview: validate an in-progress edit before it is ever saved -------
+#
+# Spec §10: "A template is validated against its own variant before it can be
+# saved." Before this, `preview` only ever rendered a PERSISTED template's
+# stored body — the editor had to PATCH (creating a version) before it could
+# find out a template was broken. These fields (`system_prompt`/`user_prompt`/
+# `output_schema` in the preview body) let a draft be checked first, through
+# the exact same `_context()`/`render()` call as a persisted preview and a
+# real run — see `PromptTemplateViewSet._preview`.
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_variant_a_referencing_taxonomy_is_refused_and_persists_nothing(
+    api_client, staff, template
+):
+    """The gap this feature closes: a stray {{ taxonomy }} in a Run A draft
+    must be caught before saving, not only after — and refusing it must
+    leave no trace: no new PromptTemplate row, no version bump on this one."""
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+    before_version = template.version
+
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "user_prompt": "{{ taxonomy }}",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "taxonomy" in str(response.json())
+    assert PromptTemplate.objects.count() == before_count
+    template.refresh_from_db()
+    assert template.version == before_version
+    assert template.user_prompt == "Make {{ n_systems }} systems."
+
+
+@pytest.mark.django_db
+def test_the_same_draft_body_previews_successfully_for_variant_b(
+    api_client, staff, template, taxonomy
+):
+    """The mirror image of the test above: the identical draft body, under
+    variant B with a taxonomy supplied, is exactly what the template is FOR —
+    proving the refusal above is about variant isolation, not a broken draft."""
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "B",
+            "taxonomy": taxonomy.id,
+            "user_prompt": "{{ taxonomy }}",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert "HCV-07" in response.json()["user_prompt"]
+
+
+@pytest.mark.django_db
+def test_draft_preview_with_a_taxonomy_resource_is_refused_for_variant_a(
+    api_client, staff, template, taxonomy
+):
+    """A draft can reach the taxonomy transitively too, via resource() — the
+    same route a persisted template is refused through (test_isolation.py).
+    Nothing is persisted by the refusal either."""
+    ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "user_prompt": '{{ resource("hcv_taxonomy") }}',
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "taxonomy resource" in str(response.json())
+    assert PromptTemplate.objects.count() == before_count
+
+
+@pytest.mark.django_db
+def test_draft_preview_with_a_fewshot_referencing_a_taxonomy_resource_is_refused_for_variant_a(
+    api_client, staff, template, taxonomy
+):
+    """A draft few-shot pointing at a taxonomy-kind resource must be refused
+    at context-build time exactly as a persisted template's would be — the
+    guard lives in `build_phase2_context`, shared by both."""
+    resource = ResourceFile.objects.create(
+        name="hcv_taxonomy", kind=ResourceKind.TAXONOMY, text=format_hcv_table(taxonomy)
+    )
+    example = FewShotExample.objects.create(
+        phase=2, name="leaky", input_file=resource, output_text="ok"
+    )
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "user_prompt": "{% for f in fewshots %}{{ f.input }}{% endfor %}",
+            "fewshots": [example.id],
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "leaky" in str(response.json())
+    assert PromptTemplate.objects.count() == before_count
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_with_no_id_works(api_client, staff):
+    """The other half of the gap: a template that has never been saved at all
+    has no id to preview against via the detail route."""
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 2,
+            "variant": "A",
+            "user_prompt": "Make {{ n_systems }} systems.",
+            "n_systems": 3,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user_prompt"] == "Make 3 systems."
+    assert PromptTemplate.objects.count() == before_count
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_is_equally_guarded(api_client, staff):
+    """A brand-new template gets the exact same variant-A isolation guard as
+    an existing one being edited — the id-less route is not a looser check."""
+    api_client.force_authenticate(user=staff)
+    before_count = PromptTemplate.objects.count()
+
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 2,
+            "variant": "A",
+            "user_prompt": "{{ taxonomy }}",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "taxonomy" in str(response.json())
+    assert PromptTemplate.objects.count() == before_count
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_without_phase_is_a_400(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {"variant": "A", "user_prompt": "Generate.", "n_systems": 1, "n_scenarios_per_system": 1},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "phase" in response.json()
+
+
+@pytest.mark.django_db
+def test_draft_preview_of_a_brand_new_template_without_a_body_is_a_400(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {"variant": "A", "n_systems": 1, "n_scenarios_per_system": 1},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "user_prompt" in response.json()
+
+
+@pytest.mark.django_db
+def test_a_partial_draft_body_without_user_prompt_is_refused(api_client, staff, template):
+    """system_prompt/output_schema alone, without user_prompt, must not fall
+    back to a hybrid of "draft here, stored template there"."""
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "system_prompt": "You are helpful.",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "user_prompt" in response.json()
+
+
+@pytest.mark.django_db
+def test_draft_preview_returns_the_draft_output_schema_not_the_stored_one(
+    api_client, staff, template
+):
+    api_client.force_authenticate(user=staff)
+    draft_schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    response = api_client.post(
+        f"/api/prompts/{template.id}/preview/",
+        {
+            "variant": "A",
+            "user_prompt": "Generate.",
+            "output_schema": draft_schema,
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 200
+    assert response.json()["output_schema"] == draft_schema
+    template.refresh_from_db()
+    assert template.output_schema == {}
+
+
+@pytest.mark.django_db
+def test_non_staff_cannot_preview_a_brand_new_template(api_client, member):
+    api_client.force_authenticate(user=member)
+    response = api_client.post(
+        "/api/prompts/preview/",
+        {
+            "phase": 2,
+            "variant": "A",
+            "user_prompt": "y",
+            "n_systems": 1,
+            "n_scenarios_per_system": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 403
