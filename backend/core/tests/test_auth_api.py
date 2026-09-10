@@ -4,7 +4,10 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from rest_framework.exceptions import APIException
 from rest_framework.test import APIClient
+
+from core.exceptions import exception_handler
 
 User = get_user_model()
 
@@ -43,6 +46,47 @@ def test_login_rejects_bad_password(api_client, user):
 @pytest.mark.django_db
 def test_me_requires_authentication(api_client):
     assert api_client.get("/api/auth/me/").status_code == 403
+
+
+@pytest.mark.django_db
+def test_an_unauthenticated_request_carries_a_machine_readable_code(api_client):
+    """Task 10.6: the frontend detected session expiry by matching DRF's
+    English `detail`. Session auth answers an anonymous request with a 403 —
+    it sends no `WWW-Authenticate` challenge, so DRF does not use 401 — and
+    the body now carries DRF's own code for it."""
+    response = api_client.get("/api/auth/me/")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Authentication credentials were not provided.",
+        "code": "not_authenticated",
+    }
+
+
+@pytest.mark.django_db
+def test_a_permission_denied_request_carries_a_machine_readable_code(api_client, user):
+    """Signed in but not allowed is a different fact from not signed in, and
+    carries a different code: a frontend must not send a non-staff user back
+    to the login screen because both happen to be 403s."""
+    api_client.force_authenticate(user=user)
+
+    response = api_client.get("/api/settings/")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "You do not have permission to perform this action.",
+        "code": "permission_denied",
+    }
+
+
+def test_the_exception_handler_leaves_an_existing_code_alone():
+    """The handler only fills a gap; it never overwrites a `code` a body
+    already carries. Not observable through the 503s (built by hand, never
+    reaching a handler) or the 409s (whose mixin writes the same value
+    afterwards anyway), so it is pinned here, on the handler itself."""
+    response = exception_handler(APIException({"detail": "Busy.", "code": "custom_reason"}), {})
+
+    assert response.data == {"detail": "Busy.", "code": "custom_reason"}
 
 
 @pytest.mark.django_db

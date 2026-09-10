@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.auth import get_user_model
 
+from core.keys import key_source
 from core.models import AppSettings
 
 User = get_user_model()
@@ -77,3 +78,28 @@ def test_key_source_reports_none_when_nothing_configured(api_client, staff, sett
     settings.OPENROUTER_API_KEY = ""
     api_client.force_authenticate(user=staff)
     assert api_client.get("/api/settings/").json()["key_source"] == "none"
+
+
+@pytest.mark.django_db
+def test_patching_an_empty_key_clears_it_and_falls_back_to_the_environment(
+    api_client, staff, settings
+):
+    """Task 10.6. A key saved in Settings outranks `.env`, so clearing it is
+    the only way back to the environment key — and the frontend's "clear —
+    use the environment key" action relies on exactly this. The API has
+    always allowed it (`openrouter_key` is `allow_blank=True`); nothing
+    tested it until now."""
+    settings.OPENROUTER_API_KEY = "sk-or-from-environment"
+    stored = AppSettings.load()
+    stored.openrouter_key = "sk-or-v1-admin-entered-abcdef"
+    stored.save()
+    assert key_source() == "settings"
+    api_client.force_authenticate(user=staff)
+
+    response = api_client.patch("/api/settings/", {"openrouter_key": ""}, format="json")
+
+    assert response.status_code == 200
+    assert AppSettings.load().openrouter_key == ""
+    assert key_source() == "environment"
+    assert response.json()["key_source"] == "environment"
+    assert response.json()["openrouter_key_masked"] == ""

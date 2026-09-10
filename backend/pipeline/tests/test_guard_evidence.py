@@ -38,6 +38,7 @@ from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import Client
 
 from corpus.models import ResourceFile, ResourceKind
@@ -368,6 +369,14 @@ def test_the_admin_cannot_repoint_a_pending_orchestrated_runs_taxonomy(
     the real taxonomy's own `HCV-07`, with nothing spent. Both halves
     matter — a test that only checked `readonly_fields` would not have
     noticed if the form still accepted the value.
+
+    Task 10.4 added a layer in FRONT of this one: `launch()` now dry-renders
+    each variant's template and refuses this experiment outright while the
+    resource carries `HCV-07` (asserted LAST, below, so it can never mask a
+    run-time failure). So the leak here
+    arrives AFTER launch — the resource edited while the run sits PENDING,
+    which no launch-time check can foresee — and that is precisely the case
+    the run-time scans, and a decoy repoint that would blind them, are about.
     """
     settings.OPENROUTER_API_KEY = "sk-or-v1-test-key"
     real = Taxonomy.objects.create(vocabulary_id="HCV-21", version="1.1", is_active=True)
@@ -384,8 +393,12 @@ def test_the_admin_cannot_repoint_a_pending_orchestrated_runs_taxonomy(
         phase3_model="m3",
         phase3_prompt=lab,
     )
+    leaky_text = leaky_resource.text
+    ResourceFile.objects.filter(pk=leaky_resource.pk).update(text="Nothing to leak yet.")
     with patch("pipeline.orchestration.async_task"):
         launch(experiment, n_repetitions=1)
+    ResourceFile.objects.filter(pk=leaky_resource.pk).update(text=leaky_text)
+    assert "HCV-07" in ResourceFile.objects.get(pk=leaky_resource.pk).text
     phase_run = PhaseRun.objects.get(phase=2, variant="A", pipeline_run__experiment=experiment)
     assert phase_run.status == PhaseRun.Status.PENDING
 
@@ -417,6 +430,9 @@ def test_the_admin_cannot_repoint_a_pending_orchestrated_runs_taxonomy(
     assert_refused_with_nothing_spent(result, _client)
     assert "TaxonomyLeak" in result.error
     assert "HCV-07" in result.error
+
+    with pytest.raises(ValidationError):
+        launch(experiment, n_repetitions=1)
 
 
 @pytest.mark.django_db

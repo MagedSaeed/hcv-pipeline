@@ -7,8 +7,9 @@ from django.test.utils import CaptureQueriesContext
 
 from llm.fake import FakeLLMClient
 from pipeline.clients import get_llm_client, set_llm_client
+from pipeline.labelling import finish_labelling_run
 from pipeline.models import Experiment, LLMCall, PhaseRun, PipelineRun
-from pipeline.orchestration import execute_pipeline_run, launch
+from pipeline.orchestration import execute_pipeline_run, launch, roll_up
 from prompts.models import PromptTemplate
 from taxonomy.models import HCV, Taxonomy
 
@@ -504,6 +505,22 @@ def test_retrying_a_phase_two_run_is_refused(api_client, staff, executed):
 
 
 @pytest.mark.django_db
+def test_a_validation_error_body_gains_no_code_key(api_client, staff, executed):
+    """Task 10.6's exception handler adds a `code` to error bodies that lack
+    one — never to a `ValidationError`'s, whose keys are field names, where
+    a top-level `code` would read as one more field error. This one is
+    raised as `{"detail": ...}`, the very shape the handler would otherwise
+    have added a `code` to, so it is the case that pins the exclusion."""
+    api_client.force_authenticate(user=staff)
+    generation = executed.phase_runs.get(phase=2)
+
+    response = api_client.post(f"/api/phase-runs/{generation.pk}/retry/")
+
+    assert response.status_code == 400
+    assert set(response.json()) == {"detail"}
+
+
+@pytest.mark.django_db
 def test_retry_response_matches_a_fresh_get_not_a_stale_prefetch(api_client, staff, executed):
     """Regression test: `self.get_object()` in the `retry` action comes from
     a queryset that `prefetch_related("calls")`s; `retry_failed` deletes and
@@ -632,3 +649,34 @@ def test_retry_refuses_a_cancelled_run_with_a_distinct_code(api_client, staff, e
     labelling.refresh_from_db()
     assert labelling.status == PhaseRun.Status.CANCELLED
     assert labelling.error == "Cancelled by operator."
+
+
+@pytest.mark.django_db
+def test_a_retry_that_repairs_everything_rolls_the_repetition_out_of_failed(
+    api_client, staff, executed
+):
+    """The view-level half of `test_orchestration
+    .test_a_repetition_fully_repaired_by_retry_is_rolled_up_out_of_failed`,
+    through the route the frontend actually uses. The repetition is left
+    FAILED exactly as a worker would leave it — one failed call, then
+    `finish_labelling_run` and the worker's own final `roll_up` — and after
+    a retry repairs it, `GET /api/pipeline-runs/{id}/` must stop saying FAILED.
+    """
+    labelling = executed.phase_runs.get(phase=3)
+    call = labelling.calls.get()
+    call.parsed_ok = False
+    call.parse_error = "forced failure for this test"
+    call.save()
+    finish_labelling_run(labelling)
+    roll_up(executed)
+
+    api_client.force_authenticate(user=staff)
+    url = f"/api/pipeline-runs/{executed.pk}/"
+    assert api_client.get(url).json()["status"] == PipelineRun.Status.FAILED
+
+    get_llm_client().queue(LABELLED)
+    response = api_client.post(f"/api/phase-runs/{labelling.pk}/retry/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == PhaseRun.Status.COMPLETED
+    assert api_client.get(url).json()["status"] == PipelineRun.Status.COMPLETED

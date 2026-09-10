@@ -6,6 +6,8 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 from corpus.models import Origin, SystemDescription
+from llm.fake import FakeLLMClient
+from pipeline.clients import set_llm_client
 from pipeline.models import Experiment, PhaseRun, PipelineRun
 from prompts.models import PromptTemplate
 from taxonomy.models import HCV, Taxonomy
@@ -261,6 +263,98 @@ def test_launching_an_invalid_experiment_is_a_400_and_creates_nothing(
     assert response.status_code == 400
     assert PipelineRun.objects.count() == 0
     assert enqueued.call_count == 0
+
+
+def _recording_client():
+    """A fake with a response queued for every call a two-variant repetition
+    could make, so a stray provider call would be recorded in `.calls`
+    rather than raise for want of a response."""
+    fake = FakeLLMClient()
+    for _ in range(4):
+        fake.queue("{}")
+    set_llm_client(fake)
+    return fake
+
+
+@pytest.mark.django_db
+def test_launching_a_variant_a_template_that_fails_as_variant_a_is_a_400_on_that_field(
+    api_client, staff, experiment
+):
+    """Task 10.4, through the route the frontend uses: `launch()` refuses a
+    template written for variant B that sits in `phase2_prompt_a`, and the
+    `run` action maps that to a 400 keyed on `phase2_prompt_a` — no row
+    created, nothing enqueued, no provider call made."""
+    experiment.phase2_prompt_a = PromptTemplate.objects.create_version(
+        phase=2, name="written-for-b", user_prompt="{{ taxonomy|length }} rows"
+    )
+    experiment.save()
+    fake = _recording_client()
+    api_client.force_authenticate(user=staff)
+
+    with patch("pipeline.orchestration.async_task") as enqueued:
+        response = api_client.post(
+            f"/api/experiments/{experiment.id}/run/", {"n_repetitions": 2}, format="json"
+        )
+
+    assert response.status_code == 400
+    assert set(response.json()) == {"phase2_prompt_a"}
+    assert "taxonomy" in response.json()["phase2_prompt_a"][0]
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+    assert enqueued.call_count == 0
+    assert fake.calls == []
+
+
+@pytest.mark.django_db
+def test_the_same_template_in_the_b_slot_launches(api_client, staff, experiment):
+    """The same template, pinned where it belongs, launches: variant B's
+    context supplies the taxonomy, so its dry render succeeds."""
+    experiment.phase2_prompt_b = PromptTemplate.objects.create_version(
+        phase=2, name="written-for-b", user_prompt="{{ taxonomy|length }} rows"
+    )
+    experiment.save()
+    fake = _recording_client()
+    api_client.force_authenticate(user=staff)
+
+    with patch("pipeline.orchestration.async_task") as enqueued:
+        response = api_client.post(
+            f"/api/experiments/{experiment.id}/run/", {"n_repetitions": 1}, format="json"
+        )
+
+    assert response.status_code == 202
+    assert PipelineRun.objects.count() == 1
+    assert enqueued.call_count == 1
+    assert fake.calls == []
+
+
+@pytest.mark.django_db
+def test_launching_a_template_that_raises_while_rendering_is_a_400_not_a_500(
+    api_client, staff, experiment
+):
+    """Task 10.6 follow-up: `{{ 1/0 }}` used to escape launch's dry render,
+    so `run` answered 500. Nothing was created — it failed safe — but the
+    contract is a refusal on the field holding the template, naming the
+    variant and the error."""
+    experiment.phase2_prompt_b = PromptTemplate.objects.create_version(
+        phase=2, name="divides-by-zero", user_prompt="{{ 1/0 }}"
+    )
+    experiment.save()
+    fake = _recording_client()
+    api_client.force_authenticate(user=staff)
+
+    with patch("pipeline.orchestration.async_task") as enqueued:
+        response = api_client.post(
+            f"/api/experiments/{experiment.id}/run/", {"n_repetitions": 1}, format="json"
+        )
+
+    assert response.status_code == 400
+    assert set(response.json()) == {"phase2_prompt_b"}
+    assert "as variant B" in response.json()["phase2_prompt_b"][0]
+    assert "ZeroDivisionError" in response.json()["phase2_prompt_b"][0]
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+    assert enqueued.call_count == 0
+    assert fake.calls == []
 
 
 @pytest.mark.django_db

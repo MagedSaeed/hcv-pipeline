@@ -414,11 +414,13 @@ def assert_request_not_leaking_taxonomy(*, variant, guard_taxonomy, request):
     )
     if not scanned:
         raise TaxonomyLeak(
-            f"Guard taxonomy {guard_taxonomy} has no HCV rows the scan can use "
-            "(none at all, or none carrying an hcv_id/name/definition — see "
-            "`unscannable_hcv_rows`): the final request scan cannot run, and "
-            "this is the last checkpoint before the provider call. Refusing to "
-            "send an unscanned variant-A request."
+            f"Guard taxonomy {guard_taxonomy} has no HCV rows, or at least one "
+            "HCV row with no hcv_id, name or definition (see "
+            "`unscannable_hcv_rows`) — ANY such row is refused, not only a "
+            "taxonomy blank throughout, because a scan that skips a row cannot "
+            "vouch for it. The final request scan cannot run, and this is the "
+            "last checkpoint before the provider call. Refusing to send an "
+            "unscanned variant-A request."
         )
     return True
 
@@ -615,6 +617,17 @@ def render(template, context):
     exists to make impossible — so an unmarked generation context, or a context
     of a shape nobody here recognises, is a TaxonomyLeak rather than a
     best-effort render.
+
+    ANY exception the template raises while rendering is a
+    `PromptRenderError` (task 10.6 follow-up), not only Jinja's own
+    `TemplateError`s and `TypeError`. `{{ 1/0 }}`, `{{ [].pop() }}`, the
+    sandbox's range limit and their like used to escape as themselves, so
+    every caller's `except (TaxonomyLeak, PromptRenderError)` let them
+    through: a 500 from preview and from `run`, and a phase-2 run stranded
+    RUNNING. The exception is `TaxonomyLeak` — and a `PromptRenderError` a
+    template global raises itself — which propagates unchanged, because
+    telling an isolation refusal from a broken template is what callers key
+    on. Nothing outside the template's own evaluation is caught.
     """
     variant = context.get("_variant")
     if variant is None and not _is_phase3_context(context):
@@ -633,10 +646,21 @@ def render(template, context):
             system=env.from_string(template.system_prompt).render(**exposed),
             user=env.from_string(template.user_prompt).render(**exposed),
         )
+    except (TaxonomyLeak, PromptRenderError):
+        # Raised ON PURPOSE by a template global — `resource()` refusing a
+        # taxonomy-kind file under Run A, or naming one that does not exist —
+        # and propagated as themselves, never rewrapped: `TaxonomyLeak` is how
+        # every caller tells an isolation refusal from an ordinary broken
+        # template. Listed FIRST because `TaxonomyLeak` is a `RuntimeError`,
+        # which the catch-all below would otherwise swallow.
+        raise
     except (TemplateError, TypeError) as error:
-        # TaxonomyLeak (raised by resource()) is neither of these, so it is never
-        # caught here — it propagates as itself, not rewrapped as a render error.
         raise PromptRenderError(str(error)) from error
+    except Exception as error:  # noqa: BLE001 — a template can raise anything
+        # Anything else the template raised while rendering — `{{ 1/0 }}`,
+        # `{{ [].pop() }}`, the sandbox's range limit. Named by type, since
+        # "division by zero" alone does not say what went wrong where.
+        raise PromptRenderError(f"{type(error).__name__}: {error}") from error
 
     if variant != VARIANT_UNBIASED:
         return rendered

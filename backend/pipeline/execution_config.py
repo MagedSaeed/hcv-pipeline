@@ -862,7 +862,21 @@ def resolve_generation_config(phase_run):
     """
     if not phase_run.pipeline_run_id:
         return _adhoc_generation_config(phase_run)
-    snapshot = phase_run.pipeline_run.config
+    return generation_config_from_snapshot(phase_run.pipeline_run.config)
+
+
+def generation_config_from_snapshot(snapshot):
+    """The generation config a `PipelineRun.config` snapshot pins — validated
+    fail-closed, its target system confirmed to still exist — in the shape
+    `pipeline.generation` renders against. `resolve_generation_config`'s
+    orchestrated branch, as its own function.
+
+    Split out (task 10.4) so `pipeline.orchestration.launch` can dry-render
+    each variant's phase-2 template against the EXACT snapshot it is about
+    to pin, before any `PipelineRun` exists to read one off. One reader for
+    both callers, so the launch-time dry run and the execution-time render
+    cannot disagree about what a snapshot means.
+    """
     validate_snapshot(snapshot)
     target = snapshot["target_system"]
     target_system_id = target["id"] if target else None

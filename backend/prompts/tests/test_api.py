@@ -159,6 +159,25 @@ def test_preview_reports_a_template_error_as_400(api_client, staff):
 
 
 @pytest.mark.django_db
+def test_preview_reports_a_runtime_error_in_the_template_as_400(api_client, staff):
+    """Task 10.6 follow-up: a template that raises something other than a
+    Jinja error while rendering — `{{ 1/0 }}` — used to escape `render()`
+    and answer 500 here. Preview and a real run share `render()`, so both
+    now refuse it the same way."""
+    broken = PromptTemplate.objects.create_version(
+        phase=2, name="divides-by-zero", user_prompt="{{ 1/0 }}"
+    )
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        f"/api/prompts/{broken.id}/preview/",
+        {"variant": "A", "n_systems": 1, "n_scenarios_per_system": 1},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "ZeroDivisionError" in str(response.json())
+
+
+@pytest.mark.django_db
 def test_non_staff_cannot_patch(api_client, member, template):
     api_client.force_authenticate(user=member)
     response = api_client.patch(

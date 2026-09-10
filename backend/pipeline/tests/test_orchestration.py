@@ -2,13 +2,22 @@ import json
 from unittest.mock import patch
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from core.keys import MissingAPIKey
 from core.models import AppSettings
-from corpus.models import FewShotExample, Origin, Scenario, SystemDescription
+from corpus.models import (
+    FewShotExample,
+    Origin,
+    ResourceFile,
+    ResourceKind,
+    Scenario,
+    SystemDescription,
+)
 from llm.fake import FakeLLMClient
 from pipeline.clients import reset_llm_client, set_llm_client
+from pipeline.execution_config import config_snapshot
 from pipeline.generation import run_phase2
 from pipeline.labelling import finish_labelling_run
 from pipeline.labelling import label_scenario as real_label_scenario
@@ -389,9 +398,19 @@ def test_a_variant_a_run_whose_own_template_references_taxonomy_still_fails_clos
     docstring for the full explanation of why `StrictUndefined` still
     matters even though each variant is authored independently now.
 
-    Proven here through a REAL `launch()`d run wired via the NEW per-variant
-    field, not just `prompts.rendering.render()` directly — that lower-level
-    proof already exists at `prompts/tests/test_rendering.py
+    Task 10.4 moved the FIRST refusal of this template to `launch()`, which
+    now dry-renders each variant's template under its own context and
+    refuses before any row exists (asserted LAST below, and in depth by
+    `test_launch_refuses_a_variant_a_template_that_fails_as_variant_a`).
+    That does not retire this layer: a run pinned before that check
+    existed, or by any route that bypasses `launch()`, must still fail
+    closed at run time. So the run is pinned by hand here — the same
+    snapshot and the same per-variant template `launch()` would have pinned
+    — and `run_phase2` is driven against it directly, with a response
+    queued so that a guard failing open would show up as a RECORDED call and
+    an ARCHIVED `LLMCall`, not merely as nothing happening. The launch
+    refusal comes last so it can never mask a run-time failure. The lower-level
+    proof, `render()` alone, lives at `prompts/tests/test_rendering.py
     ::test_the_naive_taxonomy_guard_fails_variant_a_but_not_b`. Variant B's
     own template is left clean and is not exercised here — the point is
     that variant A's independent template still fails on its own mistake.
@@ -421,15 +440,302 @@ def test_a_variant_a_run_whose_own_template_references_taxonomy_still_fails_clos
         n_scenarios_per_system=1,
     )
 
-    run = launch(leaky_experiment, n_repetitions=1)[0]
-    generation_a = run.phase_runs.get(phase=2, variant="A")
+    run = PipelineRun.objects.create(
+        experiment=leaky_experiment, repetition_index=1, config=config_snapshot(leaky_experiment)
+    )
+    generation_a = PhaseRun.objects.create(
+        pipeline_run=run,
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=leaky_experiment.phase2_prompt_for("A"),
+        taxonomy=tax,
+        total_children=1,
+    )
     assert generation_a.prompt_template_id == leaky_a_template.pk
+    _client.queue(GENERATED)
 
     result = run_phase2(generation_a)
 
     assert result.status == PhaseRun.Status.FAILED
     assert "taxonomy" in result.error
     assert _client.calls == []  # no provider call was ever made
+    assert LLMCall.objects.filter(phase_run=result).count() == 0  # and none archived
+
+    with pytest.raises(ValidationError):
+        launch(leaky_experiment, n_repetitions=1)
+    assert PipelineRun.objects.count() == 1  # only the hand-pinned run
+
+
+# Templates that fail as variant A, each by a different route the render path
+# ALREADY refuses: the taxonomy variable, its truthiness, `hcv_table()`, a
+# literal identifier (the render-time leak scan) and a taxonomy-kind
+# `resource()`. Every one renders cleanly as variant B. launch()'s dry run
+# (task 10.4) reuses those existing rules; it adds no rule of its own.
+WRITTEN_FOR_B = {
+    "taxonomy_variable": "{{ taxonomy|length }} rows",
+    "taxonomy_truthiness": "{% if taxonomy %}guided{% else %}unbiased{% endif %}",
+    "hcv_table": "{{ hcv_table() }}",
+    "literal_hcv_id": "Consider HCV-07 carefully.",
+    "taxonomy_resource": '{{ resource("hcv-reference") }}',
+}
+
+
+def _taxonomy_resource():
+    return ResourceFile.objects.create(
+        name="hcv-reference", kind=ResourceKind.TAXONOMY, text="HCV-07: Malicious Insiders"
+    )
+
+
+def _queue_a_whole_repetition(client, experiment):
+    """Queue a response for every call a repetition could make, so a stray
+    provider call would be RECORDED rather than raise for want of a queued
+    response — `client.calls` staying empty is then a measurement, not an
+    assumption."""
+    for _ in experiment.variants:
+        client.queue(GENERATED)
+        client.queue(LABELLED)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("user_prompt", list(WRITTEN_FOR_B.values()), ids=list(WRITTEN_FOR_B))
+def test_launch_refuses_a_variant_a_template_that_fails_as_variant_a(
+    _client, experiment, user_prompt
+):
+    """Task 10.4. A template written for variant B, pinned as
+    `phase2_prompt_a`, never leaked — variant A's context has no `taxonomy`
+    key, so its run-time render fails closed — but only once the repetition
+    was launched, with variant B still billing and no A arm left to compare
+    it against. `launch()` now dry-renders each variant's template under its
+    own context first and refuses with a `ValidationError` on
+    `phase2_prompt_a`: zero provider calls, zero `PipelineRun`/`PhaseRun`
+    rows."""
+    _taxonomy_resource()
+    experiment.phase2_prompt_a = PromptTemplate.objects.create_version(
+        phase=2, name="written-for-b", user_prompt=user_prompt
+    )
+    experiment.save()
+    _queue_a_whole_repetition(_client, experiment)
+
+    with pytest.raises(ValidationError) as refused:
+        launch(experiment, n_repetitions=3)
+
+    assert set(refused.value.message_dict) == {"phase2_prompt_a"}
+    assert "as variant A" in refused.value.message_dict["phase2_prompt_a"][0]
+    assert len(_client.calls) == 0
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("user_prompt", list(WRITTEN_FOR_B.values()), ids=list(WRITTEN_FOR_B))
+def test_the_same_template_launches_fine_in_the_b_slot(_client, experiment, user_prompt):
+    """The dry run judges a template by the variant it is pinned to, not by
+    its text alone: every template refused above renders cleanly as variant
+    B, where the taxonomy is supplied, so pinned as `phase2_prompt_b` it
+    launches — still without a single provider call."""
+    _taxonomy_resource()
+    written_for_b = PromptTemplate.objects.create_version(
+        phase=2, name="written-for-b", user_prompt=user_prompt
+    )
+    experiment.phase2_prompt_b = written_for_b
+    experiment.save()
+    _queue_a_whole_repetition(_client, experiment)
+
+    run = launch(experiment, n_repetitions=1)[0]
+
+    assert run.phase_runs.get(phase=2, variant="B").prompt_template == written_for_b
+    assert PhaseRun.objects.count() == 4
+    assert len(_client.calls) == 0
+
+
+@pytest.mark.django_db
+def test_a_clean_variant_a_template_launches(_client, experiment):
+    """A variant-A template that never touches the taxonomy launches as
+    before — the dry run refuses failures, not variant A itself — alongside a
+    variant-B template that genuinely uses `taxonomy` and `hcv_table()`."""
+    clean_a = PromptTemplate.objects.create_version(
+        phase=2,
+        name="clean-a",
+        user_prompt=(
+            "Write {{ n_systems }} system(s), {{ n_scenarios_per_system }} scenario(s) "
+            "each.{% for s in seed_systems %} Seed: {{ s.title }}.{% endfor %}"
+        ),
+    )
+    guided_b = PromptTemplate.objects.create_version(
+        phase=2, name="guided-b", user_prompt="{{ taxonomy|length }} HCVs:\n{{ hcv_table() }}"
+    )
+    experiment.phase2_prompt_a = clean_a
+    experiment.phase2_prompt_b = guided_b
+    experiment.save()
+    _queue_a_whole_repetition(_client, experiment)
+
+    runs = launch(experiment, n_repetitions=2)
+
+    assert [run.repetition_index for run in runs] == [1, 2]
+    assert PhaseRun.objects.count() == 8
+    for run in runs:
+        assert run.phase_runs.get(phase=2, variant="A").prompt_template == clean_a
+        assert run.phase_runs.get(phase=2, variant="B").prompt_template == guided_b
+    assert len(_client.calls) == 0
+
+
+@pytest.mark.django_db
+def test_launch_refuses_a_variant_b_template_under_its_own_field(_client, experiment):
+    """The refusal names the field that holds the failing template, so the
+    400 tells the researcher which slot to fix — `phase2_prompt_b` here, with
+    variant A's clean template not blamed alongside it."""
+    experiment.phase2_prompt_b = PromptTemplate.objects.create_version(
+        phase=2, name="typo-b", user_prompt="{{ taxonmy|length }} rows"
+    )
+    experiment.save()
+    _queue_a_whole_repetition(_client, experiment)
+
+    with pytest.raises(ValidationError) as refused:
+        launch(experiment, n_repetitions=1)
+
+    assert set(refused.value.message_dict) == {"phase2_prompt_b"}
+    assert "as variant B" in refused.value.message_dict["phase2_prompt_b"][0]
+    assert len(_client.calls) == 0
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_launch_dry_runs_against_the_inputs_the_run_will_pin(_client, experiment):
+    """The dry run renders against the snapshot `launch()` is about to pin,
+    not against empty defaults. The template here is the fixture's plain
+    "g", clean on its own; variant A fails only because this experiment's
+    own phase-2 few-shot is backed by a taxonomy-kind resource, which the
+    variant-A context builder refuses. A dry run over defaults would have
+    waved it through, and the run would then have failed on it."""
+    fewshot = FewShotExample.objects.create(
+        phase=2,
+        name="taxonomy-backed",
+        input_file=_taxonomy_resource(),
+        output_text="o",
+        is_active=True,
+    )
+    experiment.fewshots.add(fewshot)
+    _queue_a_whole_repetition(_client, experiment)
+
+    with pytest.raises(ValidationError) as refused:
+        launch(experiment, n_repetitions=1)
+
+    assert set(refused.value.message_dict) == {"phase2_prompt_a"}
+    assert "taxonomy-backed" in refused.value.message_dict["phase2_prompt_a"][0]
+    assert len(_client.calls) == 0
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+
+
+# Templates that raise while rendering, with the fragment the refusal must
+# name. The first four raise something OTHER than a Jinja `TemplateError` or
+# a `TypeError` — each escaped `render()` before the task 10.6 follow-up, so
+# `launch()` let it out and `run` answered 500. The last two are Jinja errors
+# that were always caught; they pin the whole contract, not just the fix.
+RAISES_WHILE_RENDERING = {
+    "zero_division": ("{{ 1/0 }}", "ZeroDivisionError"),
+    "value_error": ('{{ "abc".index("z") }}', "ValueError"),
+    "index_error": ("{{ [].pop() }}", "IndexError"),
+    "sandbox_range_limit": ("{{ range(1000000)|list|length }}", "OverflowError"),
+    "undefined_filter": ("{{ n_systems|no_such_filter }}", "no_such_filter"),
+    "bad_attribute": ("{{ n_systems.nope }}", "nope"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("variant", "field"), [("A", "phase2_prompt_a"), ("B", "phase2_prompt_b")])
+@pytest.mark.parametrize(
+    ("user_prompt", "names"),
+    list(RAISES_WHILE_RENDERING.values()),
+    ids=list(RAISES_WHILE_RENDERING),
+)
+def test_launch_refuses_any_render_failure_on_the_right_field(
+    _client, experiment, user_prompt, names, variant, field
+):
+    """Task 10.6 follow-up: whatever a template raises while rendering,
+    `launch()` refuses it as a `ValidationError` on the field holding it,
+    naming the variant and the underlying error — never an escaped exception
+    (a 500 from `run`). The other slot keeps the fixture's clean template, so
+    only the failing one is blamed. Zero provider calls, zero rows."""
+    setattr(
+        experiment,
+        field,
+        PromptTemplate.objects.create_version(phase=2, name="raises", user_prompt=user_prompt),
+    )
+    experiment.save()
+    _queue_a_whole_repetition(_client, experiment)
+
+    with pytest.raises(ValidationError) as refused:
+        launch(experiment, n_repetitions=1)
+
+    assert set(refused.value.message_dict) == {field}
+    message = refused.value.message_dict[field][0]
+    assert f"as variant {variant}" in message
+    assert names in message
+    assert len(_client.calls) == 0
+    assert PipelineRun.objects.count() == 0
+    assert PhaseRun.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_runtime_template_error_fails_the_run_instead_of_stranding_it(_client, experiment):
+    """The same `render()` fix, seen from the run path. `run_phase2` has
+    always failed cleanly on `PromptRenderError`; `{{ 1/0 }}` used to escape
+    it as a bare `ZeroDivisionError` instead, leaving the phase run stuck
+    RUNNING — the stranding its own docstring promises never happens.
+    Reached without `launch()`, which would now refuse it: an ad-hoc,
+    iterate-mode run."""
+    adhoc = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=PromptTemplate.objects.create_version(
+            phase=2, name="divides-by-zero", user_prompt="{{ 1/0 }}"
+        ),
+        taxonomy=experiment.taxonomy,
+    )
+    _client.queue(GENERATED)
+
+    result = run_phase2(adhoc)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert "ZeroDivisionError" in result.error
+    assert result.calls.count() == 0
+    assert _client.calls == []
+
+
+@pytest.mark.django_db
+def test_a_taxonomy_resource_still_fails_the_run_as_a_taxonomy_leak_not_a_render_error(
+    _client, experiment
+):
+    """The distinction the `render()` catch-all must not blur. A taxonomy-kind
+    `resource()` under variant A is an ISOLATION refusal, and the error a run
+    archives must record it as a `TaxonomyLeak` — not as a
+    `PromptRenderError` that merely mentions one. `render()` re-raises
+    `TaxonomyLeak` before its catch-all; this pins that on the record a run
+    leaves, not only on `render()` itself. Reached without `launch()`, which
+    would refuse it: an ad-hoc run."""
+    _taxonomy_resource()
+    adhoc = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=PromptTemplate.objects.create_version(
+            phase=2, name="reads-the-taxonomy", user_prompt='{{ resource("hcv-reference") }}'
+        ),
+        taxonomy=experiment.taxonomy,
+    )
+    _client.queue(GENERATED)
+
+    result = run_phase2(adhoc)
+
+    assert result.status == PhaseRun.Status.FAILED
+    assert result.error.startswith("TaxonomyLeak: ")
+    assert "taxonomy resource" in result.error
+    assert result.calls.count() == 0
+    assert _client.calls == []
 
 
 @pytest.mark.django_db
@@ -880,6 +1186,98 @@ def test_retry_on_a_healthy_run_is_a_true_no_op(_client, experiment):
     assert retried.status == PhaseRun.Status.COMPLETED
     assert retried.calls.count() == calls_before
     assert Label.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_a_repetition_fully_repaired_by_retry_is_rolled_up_out_of_failed(_client, experiment):
+    """Task 10.2: `execute_pipeline_run` rolls a repetition up once, at the
+    end of its own loop, and a retry lands after that. `finish_labelling_run`
+    never rolls up, so a repetition whose ONE failed scenario was just
+    repaired used to stay FAILED with every phase run under it COMPLETED.
+    Both variants run here, so the roll-up has to see the whole repetition,
+    not just the phase run that was retried."""
+    _client.queue(GENERATED_TWO_SCENARIOS)  # A generates two scenarios
+    _client.queue(LABELLED)  # A: sc_01 succeeds
+    _client.fail_next("timeout")  # A: sc_02 fails
+    _client.queue(GENERATED)  # B generates one scenario
+    _client.queue(LABELLED)  # B: sc_01 succeeds
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+    run.refresh_from_db()
+    assert run.status == PipelineRun.Status.FAILED
+    failed_at = run.finished_at
+
+    _client.queue(LABELLED)
+    retried = retry_failed(run.phase_runs.get(phase=3, variant="A"))
+
+    assert retried.status == PhaseRun.Status.COMPLETED
+    run.refresh_from_db()
+    assert set(run.phase_runs.values_list("status", flat=True)) == {PhaseRun.Status.COMPLETED}
+    assert run.status == PipelineRun.Status.COMPLETED
+    assert run.finished_at >= failed_at
+
+
+@pytest.mark.django_db
+def test_a_repetition_only_partly_repaired_by_retry_stays_failed(_client, experiment):
+    """The other half of the roll-up above: it re-derives the status, it does
+    not simply declare a retried repetition COMPLETED. One of the two failed
+    scenarios fails again on retry, so the repetition must stay FAILED."""
+    experiment.variants = ["A"]
+    experiment.save()
+    _client.queue(GENERATED_TWO_SCENARIOS)
+    _client.fail_next("timeout 1")
+    _client.fail_next("timeout 2")
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+
+    _client.queue(LABELLED)  # sc_01 is repaired
+    _client.fail_next("timeout again")  # sc_02 is not
+    retried = retry_failed(run.phase_runs.get(phase=3, variant="A"))
+
+    assert retried.status == PhaseRun.Status.FAILED
+    run.refresh_from_db()
+    assert run.status == PipelineRun.Status.FAILED
+
+
+@pytest.mark.django_db
+def test_retry_never_rolls_a_cancelled_repetition_out_of_cancelled(_client, experiment):
+    """CANCELLED is terminal, and a retry's roll-up must not overwrite it.
+
+    `cancel` refuses a terminal repetition (409 `run_not_cancellable`), and it
+    leaves an already-FAILED phase run FAILED. So the realistic way a
+    cancelled repetition ends up holding a retriable phase run is an
+    operator's cancel landing after labelling finished but before the
+    worker's final roll-up. That state is written directly below, the same
+    way `test_roll_up_never_overwrites_a_cancelled_run` builds its own.
+
+    The retry itself is legitimate: it refuses only a CANCELLED phase run,
+    and this one is FAILED. It repairs the phase run, leaving every phase run
+    under the repetition COMPLETED — exactly the shape `roll_up` would read
+    as COMPLETED if its CANCELLED guard were not consulted. The
+    cancellation, and when it happened, must both survive.
+    """
+    experiment.variants = ["A"]
+    experiment.save()
+    _client.queue(GENERATED)
+    _client.fail_next("timeout")
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+    labelling = run.phase_runs.get(phase=3, variant="A")
+    assert labelling.status == PhaseRun.Status.FAILED
+
+    cancelled_at = timezone.now()
+    PipelineRun.objects.filter(pk=run.pk).update(
+        status=PipelineRun.Status.CANCELLED, finished_at=cancelled_at
+    )
+
+    _client.queue(LABELLED)
+    retried = retry_failed(labelling)
+
+    assert retried.status == PhaseRun.Status.COMPLETED
+    run.refresh_from_db()
+    assert set(run.phase_runs.values_list("status", flat=True)) == {PhaseRun.Status.COMPLETED}
+    assert run.status == PipelineRun.Status.CANCELLED
+    assert run.finished_at == cancelled_at
 
 
 @pytest.mark.django_db

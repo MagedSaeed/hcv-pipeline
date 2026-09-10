@@ -385,8 +385,11 @@ def test_an_unknown_variant_is_an_empty_result_not_a_500(api_client, member, cor
 def test_system_description_list_does_not_n_plus_one_with_the_new_filters(
     api_client, member, corpus_runs
 ):
-    """Neither serializer walks `generation_run` per row, so filtering on it
-    must not turn the list into a per-row query. Measured, not assumed."""
+    """Filtering on `generation_run` must not turn the list into a per-row
+    query. Both serializers now read `generation_run` per row too
+    (`is_scratch`, task 10.5), which the viewsets' `select_related` pays for
+    — see the unfiltered, distinct-run measurement below. Measured, not
+    assumed."""
     api_client.force_authenticate(user=member)
 
     with CaptureQueriesContext(connection) as few:
@@ -436,4 +439,144 @@ def test_scenario_list_does_not_n_plus_one_with_the_new_filters(api_client, memb
     with CaptureQueriesContext(connection) as many:
         api_client.get("/api/scenarios/?variant=A")
 
+    assert len(many) == len(few)
+
+
+# ---------------------------------------------------------------------------
+# generation_run / is_scratch (task 10.5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_system_descriptions_expose_generation_run_and_is_scratch(api_client, member, corpus_runs):
+    """Iterate-mode output is scratch work, never archived, and until task
+    10.5 the corpus API showed it exactly like a real run's output.
+    `is_scratch` is true for the ad-hoc run's system only — not for either
+    repetition's, and never for a seed row."""
+    api_client.force_authenticate(user=member)
+
+    rows = api_client.get("/api/system-descriptions/").json()["results"]
+
+    assert {row["title"]: (row["generation_run"], row["is_scratch"]) for row in rows} == {
+        "System A": (corpus_runs["run_a"].pk, False),
+        "System B": (corpus_runs["run_b"].pk, False),
+        "System adhoc": (corpus_runs["run_adhoc"].pk, True),
+        "Seed system": (None, False),
+    }
+
+
+@pytest.mark.django_db
+def test_scenarios_expose_generation_run_and_is_scratch(api_client, member, corpus_runs):
+    api_client.force_authenticate(user=member)
+
+    rows = api_client.get("/api/scenarios/").json()["results"]
+
+    assert {row["id"]: (row["generation_run"], row["is_scratch"]) for row in rows} == {
+        corpus_runs["scenario_a"].id: (corpus_runs["run_a"].pk, False),
+        corpus_runs["scenario_b"].id: (corpus_runs["run_b"].pk, False),
+        corpus_runs["scenario_adhoc"].id: (corpus_runs["run_adhoc"].pk, True),
+        corpus_runs["scenario_manual"].id: (None, False),
+    }
+
+
+@pytest.mark.django_db
+def test_a_manual_row_is_never_scratch_even_pointing_at_an_ad_hoc_run(
+    api_client, member, corpus_runs
+):
+    """`origin` decides, not `generation_run` alone: the admin can hand-flip
+    a generated row's `origin`, leaving it pointing at the run it came from.
+    A row whose origin says human-authored is never scratch."""
+    flipped = SystemDescription.objects.create(
+        title="Hand-flipped", origin=Origin.MANUAL, generation_run=corpus_runs["run_adhoc"]
+    )
+    api_client.force_authenticate(user=member)
+
+    row = api_client.get(f"/api/system-descriptions/{flipped.pk}/").json()
+
+    assert row["generation_run"] == corpus_runs["run_adhoc"].pk
+    assert row["is_scratch"] is False
+
+
+@pytest.mark.django_db
+def test_generation_run_and_is_scratch_cannot_be_written(api_client, member, corpus_runs):
+    """Both are the pipeline's to set, never a request's. A POST naming an
+    ad-hoc run and claiming scratch creates an ordinary manual row, and a
+    PATCH cannot re-point an editable scenario at a run."""
+    api_client.force_authenticate(user=member)
+    run_adhoc = corpus_runs["run_adhoc"].pk
+
+    created = api_client.post(
+        "/api/system-descriptions/",
+        {"title": "Hand-written", "body": "b", "generation_run": run_adhoc, "is_scratch": True},
+        format="json",
+    )
+    assert created.status_code == 201
+    assert created.json()["generation_run"] is None
+    assert created.json()["is_scratch"] is False
+    assert SystemDescription.objects.get(pk=created.json()["id"]).generation_run_id is None
+
+    manual = corpus_runs["scenario_manual"]
+    patched = api_client.patch(
+        f"/api/scenarios/{manual.pk}/",
+        {"generation_run": run_adhoc, "is_scratch": True},
+        format="json",
+    )
+    assert patched.status_code == 200
+    assert patched.json()["generation_run"] is None
+    assert patched.json()["is_scratch"] is False
+    manual.refresh_from_db()
+    assert manual.generation_run_id is None
+
+
+def _more_generated_rows(corpus_runs, count):
+    """`count` fresh phase runs — alternately ad-hoc and under a repetition,
+    so both `is_scratch` answers are in play — each generating one system
+    and one scenario of its own. One run per row matters: a per-row
+    `generation_run` fetch is what would show up as a growing query count."""
+    template = corpus_runs["run_a"].prompt_template
+    taxonomy = corpus_runs["run_a"].taxonomy
+    repetition = corpus_runs["pipeline_run_1"]
+    for index in range(count):
+        run = PhaseRun.objects.create(
+            pipeline_run=repetition if index % 2 else None,
+            phase=2,
+            variant="A",
+            model="m",
+            prompt_template=template,
+            taxonomy=taxonomy,
+        )
+        system = SystemDescription.objects.create(
+            title=f"More {index}", origin=Origin.GENERATED, generation_run=run
+        )
+        Scenario.objects.create(
+            system_description=system,
+            scenario_id="sc_01",
+            origin=Origin.GENERATED,
+            generation_run=run,
+            order=1,
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("url", ["/api/system-descriptions/", "/api/scenarios/"])
+def test_is_scratch_costs_no_query_per_row(api_client, member, corpus_runs, url):
+    """`is_scratch` reads `generation_run.pipeline_run_id` for every
+    generated row; without `select_related` that is one query per row on a
+    paginated list. Measured on the unfiltered list — the Corpus screen's
+    own view — before and after twenty more rows, each from a DISTINCT phase
+    run, half of them scratch. Both pages stay under PAGE_SIZE, so every
+    added row is really serialized."""
+    api_client.force_authenticate(user=member)
+
+    with CaptureQueriesContext(connection) as few:
+        small = api_client.get(url).json()
+
+    _more_generated_rows(corpus_runs, 20)
+
+    with CaptureQueriesContext(connection) as many:
+        large = api_client.get(url).json()
+
+    assert len(large["results"]) == len(small["results"]) + 20
+    scratch_before = sum(row["is_scratch"] for row in small["results"])
+    assert sum(row["is_scratch"] for row in large["results"]) == scratch_before + 10
     assert len(many) == len(few)

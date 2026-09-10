@@ -101,6 +101,11 @@ REST_FRAMEWORK = {
     # after a frontend reads bare arrays would break its response contract.
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
+    # Every error body that lacks one gets the exception's own machine-readable
+    # `code` (`not_authenticated`, `permission_denied`, ...), so a frontend can
+    # branch on it instead of on DRF's English `detail`. Field-error (400)
+    # bodies are left alone. See core.exceptions.
+    "EXCEPTION_HANDLER": "core.exceptions.exception_handler",
 }
 
 # Local-memory cache is enough here: the only cached value is the OpenRouter

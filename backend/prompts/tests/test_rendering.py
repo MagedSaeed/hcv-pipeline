@@ -45,6 +45,42 @@ def make(user_prompt, system_prompt=""):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("user_prompt", "error_type"),
+    [
+        ("{{ 1/0 }}", "ZeroDivisionError"),
+        ('{{ "abc".index("z") }}', "ValueError"),
+        ("{{ [].pop() }}", "IndexError"),
+        ("{{ range(1000000)|list|length }}", "OverflowError"),
+    ],
+)
+@pytest.mark.parametrize("variant", ["A", "B"])
+def test_anything_a_template_raises_while_rendering_is_a_prompt_render_error(
+    system, taxonomy, user_prompt, error_type, variant
+):
+    """Task 10.6 follow-up. Every caller — launch's dry run, `run_phase2`,
+    `label_scenario`, preview — catches `(TaxonomyLeak, PromptRenderError)`,
+    and these four used to escape `render()` as themselves, past all of
+    them. Each is now a `PromptRenderError` naming its type, under either
+    variant. A taxonomy-kind `resource()` still raises `TaxonomyLeak` as
+    itself — `test_isolation.py` pins that distinction."""
+    context = build_phase2_context(
+        variant=variant,
+        seed_systems=[system],
+        fewshots=[],
+        generate_systems=True,
+        generate_scenarios=True,
+        n_systems=3,
+        n_scenarios_per_system=5,
+        taxonomy=taxonomy if variant == "B" else None,
+        guard_taxonomy=taxonomy if variant == "A" else None,
+    )
+
+    with pytest.raises(PromptRenderError, match=error_type):
+        render(make(user_prompt), context)
+
+
+@pytest.mark.django_db
 def test_renders_both_prompts(system):
     context = build_phase2_context(
         variant="A",
@@ -359,6 +395,26 @@ def test_request_scan_rejects_variant_a_against_an_empty_taxonomy(db):
     with pytest.raises(TaxonomyLeak, match="has no HCV rows"):
         assert_request_not_leaking_taxonomy(
             variant="A", guard_taxonomy=empty, request={"model": "m"}
+        )
+
+
+@pytest.mark.django_db
+def test_request_scan_names_the_any_blank_row_rule_when_refusing(db):
+    """Task 10.6: the rule refuses on ANY content-free row, not only on a
+    taxonomy blank throughout — `assert_no_taxonomy_leak` will not certify a
+    scan that skips even one row — and the refusal must say so. This
+    taxonomy has one perfectly good row beside one blank one. The old
+    message told the operator it had no usable rows at all, which is false
+    for exactly this taxonomy and sends them looking for the wrong fault."""
+    partly_blank = Taxonomy.objects.create(vocabulary_id="HCV-PARTLY-BLANK", version="1.0")
+    HCV.objects.create(taxonomy=partly_blank, hcv_id="HCV-07", name="Malicious Insiders", order=7)
+    HCV.objects.create(taxonomy=partly_blank, hcv_id="", name="", order=8)
+
+    with pytest.raises(
+        TaxonomyLeak, match="at least one HCV row with no hcv_id, name or definition"
+    ):
+        assert_request_not_leaking_taxonomy(
+            variant="A", guard_taxonomy=partly_blank, request={"model": "m"}
         )
 
 

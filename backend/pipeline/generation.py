@@ -63,6 +63,27 @@ def _build_context(phase_run, config):
     )
 
 
+def render_generation_prompt(phase_run, config):
+    """Build `phase_run`'s phase-2 context from `config` and render its
+    template: the render half of `run_phase2`, as one callable.
+
+    Public because `pipeline.orchestration.launch` dry-runs it (task 10.4).
+    Before creating a single row, launch renders each variant's template
+    under that variant's OWN context, against the snapshot it is about to
+    pin. A variant-A template that references `taxonomy` is then refused
+    with zero provider calls, instead of failing only at run time, after the
+    repetition was launched and variant B had billed. Sharing this one
+    function, rather than launch re-assembling `build_phase2_context` and
+    `render` itself, is what keeps the dry run the same render a real run
+    performs: same context builder, same renderer, same leak rules, nothing
+    restated.
+
+    Raises what `build_phase2_context`/`render` raise — `TaxonomyLeak`,
+    `PromptRenderError` — and never contacts a provider.
+    """
+    return render(phase_run.prompt_template, _build_context(phase_run, config))
+
+
 def _preflight(phase_run):
     """The choke point every phase-2 request — both variants — passes
     through immediately before the HTTP call. See `llm.client
@@ -359,8 +380,7 @@ def run_phase2(phase_run):
     phase_run.save(update_fields=["status", "started_at", "total_children"])
 
     try:
-        context = _build_context(phase_run, config)
-        rendered = render(phase_run.prompt_template, context)
+        rendered = render_generation_prompt(phase_run, config)
     except (TaxonomyLeak, PromptRenderError) as error:
         return _fail(phase_run, f"{type(error).__name__}: {error}")
 

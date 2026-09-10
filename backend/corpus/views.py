@@ -49,7 +49,10 @@ class SystemDescriptionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ReadOnlyIfGenerated]
 
     def get_queryset(self):
-        queryset = SystemDescription.objects.all()
+        # `select_related`: the serializer's `is_scratch` reads
+        # `generation_run.pipeline_run_id` for every generated row — one
+        # query PER ROW on a paginated list without the join.
+        queryset = SystemDescription.objects.select_related("generation_run")
         params = self.request.query_params
         if origin := params.get("origin"):
             queryset = queryset.filter(origin=origin)
@@ -94,8 +97,12 @@ class ScenarioViewSet(viewsets.ModelViewSet):
         # (`ManyRelatedField.get_attribute`, which has no pk-only
         # optimization the way a plain FK does) — a page of 50 scenarios
         # costs 50 extra queries without this. `prefetch_related` pays for
-        # the whole page in one extra query instead.
-        queryset = Scenario.objects.prefetch_related("intended_hcvs")
+        # the whole page in one extra query instead. `select_related` does
+        # the same for `is_scratch`, which reads
+        # `generation_run.pipeline_run_id` for every generated row.
+        queryset = Scenario.objects.select_related("generation_run").prefetch_related(
+            "intended_hcvs"
+        )
         params = self.request.query_params
         if origin := params.get("origin"):
             queryset = queryset.filter(origin=origin)

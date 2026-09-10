@@ -152,6 +152,11 @@ class ConflictCodeMixin:
     own `handle_exception` -> `settings.EXCEPTION_HANDLER` machinery, so
     that is the one seam common to all of them where `code` can be added
     without hand-building a `Response` at every individual raise site.
+
+    Since task 10.6 that setting names `core.exceptions.exception_handler`,
+    which adds `exc.detail.code` to every non-validation error body lacking
+    one — `Conflict`'s included. This mixin then writes the identical value,
+    so the two agree by construction and the 409 bodies are unchanged.
     """
 
     def handle_exception(self, exc):

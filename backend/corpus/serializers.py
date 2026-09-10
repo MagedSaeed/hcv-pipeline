@@ -100,6 +100,9 @@ class FewShotExampleSerializer(serializers.ModelSerializer):
 
 class SystemDescriptionSerializer(serializers.ModelSerializer):
     is_editable = serializers.BooleanField(read_only=True)
+    # See `OriginMixin.is_scratch`. Read off `generation_run`, which the
+    # viewset `select_related`s so a page costs no query per row.
+    is_scratch = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = SystemDescription
@@ -109,17 +112,29 @@ class SystemDescriptionSerializer(serializers.ModelSerializer):
             "slug",
             "body",
             "origin",
+            "generation_run",
+            "is_scratch",
             "is_editable",
             "created_by",
             "created_at",
             "updated_at",
         ]
-        # Only the pipeline may write `origin`; the API always creates `manual`.
-        read_only_fields = ["slug", "origin", "created_by", "created_at", "updated_at"]
+        # Only the pipeline may write `origin` or `generation_run`; the API
+        # always creates `manual` rows, which belong to no run.
+        read_only_fields = [
+            "slug",
+            "origin",
+            "generation_run",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class ScenarioSerializer(serializers.ModelSerializer):
     is_editable = serializers.BooleanField(read_only=True)
+    # See `SystemDescriptionSerializer.is_scratch`.
+    is_scratch = serializers.BooleanField(read_only=True)
     card = serializers.DictField(read_only=True)
 
     class Meta:
@@ -139,19 +154,28 @@ class ScenarioSerializer(serializers.ModelSerializer):
             "abox",
             "card",
             "origin",
+            "generation_run",
+            "is_scratch",
             "is_editable",
             "order",
             "created_by",
             "created_at",
             "updated_at",
         ]
-        # Only the pipeline may write `origin`; the API always creates `manual`.
-        read_only_fields = ["origin", "card", "created_by", "created_at", "updated_at"]
+        # Only the pipeline may write `origin` or `generation_run`; the API
+        # always creates `manual` rows, which belong to no run.
+        read_only_fields = [
+            "origin",
+            "generation_run",
+            "card",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
         # The model's matching constraint is conditional on generation_run
-        # being NULL, and generation_run isn't a serializer field, so DRF
-        # cannot derive this validator automatically (it only does that when
-        # every field a constraint references — condition fields included —
-        # is present on the serializer). Every row the API can create has
+        # being NULL. generation_run is exposed READ-ONLY — never part of
+        # what a request submits — so DRF cannot build this validator from
+        # the constraint itself. Every row the API can create has
         # generation_run=NULL (only the pipeline sets it), so this queryset
         # is the API-reachable slice of that constraint.
         validators = [

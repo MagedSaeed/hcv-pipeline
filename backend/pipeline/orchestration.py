@@ -7,15 +7,17 @@ makes the A/B comparison meaningful.
 
 import copy
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from django_q.tasks import async_task
 
 from core.keys import resolve_openrouter_key
-from pipeline.execution_config import config_snapshot
-from pipeline.generation import run_phase2
+from pipeline.execution_config import config_snapshot, generation_config_from_snapshot
+from pipeline.generation import render_generation_prompt, run_phase2
 from pipeline.labelling import failed_calls, finish_labelling_run, label_scenario, scenarios_for
 from pipeline.models import LLMCall, PhaseRun, PipelineRun
+from prompts.rendering import VARIANT_GUIDED, VARIANT_UNBIASED, PromptRenderError, TaxonomyLeak
 
 # The django-q task path a queued run is handed to. A plain string — the
 # task itself is looked up by import path when a worker picks it up — so a
@@ -32,6 +34,90 @@ PHASE_RUN_TASKS = {
     3: "pipeline.tasks.run_phase3_task",
 }
 
+# The `Experiment` field holding each variant's phase-2 template — the key a
+# launch-time refusal is reported under, so the `run` action's 400 names the
+# field to fix. Mirrors `Experiment.phase2_prompt_for`'s own mapping; the
+# launch tests pin both entries, since a swap would blame the wrong slot.
+_PHASE2_TEMPLATE_FIELD = {VARIANT_UNBIASED: "phase2_prompt_a", VARIANT_GUIDED: "phase2_prompt_b"}
+
+
+def _generation_run_fields(experiment, variant):
+    """The fields `launch` creates `variant`'s generation `PhaseRun` with —
+    assembled in ONE place, so the unsaved probe
+    `_refuse_templates_that_fail_as_their_own_variant` dry-renders is built
+    from exactly what the real row will pin, never from a hand-copied subset
+    that could drift from it.
+    """
+    return {
+        "phase": 2,
+        "variant": variant,
+        "model": experiment.phase2_model,
+        "temperature": experiment.phase2_temperature,
+        # Per-variant, fully independent template — see
+        # `Experiment.phase2_prompt_for`/`phase2_prompt_a`/
+        # `phase2_prompt_b`'s own comments. Variant A and variant B
+        # of the SAME repetition therefore pin two DIFFERENT
+        # `PromptTemplate` rows here, never the same one.
+        "prompt_template": experiment.phase2_prompt_for(variant),
+        "taxonomy": experiment.taxonomy,
+        # Known the instant this row exists — Phase 2 is always
+        # exactly one call — so a freshly queued run has a real
+        # denominator from the start instead of reading 0/0 for the
+        # whole window before a worker actually picks it up. Phase 3
+        # gets no such head start: its scenario count depends on
+        # Phase 2's still-unknown output.
+        "total_children": 1,
+    }
+
+
+def _refuse_templates_that_fail_as_their_own_variant(experiment, config):
+    """Dry-render each variant's phase-2 template exactly as its run will,
+    and refuse the launch if any of them fails. Task 10.4.
+
+    `phase2_prompt_a` and `phase2_prompt_b` are two fully independent
+    templates (the researcher's 2026-09-08 decision), and a template records
+    no variant of its own, so nothing stopped a template written for variant
+    B — one that references `taxonomy` — from being pinned as
+    `phase2_prompt_a`. Nothing leaked: variant A's context has no `taxonomy`
+    key at all, so under `StrictUndefined` its render fails closed at run
+    time, with zero calls for A. But by then the repetition was launched,
+    variant B still ran and billed, and the repetition had no A arm left to
+    compare it against. This moves that same failure to launch time, where
+    it costs nothing.
+
+    Exactly the inputs the run will use. `probe` is built from the same
+    `_generation_run_fields` the real generation `PhaseRun` is created from
+    (template, variant, taxonomy); `config` is the snapshot `launch` is
+    about to pin, read back through `generation_config_from_snapshot`, the
+    reader `resolve_generation_config` uses at execution time. And the
+    render is `pipeline.generation.render_generation_prompt`, the one
+    `run_phase2` calls: same context builder, same renderer, same leak
+    rules — no second renderer and no second rule here. `probe` is an
+    UNSAVED `PhaseRun` and is never saved, and rendering never reaches
+    `get_llm_client()`, so a refusal creates no row and makes no call.
+
+    Catches what `run_phase2` treats as a render failure — `TaxonomyLeak`
+    and `PromptRenderError` — and nothing wider, so what launch refuses is
+    exactly what would have failed the run. Every failing variant is
+    reported, each keyed on the field that holds its template.
+    """
+    generation_config = generation_config_from_snapshot(config)
+    errors = {}
+    for variant in experiment.variants:
+        probe = PhaseRun(**_generation_run_fields(experiment, variant))
+        try:
+            render_generation_prompt(probe, generation_config)
+        except (TaxonomyLeak, PromptRenderError) as error:
+            context = "taxonomy withheld" if variant == VARIANT_UNBIASED else "taxonomy supplied"
+            errors[_PHASE2_TEMPLATE_FIELD[variant]] = (
+                f"{probe.prompt_template} does not render as variant {variant} "
+                f"({context}) against this experiment's inputs, so nothing was "
+                "launched and no provider call was made. "
+                f"{type(error).__name__}: {error}"
+            )
+    if errors:
+        raise ValidationError(errors)
+
 
 @transaction.atomic
 def launch(experiment, n_repetitions=1, inline=False):
@@ -45,6 +131,14 @@ def launch(experiment, n_repetitions=1, inline=False):
     at all. Left to `run_phase2`, it would instead strand a half-executed
     repetition: the PipelineRun RUNNING, its phase runs RUNNING/PENDING, and
     `execute_pipeline_run`'s idempotency guard refusing to re-drive it.
+
+    Each variant's phase-2 template is then dry-rendered under its OWN
+    variant's context, against the very snapshot about to be pinned — see
+    `_refuse_templates_that_fail_as_their_own_variant` (task 10.4). That is
+    still before the first row: a template that fails as its own variant is
+    refused with a `ValidationError` naming its field, with nothing created
+    and no provider call made, instead of launching a repetition whose
+    variant A is doomed while variant B still bills.
     """
     resolve_openrouter_key()
     experiment.full_clean()
@@ -61,6 +155,7 @@ def launch(experiment, n_repetitions=1, inline=False):
     # nothing mutates a `.config` in place after creation, but cheap
     # insurance against that changing later).
     config = config_snapshot(experiment)
+    _refuse_templates_that_fail_as_their_own_variant(experiment, config)
 
     for offset in range(n_repetitions):
         run = PipelineRun.objects.create(
@@ -70,25 +165,7 @@ def launch(experiment, n_repetitions=1, inline=False):
         )
         for variant in experiment.variants:
             generation = PhaseRun.objects.create(
-                pipeline_run=run,
-                phase=2,
-                variant=variant,
-                model=experiment.phase2_model,
-                temperature=experiment.phase2_temperature,
-                # Per-variant, fully independent template — see
-                # `Experiment.phase2_prompt_for`/`phase2_prompt_a`/
-                # `phase2_prompt_b`'s own comments. Variant A and variant B
-                # of the SAME repetition therefore pin two DIFFERENT
-                # `PromptTemplate` rows here, never the same one.
-                prompt_template=experiment.phase2_prompt_for(variant),
-                taxonomy=experiment.taxonomy,
-                # Known the instant this row exists — Phase 2 is always
-                # exactly one call — so a freshly queued run has a real
-                # denominator from the start instead of reading 0/0 for the
-                # whole window before a worker actually picks it up. Phase 3
-                # gets no such head start: its scenario count depends on
-                # Phase 2's still-unknown output.
-                total_children=1,
+                pipeline_run=run, **_generation_run_fields(experiment, variant)
             )
             PhaseRun.objects.create(
                 pipeline_run=run,
@@ -563,6 +640,20 @@ def retry_failed(phase_run):
     Guarded here, inside `retry_failed` itself, rather than only in the view,
     for the same reason `RunInFlight` is: `retry_failed(phase_run)` called
     directly — the management command's path — bypasses the view entirely.
+
+    After an actual re-drive, an orchestrated run's repetition is rolled up
+    again (task 10.2). `execute_pipeline_run` rolls a repetition up exactly
+    once, at the end of its own loop; a retry lands AFTER that, so without
+    this a repetition whose last failed scenario was just repaired kept the
+    FAILED status that roll-up gave it, even with every phase run under it
+    now COMPLETED. It goes through `roll_up` — never a direct write to
+    `PipelineRun.status` here — so `roll_up`'s own CANCELLED guard still
+    decides: a repetition an operator cancelled stays cancelled however
+    thoroughly one of its FAILED phase runs is repaired afterwards (see
+    `roll_up`'s docstring, and the resurrection it and two sibling guards
+    exist to prevent). The two early returns above never roll up: nothing
+    was re-driven, so nothing a roll-up reads has changed, and re-rolling
+    would only re-stamp `finished_at` on a no-op.
     """
     if not failed_calls(phase_run).exists():
         return phase_run
@@ -593,7 +684,10 @@ def retry_failed(phase_run):
         scenarios_for(phase_run).filter(id__in=scenario_ids), start=1
     ):
         _label_scenario_or_archive_failure(phase_run, scenario, sequence=highest + offset)
-    return finish_labelling_run(phase_run)
+    finished = finish_labelling_run(phase_run)
+    if finished.pipeline_run_id:
+        roll_up(finished.pipeline_run)
+    return finished
 
 
 def roll_up(pipeline_run):
@@ -628,7 +722,9 @@ def roll_up(pipeline_run):
     already have landed) and at the very end of its loop (a `pipeline_run`
     whose in-memory `.status` was set to RUNNING at the top of that function
     and never refreshed since, however long the loop's own phase-2/phase-3
-    work took). Without this, a cancelled run's phase runs — themselves
+    work took) — and `retry_failed` calls it after re-deriving a repaired
+    phase run's status, by which point an operator may have cancelled the
+    repetition that phase run belongs to. Without this, a cancelled run's phase runs — themselves
     correctly left CANCELLED by `cancel` — would still get rolled up into
     FAILED here (every phase run CANCELLED is neither `<= {COMPLETED}` nor
     in `in_progress`, so it falls into the FAILED branch below), silently
