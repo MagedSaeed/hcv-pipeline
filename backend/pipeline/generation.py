@@ -17,14 +17,18 @@ every other unanticipated failure takes — no provider call, no archived row,
 just a FAILED phase run with the reason on `error`.
 """
 
-import json
-
 from django.db import DatabaseError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
 from corpus.models import Origin, Scenario, SystemDescription
-from llm.schemas import SchemaError, parse_phase2, phase2_json_schema
+from llm.schemas import (
+    SchemaError,
+    loads_response,
+    parse_failure_message,
+    parse_phase2,
+    phase2_json_schema,
+)
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_generation_config
 from pipeline.models import LLMCall, PhaseRun
@@ -458,11 +462,13 @@ def _call_and_persist(phase_run, rendered, config):
         return _fail(phase_run, result.transport_error or "The call returned no body.")
 
     try:
-        parsed = parse_phase2(json.loads(result.raw_response))
+        parsed = parse_phase2(loads_response(result.raw_response))
     except (ValueError, SchemaError) as error:
-        call.parse_error = str(error)
+        call.parse_error = parse_failure_message(
+            error, result.finish_reason, result.completion_tokens
+        )
         call.save()
-        return _fail(phase_run, f"Could not parse the response: {error}")
+        return _fail(phase_run, f"Could not parse the response: {call.parse_error}")
 
     call.parsed_ok = True
     # `parsed_ok`/`parse_error` measure ONE thing: how often the model's

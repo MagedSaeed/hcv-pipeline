@@ -5,8 +5,6 @@ outside the pinned list is recorded on the call rather than dropped: how often
 a labeller invents an identifier is itself a result.
 """
 
-import json
-
 from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -16,6 +14,8 @@ from llm.schemas import (
     Phase3Response,
     SchemaError,
     json_schema,
+    loads_response,
+    parse_failure_message,
     parse_phase3,
     split_known_labels,
 )
@@ -134,9 +134,11 @@ def label_scenario(phase_run, scenario, sequence=1):
         return call
 
     try:
-        parsed = parse_phase3(json.loads(result.raw_response))
+        parsed = parse_phase3(loads_response(result.raw_response))
     except (ValueError, SchemaError) as error:
-        call.parse_error = str(error)
+        call.parse_error = parse_failure_message(
+            error, result.finish_reason, result.completion_tokens
+        )
         call.save()
         return call
 

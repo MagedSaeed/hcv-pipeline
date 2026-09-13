@@ -4,6 +4,8 @@ Malformed output is data, not a crash: parsing raises SchemaError, which the
 caller records on the call record rather than letting it kill a run.
 """
 
+import json
+
 from pydantic import BaseModel, Field, ValidationError
 
 
@@ -76,6 +78,35 @@ def phase2_json_schema(*, generate_systems):
     field_to_drop = "scenarios" if generate_systems else "system_descriptions"
     schema["properties"].pop(field_to_drop, None)
     return schema
+
+
+def loads_response(raw):
+    """Decode a model's JSON reply, accepting one surrounding Markdown code fence.
+
+    Models that ignore `response_format` often wrap otherwise valid JSON in
+    ```json ... ```; that is formatting, not a schema failure. Anything else that
+    is not JSON still raises ValueError.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        body = text[first_newline + 1 :] if first_newline != -1 else ""
+        text = body.rstrip()
+        if text.endswith("```"):
+            text = text[:-3]
+    return json.loads(text)
+
+
+def parse_failure_message(error, finish_reason, completion_tokens):
+    """A parse error, plus the likely cause when the model hit its output limit."""
+    message = str(error)
+    if finish_reason == "length":
+        message += (
+            f" The model stopped at its output limit ({completion_tokens or '?'} output "
+            "tokens), so the reply is incomplete. Ask for fewer systems or scenarios, or "
+            "pick a model with a larger output limit."
+        )
+    return message
 
 
 def _parse(model, payload):

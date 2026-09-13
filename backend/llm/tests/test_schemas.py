@@ -111,3 +111,27 @@ def test_phase2_json_schema_for_target_mode_omits_system_descriptions():
     schema = phase2_json_schema(generate_systems=False)
     assert "scenarios" in schema["properties"]
     assert "system_descriptions" not in schema["properties"]
+
+
+def test_loads_response_accepts_a_markdown_fence():
+    from llm.schemas import loads_response
+
+    assert loads_response('```json\n{"labels": []}\n```') == {"labels": []}
+    assert loads_response('```\n{"a": 1}```') == {"a": 1}
+    assert loads_response('  {"a": 1}  ') == {"a": 1}
+
+
+def test_loads_response_still_refuses_non_json():
+    import pytest
+
+    from llm.schemas import loads_response
+
+    with pytest.raises(ValueError):
+        loads_response('```json\n{"system_descriptions": [\n')
+
+
+def test_parse_failure_message_explains_a_truncated_reply():
+    from llm.schemas import parse_failure_message
+
+    assert "output limit (4096" in parse_failure_message(ValueError("x"), "length", 4096)
+    assert parse_failure_message(ValueError("x"), "stop", 10) == "x"
