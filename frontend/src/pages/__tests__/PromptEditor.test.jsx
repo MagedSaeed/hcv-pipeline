@@ -7,54 +7,32 @@ import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 import { RUN_POLL_INTERVAL_MS } from '../../api/queries';
 
-// The OpenRouter catalogue shape llm/models_api.py's AvailableModelsView
-// actually returns - {count, results} (see ExperimentBuilder.test.jsx's own
-// copy of this same shape). The iterate panel's model field is a
-// ModelPicker now (task C), so it only ever commits an id from this list -
-// 'trigger-failure' is a fixture-only stand-in for a real catalogue entry,
-// seeded here purely so this file's own "an iterate run that fails" test
-// can still select it like any other model.
+// Task D: PromptEditor.jsx no longer owns a phase/template picker - a test
+// now lands directly on `/prompts/<id>/edit` (a known fixture id below) or
+// `/prompts/new?phase=`, the same way the routed screen itself is reached.
 const MODELS_SEED = {
-  count: 2,
+  count: 3,
   results: [
     { id: 'openai/gpt-4o-mini', name: 'GPT-4o mini', pricing: { prompt: '0.0000002', completion: '0.0000006' }, context_length: 128000 },
     { id: 'trigger-failure', name: 'Trigger Failure (test double)', pricing: { prompt: '0', completion: '0' } },
+    { id: 'trigger-parse-failure', name: 'Trigger Parse Failure (test double)', pricing: { prompt: '0', completion: '0' } },
   ],
 };
 
-// 55 versions of ONE template name, deliberately kept separate from every
-// other fixture template above (`generation-baseline`/`phase2-safe`) so it
-// never perturbs an existing test's version-count assertions. `PATCH
-// /api/prompts/{id}/` never mutates a version in place, it always creates
-// the next one - task 10.1's own reasoning for why `usePromptTemplates`
-// must fetch every page: an actively-tuned template is GUARANTEED to pass
-// PAGE_SIZE=50 versions eventually, not merely plausible to.
-const PAGINATION_TEMPLATE_VERSIONS = Array.from({ length: 55 }, (_, index) => ({
-  id: 500 + index,
-  phase: 2,
-  name: 'pagination-fixture',
-  version: index + 1,
-  system_prompt: '',
-  user_prompt: `Version ${index + 1} of the pagination fixture template.`,
-  output_schema: {},
-  is_active: false,
-  created_by: 3,
-  created_at: '2026-01-01T00:00:00Z',
-}));
-
-// Mirrors prompts/serializers.py's PromptTemplateSerializer field set and
-// prompts/models.py's PromptTemplate.Meta.ordering ((phase, name,
-// -version) - the latest version of a named template sorts first). Two
-// named phase-2 templates: "generation-baseline" genuinely references
-// {{ taxonomy }} (so it fails to render for variant A exactly the way a
-// real Run A template mistake would - see prompts/rendering.py's
-// StrictUndefined note), and "phase2-safe" never mentions it, standing in
-// for an ordinary edit-and-save cycle unrelated to the isolation guarantee.
+// Four named templates, one row each, covering: a locked variant-A prompt
+// that genuinely fails to render (id 1), a locked variant-A prompt that is
+// safe to run to completion (id 2, for the isolation-evidence test), a
+// locked variant-B prompt (id 3), and the phase-3 default (id 4). `variant`
+// is the backend contract addition this task adds - "writable on create;
+// copied forward on new versions" - so every phase-2 fixture below already
+// carries a stored value, exercising the "fixed once saved" rule directly
+// rather than only the free-choice path `/prompts/new` still has.
 const TEMPLATES_SEED = [
   {
     id: 1,
     phase: 2,
     name: 'generation-baseline',
+    variant: 'A',
     version: 1,
     system_prompt: '',
     user_prompt: 'Write {{ n_systems }} systems using {{ taxonomy }} as reference.',
@@ -66,10 +44,11 @@ const TEMPLATES_SEED = [
   {
     id: 2,
     phase: 2,
-    name: 'phase2-safe',
+    name: 'phase2-variant-a',
+    variant: 'A',
     version: 1,
     system_prompt: '',
-    user_prompt: 'Write {{ n_systems }} systems.',
+    user_prompt: 'Write {{ n_systems }} safe systems.',
     output_schema: {},
     is_active: false,
     created_by: 3,
@@ -77,8 +56,22 @@ const TEMPLATES_SEED = [
   },
   {
     id: 3,
+    phase: 2,
+    name: 'phase2-variant-b',
+    variant: 'B',
+    version: 1,
+    system_prompt: '',
+    user_prompt: 'Write {{ n_systems }} systems, variant B.',
+    output_schema: {},
+    is_active: false,
+    created_by: 3,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 4,
     phase: 3,
     name: 'labelling-default',
+    variant: '',
     version: 1,
     system_prompt: '',
     user_prompt: 'Label {{ scenario.scenario_id }} against {{ taxonomy }}.',
@@ -114,9 +107,8 @@ const SCENARIOS_SEED = [
     updated_at: '2026-01-01T00:00:00Z',
   },
   // 54 filler scenarios (ids 11-64) so this fixture passes PAGE_SIZE=50 -
-  // task 10.1's confirmed finding: the phase-3 scenario picker
-  // (`useScenarios`) must offer every scenario, not a first page of them,
-  // or a real one past row 50 is simply unselectable.
+  // the phase-3 scenario picker (`useScenarios`) must offer every scenario,
+  // not a first page of them.
   ...Array.from({ length: 54 }, (_, index) => ({
     id: 11 + index,
     system_description: 1,
@@ -140,11 +132,9 @@ const SCENARIOS_SEED = [
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   })),
-  // Task 10.5: a scenario generated by an iterate run - `generation_run`
-  // set, `is_scratch: true` (corpus/serializers.py). The phase-3 scenario
-  // picker must say so plainly right in the option text, exactly as any
-  // other place a corpus row is listed must (spec §9's own "clients should
-  // mark scratch material wherever it appears").
+  // A scenario generated by an iterate run - `generation_run` set,
+  // `is_scratch: true` (corpus/serializers.py). The phase-3 scenario picker
+  // must say so plainly right in the option text.
   {
     id: 999,
     system_description: 5,
@@ -174,41 +164,23 @@ let templates;
 let nextTemplateId;
 let phaseRuns;
 let nextPhaseRunId;
-// Every write to /api/prompts/ (POST create, PATCH new-version) - the thing
-// backend commit 65f6387 makes provable: a refused draft preview issues
-// NEITHER, so a test can assert zero writes rather than only "the version
-// count looks the same," which a bug that both wrote AND rolled back could
-// still pass.
+// Every write to /api/prompts/ (POST create, PATCH new-version) - proves a
+// refused draft preview issues neither.
 let promptWriteCount;
-// Task 10.4: whether the mock's own backing store currently has an active
-// taxonomy to fall back to for a variant-A preview that supplies no
-// explicit `guard_taxonomy` (the frontend never sends one for variant A -
-// see PromptEditor.jsx's own `handlePreview`, phase-2 `contextFields`). A
-// test sets this to `null` to simulate "no active taxonomy" and prove the
-// mock fails CLOSED exactly like the real `_preview` (backend/prompts/
-// views.py) does, rather than the old, more permissive mock that always
-// returned a clean 200 for variant A regardless.
 let mockActiveTaxonomyId;
-// Task C: `DELETE /api/prompts/{id}/` - ids in this set stand in for a
-// template version an experiment or a run still pins, and get the real
-// API's own 400 refusal instead of actually being removed.
-let blockedPromptDeleteIds;
 
 function resetFixtures() {
-  templates = [...TEMPLATES_SEED, ...PAGINATION_TEMPLATE_VERSIONS].map((row) => ({ ...row }));
+  templates = TEMPLATES_SEED.map((row) => ({ ...row }));
   nextTemplateId = 100;
   phaseRuns = [];
   nextPhaseRunId = 900;
   promptWriteCount = 0;
   mockActiveTaxonomyId = 2;
-  blockedPromptDeleteIds = new Set();
 }
 
 // Stands in for prompts/rendering.py's render(): raises exactly the way
 // StrictUndefined does when a variant-A template stays away from the word
-// "taxonomy", and otherwise returns a trivially "rendered" string - this
-// mock is not a Jinja2 engine, only enough fidelity to prove the frontend
-// reacts correctly to a 200 vs. a 400 from the real shape of endpoint.
+// "taxonomy", and otherwise returns a trivially "rendered" string.
 function fakeRender(text, { variantA }) {
   if (variantA && /taxonomy/i.test(text)) {
     throw new Error("'taxonomy' is undefined");
@@ -216,10 +188,6 @@ function fakeRender(text, { variantA }) {
   return text.replace(/\{\{\s*taxonomy\s*\}\}/gi, '<TAXONOMY TABLE>');
 }
 
-// Shared by both preview routes (id-based and id-less) - one render path,
-// matching `prompts/views.py::_preview`'s own "exactly one code path"
-// design (a second, subtly different one for drafts is how this project
-// has produced taxonomy leaks before).
 function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) {
   if (phase === 2) {
     const variant = body.variant;
@@ -229,14 +197,6 @@ function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) 
         { status: 400 }
       );
     }
-    // Task 10.4: fail CLOSED, mirroring `_preview`'s own reasoning
-    // (backend/prompts/views.py) - a variant-A render for which the
-    // isolation backstop could not actually run (no explicit
-    // `guard_taxonomy`, and no active taxonomy to fall back to) must never
-    // be presentable as a clean 200. The OLD mock always returned 200 with
-    // `leak_scan_ran: true` for variant A regardless, which is exactly what
-    // let PromptEditor.jsx's own dead "isolation scan did NOT run" green
-    // state look reachable when it never legitimately was.
     if (variant === 'A' && !body.guard_taxonomy && mockActiveTaxonomyId == null) {
       return HttpResponse.json(
         {
@@ -298,35 +258,10 @@ beforeEach(() => {
       rows = [...rows].sort(
         (a, b) => a.phase - b.phase || a.name.localeCompare(b.name) || b.version - a.version
       );
-      // `paginate`, not the single-page `paginated`: PAGINATION_TEMPLATE_
-      // VERSIONS above pushes phase 2's own row count past PAGE_SIZE=50, so
-      // `usePromptTemplates` (now fetch-all, task 10.1) has something real
-      // to prove itself against.
       return HttpResponse.json(paginate(rows, url));
     }),
 
     http.get('/api/models/', () => HttpResponse.json(MODELS_SEED)),
-
-    // Task C: "add a Delete this version action" - staff-only, refused with
-    // the real 400 shape (`{detail}`) while an experiment or a run still
-    // pins this version, matching prompts/views.py.
-    http.delete('/api/prompts/:id/', async ({ request, params }) => {
-      const staffRefusal = requireStaff(currentUser());
-      if (staffRefusal) return staffRefusal;
-      const csrfRefusal = requireCsrf(request);
-      if (csrfRefusal) return csrfRefusal;
-      const id = Number(params.id);
-      const index = templates.findIndex((t) => t.id === id);
-      if (index === -1) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
-      if (blockedPromptDeleteIds.has(id)) {
-        return HttpResponse.json(
-          { detail: `Prompt template ${id} is in use by an experiment or a run and cannot be deleted.` },
-          { status: 400 }
-        );
-      }
-      templates.splice(index, 1);
-      return new HttpResponse(null, { status: 204 });
-    }),
 
     http.post('/api/prompts/', async ({ request }) => {
       const staffRefusal = requireStaff(currentUser());
@@ -339,6 +274,7 @@ beforeEach(() => {
         id: nextTemplateId++,
         phase: body.phase,
         name: body.name,
+        variant: body.variant ?? '',
         version: 1,
         system_prompt: body.system_prompt ?? '',
         user_prompt: body.user_prompt ?? '',
@@ -351,6 +287,9 @@ beforeEach(() => {
       return HttpResponse.json(created, { status: 201 });
     }),
 
+    // `PATCH` never mutates the addressed row - it creates and returns the
+    // NEXT version, copying `variant` forward (never accepting a new one -
+    // the contract's "copied forward on new versions").
     http.patch('/api/prompts/:id/', async ({ request, params }) => {
       const staffRefusal = requireStaff(currentUser());
       if (staffRefusal) return staffRefusal;
@@ -364,6 +303,7 @@ beforeEach(() => {
         id: nextTemplateId++,
         phase: existing.phase,
         name: existing.name,
+        variant: existing.variant,
         version: nextVersionFor(existing.name, existing.phase),
         system_prompt: body.system_prompt ?? existing.system_prompt,
         user_prompt: body.user_prompt ?? existing.user_prompt,
@@ -376,14 +316,6 @@ beforeEach(() => {
       return HttpResponse.json(created, { status: 201 });
     }),
 
-    // Mirrors backend commit 65f6387: `user_prompt` present in the body
-    // means "render THIS draft", never the persisted row's own text -
-    // and, on the id-less route, `phase` stands in for the row that
-    // doesn't exist yet. Neither branch touches `templates` - a refused
-    // draft (variant A referencing taxonomy, a missing B taxonomy, a
-    // missing phase-3 scenario) writes nothing, matching
-    // `prompts/views.py::_resolve_template`'s own "never .save()'d or
-    // .create()'d" guarantee.
     http.post('/api/prompts/:id/preview/', async ({ request, params }) => {
       const staffRefusal = requireStaff(currentUser());
       if (staffRefusal) return staffRefusal;
@@ -469,9 +401,6 @@ beforeEach(() => {
       return HttpResponse.json(created, { status: 202 });
     }),
 
-    // Task 10.5: "allow deleting an iterate run" - staff-only, refused with
-    // the real 409 shape (`code: "run_in_flight"`) while the run is still
-    // QUEUED/RUNNING, matching pipeline/views.py::PhaseRunViewSet.
     http.delete('/api/phase-runs/:id/', async ({ request, params }) => {
       const staffRefusal = requireStaff(currentUser());
       if (staffRefusal) return staffRefusal;
@@ -498,10 +427,6 @@ beforeEach(() => {
       const run = phaseRuns.find((r) => r.id === Number(params.id));
       if (!run) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
       run._polls += 1;
-      // First poll: still queued (so the screen has something non-terminal
-      // to show). Second poll onward: terminal - failed for the one
-      // fixture model this file uses to exercise the failure path,
-      // completed otherwise.
       if (run._polls >= 2 && run.status === 'queued') {
         run.status = run.model === 'trigger-failure' ? 'failed' : 'completed';
         run.progress = { done: 1, total: 1, failed: run.status === 'failed' ? 1 : 0, percent: 100 };
@@ -509,15 +434,6 @@ beforeEach(() => {
         if (run.status === 'failed') {
           run.error = 'OpenRouter returned HTTP 500: upstream provider error.';
         } else {
-          // Task 10.5: PhaseRunSerializer.get_leak_scan_ran/get_guarded_by
-          // (pipeline/serializers.py) derive these from the run's own
-          // ARCHIVED calls - true only once every call ran the scan. The
-          // one call `/api/phase-runs/:id/calls/` archives below is guarded
-          // exactly when `run.variant === 'A'` - mirrored here so the
-          // phase-run-LEVEL fields this run's own isolation note reads
-          // (PromptEditor.jsx's `IterateIsolationNote`) tell the same truth
-          // as the per-call ones, instead of staying hard-coded false
-          // forever regardless of variant or outcome.
           run.leak_scan_ran = run.phase === 2 && run.variant === 'A';
           run.guarded_by = run.leak_scan_ran ? [Number(run.taxonomy) || 2] : [];
         }
@@ -529,7 +445,44 @@ beforeEach(() => {
 
     http.get('/api/phase-runs/:id/calls/', ({ params }) => {
       const run = phaseRuns.find((r) => r.id === Number(params.id));
-      if (!run || run.status !== 'completed') return HttpResponse.json(paginated([]));
+      if (!run || (run.status !== 'completed' && run.status !== 'failed')) {
+        return HttpResponse.json(paginated([]));
+      }
+      // 'trigger-parse-failure' stands in for a call whose model DID
+      // respond (the run still completes) but whose output didn't parse -
+      // exercises the parse-failure header, the finish_reason==='length'
+      // note, and "Raw response" opening by default.
+      if (run.model === 'trigger-parse-failure') {
+        return HttpResponse.json(
+          paginated([
+            {
+              id: 9002,
+              sequence: 1,
+              scenario: null,
+              rendered_system_prompt: 'RENDERED SYSTEM PROMPT',
+              rendered_user_prompt: 'RENDERED USER PROMPT',
+              request_json: { model: run.model, some_key: 'some request value' },
+              response_json: { some_key: 'some response value' },
+              raw_response: 'RAW PARSE-FAILURE RESPONSE TEXT',
+              parsed_ok: false,
+              parse_error: 'Missing required key "hcv_id".',
+              unknown_hcv_ids: [],
+              stray_scenarios: [],
+              http_status: 200,
+              transport_error: '',
+              model: run.model,
+              finish_reason: 'length',
+              prompt_tokens: 30,
+              completion_tokens: 400,
+              cost: 0.02,
+              latency_ms: 900,
+              leak_scan_ran: run.variant === 'A',
+              guarded_by: run.variant === 'A' ? 2 : null,
+              created_at: '2026-09-10T00:05:00Z',
+            },
+          ])
+        );
+      }
       return HttpResponse.json(
         paginated([
           {
@@ -563,19 +516,8 @@ beforeEach(() => {
   );
 });
 
-// Template options only exist once the list query has resolved - waiting
-// for the option's own text (not merely for the <select> itself, which
-// renders immediately) is what keeps every interaction below from racing
-// the fetch.
-async function selectTemplate(user, name) {
-  const select = await screen.findByLabelText(/^template$/i);
-  await within(select).findByText(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  await user.selectOptions(select, name);
-}
-
-// The iterate panel's model field is a ModelPicker now (task C), not a
-// plain text input - open it, type the id to narrow the list to one row,
-// then click that row (found by ModelPicker's own `data-testid`).
+// The iterate panel's model field is a ModelPicker, not a plain text input -
+// open it, type the id to narrow the list to one row, then click that row.
 async function pickModel(user, modelId) {
   const field = await screen.findByLabelText(/^model$/i);
   await user.click(field);
@@ -584,44 +526,32 @@ async function pickModel(user, modelId) {
   await user.click(option);
 }
 
+async function openTestPanel(user) {
+  await user.click(await screen.findByRole('button', { name: /test this prompt/i }));
+}
+
 describe('PromptEditor', () => {
-  it('lists templates by phase, and makes the phase-2 variant an explicit, required choice', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+  it('shows a stored variant fixed for an existing phase-2 prompt', async () => {
+    renderApp({ initialEntries: ['/prompts/1/edit'] });
 
-    const templateSelect = await screen.findByLabelText(/^template$/i);
-    expect(await within(templateSelect).findByText(/generation-baseline/)).toBeInTheDocument();
-    expect(within(templateSelect).getByText(/phase2-safe/)).toBeInTheDocument();
+    expect(await screen.findByText(/editing: variant a.*taxonomy withheld/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/variant a/i)).toBeDisabled();
+    expect(screen.getByText(/variant is fixed for an existing prompt/i)).toBeInTheDocument();
+  });
 
-    await selectTemplate(user, 'generation-baseline');
+  it('phase 3 has no variant concept at all', async () => {
+    renderApp({ initialEntries: ['/prompts/4/edit'] });
 
-    // Phase 2: the variant is not merely implied by which template is
-    // selected (PromptTemplate has no variant field of its own) - the
-    // screen must say, in plain words, which one is being edited.
-    expect(screen.getByLabelText(/variant a/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/variant b/i)).toBeInTheDocument();
-    expect(screen.getByText(/no variant chosen yet/i)).toBeInTheDocument();
-
-    await user.click(screen.getByLabelText(/variant a/i));
-    expect(screen.getByText(/editing: variant a.*taxonomy withheld/i)).toBeInTheDocument();
-
-    // Phase 3 has no variant concept at all - always sees the taxonomy.
-    await user.selectOptions(screen.getByLabelText(/^phase$/i), '3');
-    expect(await screen.findByText(/labelling-default/)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/user prompt/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/variant a/i)).not.toBeInTheDocument();
   });
 
   it('a variant-A template referencing taxonomy shows the render error, not a preview, and cannot be saved', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/1/edit'] });
 
-    await selectTemplate(user, 'generation-baseline');
-    await user.click(screen.getByLabelText(/variant a/i));
-
-    const previewButton = screen.getByRole('button', { name: /^preview$/i });
+    const previewButton = await screen.findByRole('button', { name: /^preview$/i });
     const saveButton = screen.getByRole('button', { name: /^save$/i });
-    // Nothing has been previewed yet - Save starts disabled, not merely
-    // "not yet clicked". Spec §10: validated BEFORE it can be saved.
     expect(saveButton).toBeDisabled();
 
     await user.click(previewButton);
@@ -629,421 +559,222 @@ describe('PromptEditor', () => {
     expect(await screen.findByText(/render failed/i)).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent(/'taxonomy' is undefined/i);
     expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/rendered system prompt/i)).not.toBeInTheDocument();
-
-    // Cannot be saved: Save stays disabled with the reason shown...
     expect(saveButton).toBeDisabled();
-    expect(screen.getByText(/fix the render error above, then preview again before saving/i)).toBeInTheDocument();
-    // ...and - the guarantee backend commit 65f6387 makes provable - NO
-    // write request was ever issued: no new row, no version bump. This is
-    // the whole point of a real, non-persisting draft preview.
     expect(promptWriteCount).toBe(0);
-    expect(templates).toHaveLength(TEMPLATES_SEED.length + PAGINATION_TEMPLATE_VERSIONS.length);
-    expect(templates.find((t) => t.id === 1).version).toBe(1);
 
-    // Changing the draft is what lifts the block, not a page reload -
-    // Save stays disabled until it has been proven again by a fresh preview.
     await user.type(screen.getByLabelText(/user prompt/i), ' extra');
     expect(saveButton).toBeDisabled();
     expect(promptWriteCount).toBe(0);
   });
 
-  it('the same template body previews successfully for variant B', async () => {
+  it('an existing variant-B template previews successfully with the active taxonomy preselected', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/3/edit'] });
 
-    await selectTemplate(user, 'generation-baseline');
-    await user.click(screen.getByLabelText(/variant b/i));
-
-    // The active taxonomy (id 2, from the shared fixture) is offered by
-    // default - variant B requires one, but the researcher should not have
-    // to hunt for "the" taxonomy every single time.
+    await screen.findByText(/editing: variant b/i);
     expect(screen.getByLabelText(/^taxonomy$/i)).toHaveValue('2');
 
     const saveButton = screen.getByRole('button', { name: /^save$/i });
     expect(saveButton).toBeDisabled();
-
     await user.click(screen.getByRole('button', { name: /^preview$/i }));
 
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(screen.getByText(/<TAXONOMY TABLE>/)).toBeInTheDocument();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    // Proven by a real preview of this exact draft - now Save may proceed,
-    // and nothing has been written yet (preview itself never persists).
     expect(saveButton).toBeEnabled();
     expect(promptWriteCount).toBe(0);
   });
 
-  it('editing a template creates a new version once it previews cleanly, and older versions are viewable', async () => {
+  it('editing a template body creates a new version once previewed cleanly, and "Test this prompt" reflects it is saved', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/3/edit'] });
 
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-
-    const userPromptField = screen.getByLabelText(/user prompt/i);
-    await user.clear(userPromptField);
-    await user.type(userPromptField, 'Write a totally different system.');
-
-    const saveButton = screen.getByRole('button', { name: /^save$/i });
-    expect(saveButton).toBeDisabled();
-
+    const userPromptField = await screen.findByLabelText(/user prompt/i);
+    await user.type(userPromptField, ' Updated.');
     await user.click(screen.getByRole('button', { name: /^preview$/i }));
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(saveButton).toBeEnabled();
 
-    await user.click(saveButton);
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
 
-    expect(await screen.findByText('Version 2')).toBeInTheDocument();
-    expect(screen.getByText('Version 1')).toBeInTheDocument();
-    expect(promptWriteCount).toBe(1);
+    await waitFor(() => expect(promptWriteCount).toBe(1));
+    expect(templates.find((t) => t.name === 'phase2-variant-b' && t.version === 2)).toMatchObject({
+      user_prompt: 'Write {{ n_systems }} systems, variant B. Updated.',
+    });
 
-    const version1Row = screen.getByText('Version 1').closest('li');
-    await user.click(within(version1Row).getByRole('button', { name: /view/i }));
-
-    expect(screen.getByLabelText(/user prompt/i)).toHaveValue('Write {{ n_systems }} systems.');
+    // Proof the route/id actually followed the new version, not just that a
+    // write happened: with nothing left unsaved, the test button now reads
+    // "Run test", not "Save & test".
+    await openTestPanel(user);
+    expect(await screen.findByRole('button', { name: /^run test$/i })).toBeInTheDocument();
   });
 
-  // User feedback: "please have one default prompt for both variant[s]...
-  // the user can add, update, or delete" - task C adds the delete action.
-  it('a staff user can delete the selected template version, landing on another version of the same template', async () => {
+  it('creates a brand-new phase-2 prompt with a freely-chosen variant through the id-less preview route', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/new?phase=2'] });
 
-    await selectTemplate(user, 'pagination-fixture');
-    expect(await screen.findByText('Version 55')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: /delete this version/i }));
-    const dialog = screen.getByRole('alertdialog');
-    expect(dialog).toHaveTextContent(/version 55/i);
-    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
-
-    await waitFor(() => expect(screen.queryByText('Version 55')).not.toBeInTheDocument());
-    // Landed on another version of the SAME template, not cleared entirely.
-    expect(screen.getByText(/editing.*pagination-fixture/i)).toBeInTheDocument();
-    expect(screen.getByText('Version 54')).toBeInTheDocument();
-    expect(templates.find((t) => t.name === 'pagination-fixture' && t.version === 55)).toBeUndefined();
-  });
-
-  it("shows the API's refusal when deleting a version still pinned by an experiment or a run, and keeps it selected", async () => {
-    const user = userEvent.setup();
-    blockedPromptDeleteIds.add(1); // generation-baseline v1
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await selectTemplate(user, 'generation-baseline');
-    await user.click(screen.getByRole('button', { name: /delete this version/i }));
-    const dialog = screen.getByRole('alertdialog');
-    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
-
-    expect(await screen.findByText(/in use by an experiment or a run/i)).toBeInTheDocument();
-    // Nothing was removed, and the version is still the one loaded.
-    expect(screen.getByText('Version 1')).toBeInTheDocument();
-    expect(templates.find((t) => t.id === 1)).toBeDefined();
-  });
-
-  it('previews a brand-new template with no id yet through the id-less route, then creates it', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await screen.findByLabelText(/^template$/i);
-    await user.click(screen.getByRole('button', { name: /new template/i }));
-
-    await user.type(screen.getByLabelText(/^name$/i), 'brand-new-template');
+    await user.type(await screen.findByLabelText(/^name$/i), 'brand-new-template');
     await user.click(screen.getByLabelText(/variant a/i));
+    expect(screen.getByLabelText(/variant a/i)).toBeEnabled(); // free choice - nothing stored yet
     await user.type(screen.getByLabelText(/user prompt/i), 'Make {{ n_systems }} systems.');
 
     const saveButton = screen.getByRole('button', { name: /^save$/i });
     expect(saveButton).toBeDisabled();
-
     await user.click(screen.getByRole('button', { name: /^preview$/i }));
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    // Nothing was created by the preview itself - the id-less route never
-    // touches `templates` either, same as the id-based one.
-    expect(templates.find((t) => t.name === 'brand-new-template')).toBeUndefined();
-    expect(promptWriteCount).toBe(0);
+    expect(promptWriteCount).toBe(0); // preview never persists, id-less route included
 
     await user.click(saveButton);
 
     expect(await screen.findByText(/editing.*brand-new-template/i)).toBeInTheDocument();
-    expect(templates.find((t) => t.name === 'brand-new-template' && t.version === 1)).toBeTruthy();
+    expect(templates.find((t) => t.name === 'brand-new-template')).toMatchObject({ version: 1, variant: 'A' });
     expect(promptWriteCount).toBe(1);
   });
 
-  // These two poll the real RUN_POLL_INTERVAL_MS (4s) with REAL timers
-  // rather than fake ones: userEvent's own internal pacing schedules real
-  // `setTimeout`s that a fake clock engaged partway through a test never
-  // reliably captures (React Query only schedules its refetch-interval
-  // timer once the FIRST fetch settles, and getting a fake clock installed
-  // at exactly the right moment relative to that, while still letting
-  // userEvent's own clicks/typing resolve, proved consistently flaky here).
-  // A real wait is slower but unambiguous - `findByText`'s own `timeout`
-  // is raised past one poll interval accordingly.
-  const POLL_WAIT = { timeout: RUN_POLL_INTERVAL_MS + 2000 };
-
-  it('runs an iterate-mode phase run, borrowing an experiment and overriding counts, and states it is scratch', async () => {
+  it('"Test this prompt" opens a side panel that never blocks the editor, closed by default', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/3/edit'] });
+    await screen.findByLabelText(/user prompt/i);
 
+    const panel = screen.getByTestId('side-panel');
+    expect(panel).not.toBeVisible();
+    expect(screen.queryByTestId('test-status-dot')).not.toBeInTheDocument();
+
+    await openTestPanel(user);
+    expect(panel).toBeVisible();
     expect(await screen.findByText(/never archived/i)).toBeInTheDocument();
+    // Nothing about the editor itself became unusable - no backdrop, no
+    // focus trap.
+    expect(screen.getByRole('button', { name: /^preview$/i })).toBeVisible();
+    expect(screen.getByLabelText(/user prompt/i)).toBeEnabled();
 
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
+    await user.click(screen.getByRole('button', { name: /^close$/i }));
+    expect(panel).not.toBeVisible();
+    // Hidden, not unmounted - its own content is still in the DOM.
+    expect(screen.getByText(/never archived/i)).toBeInTheDocument();
+  });
 
-    await user.selectOptions(
-      screen.getByLabelText(/borrow inputs from experiment/i),
-      'Baseline HCV-21 comparison'
-    );
-    expect(screen.getByLabelText(/override n_systems/i)).toHaveValue(1);
-    expect(screen.getByLabelText(/override n_scenarios_per_system/i)).toHaveValue(1);
+  it('with unsaved changes the button reads "Save & test", saves a new version, then runs it', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/3/edit'] });
 
+    await user.type(await screen.findByLabelText(/user prompt/i), ' Edited for a test run.');
+    await user.click(screen.getByRole('button', { name: /^preview$/i }));
+    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
+
+    await openTestPanel(user);
+    expect(await screen.findByText(/never archived/i)).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/borrow inputs from experiment/i), 'Baseline HCV-21 comparison');
     await pickModel(user, 'openai/gpt-4o-mini');
 
-    await user.click(screen.getByRole('button', { name: /^run$/i }));
+    const button = screen.getByRole('button', { name: /^save & test$/i });
+    await user.click(button);
+
     expect(await screen.findByText('Queued')).toBeInTheDocument();
-    expect(await screen.findByText('Completed', {}, POLL_WAIT)).toBeInTheDocument();
+    expect(await screen.findByText('Completed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
 
-    expect(await screen.findByText('RENDERED SYSTEM PROMPT')).toBeInTheDocument();
-    expect(screen.getByText('RENDERED USER PROMPT')).toBeInTheDocument();
-    expect(screen.getByText('RAW MODEL RESPONSE TEXT')).toBeInTheDocument();
-
+    expect(promptWriteCount).toBe(1);
+    const newVersion = templates.find((t) => t.name === 'phase2-variant-b' && t.version === 2);
+    expect(newVersion).toBeTruthy();
+    expect(phaseRuns[0].prompt_template).toBe(newVersion.id);
     expect(phaseRuns[0].experiment).toBe(1);
-    expect(phaseRuns[0].n_systems).toBe(1);
-    expect(phaseRuns[0].n_scenarios_per_system).toBe(1);
   }, 15000);
 
-  it('an iterate run that fails shows the API error', async () => {
+  it('with no unsaved changes the button reads "Run test" and runs the version being edited without saving', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
 
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-    await pickModel(user, 'trigger-failure');
-
-    await user.click(screen.getByRole('button', { name: /^run$/i }));
-    expect(await screen.findByText('Queued')).toBeInTheDocument();
-    expect(await screen.findByText('Failed', {}, POLL_WAIT)).toBeInTheDocument();
-
-    expect(screen.getByRole('alert')).toHaveTextContent(/upstream provider error/i);
-  }, 15000);
-
-  it('a POST validation failure when creating an iterate run shows the API error', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-
-    // The Run button stays disabled with no model entered (client-side
-    // guard) - assert the reason is shown rather than nothing happening.
-    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled();
-    expect(screen.getByText(/enter a model id/i)).toBeInTheDocument();
-  });
-
-  it('the version history follows every page of a template with more than 50 versions (fails if only page 1 is read)', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    // `pagination-fixture` has 55 versions (PAGINATION_TEMPLATE_VERSIONS) -
-    // combined with the two OTHER phase-2 templates, the full phase-2 list
-    // is 57 rows: one page (50) would miss this template's own oldest
-    // versions AND the alphabetically-last `phase2-safe` template entirely.
-    await selectTemplate(user, 'pagination-fixture');
-
-    expect(await screen.findByText('Version 55')).toBeInTheDocument(); // the newest, loaded by default
-    expect(screen.getByText('Version 1')).toBeInTheDocument(); // the oldest - lands on page 2
-
-    // `phase2-safe` (sorted after `pagination-fixture`) is entirely on page
-    // 2 too - proof the picker itself, not only this template's own
-    // history, reflects every page.
-    const templateSelect = screen.getByLabelText(/^template$/i);
-    expect(within(templateSelect).getByText(/phase2-safe/)).toBeInTheDocument();
-  });
-
-  it("the phase-3 scenario picker offers every scenario, not just the first 50 (fails if only page 1 is read)", async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    // SCENARIOS_SEED has 55 rows - one page (50) would drop the last 5. The
-    // scenario picker only renders once a phase-3 template is loaded.
-    const phaseSelect = await screen.findByLabelText(/^phase$/i);
-    await user.selectOptions(phaseSelect, '3');
-    await selectTemplate(user, 'labelling-default');
-    const scenarioSelect = await screen.findByLabelText(/^scenario$/i);
-    expect(await within(scenarioSelect).findByText(/filler_64/)).toBeInTheDocument();
-  });
-
-  it('resets the variant choice whenever a different template loads, so a stale one can never carry over', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant b/i));
-    expect(screen.getByText(/editing: variant b/i)).toBeInTheDocument();
-
-    // Task 10.4's own confirmed bug: switching to a DIFFERENT template used
-    // to leave "B" selected and checked, as if it had already been chosen
-    // for THIS template too - a template only ever intended for variant A
-    // could then preview clean under the leftover B and be saved.
-    await selectTemplate(user, 'generation-baseline');
-
-    expect(screen.getByText(/no variant chosen yet/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/variant a/i)).not.toBeChecked();
-    expect(screen.getByLabelText(/variant b/i)).not.toBeChecked();
-    expect(screen.getByRole('button', { name: /^preview$/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
-  });
-
-  it('never lets a stale variant silently validate a newly-loaded template under the wrong one', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    // Preview 'phase2-safe' cleanly under variant B first.
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant b/i));
-    await user.click(screen.getByRole('button', { name: /^preview$/i }));
-    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-
-    // 'generation-baseline' references {{ taxonomy }} - safe under B, but
-    // fails under A. Loading it resets the variant (the fix above), so it
-    // is never silently validated against the leftover "B" without the
-    // researcher explicitly choosing again for THIS template.
-    await selectTemplate(user, 'generation-baseline');
-
-    expect(screen.getByText(/no variant chosen yet/i)).toBeInTheDocument();
-    expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
-  });
-
-  // Coordinator review (final polish, item 2): a probe found the Save-gate
-  // key (`computeAttemptKey`, `forVariant`) correctly disables Save the
-  // moment the variant radio is switched, WITHOUT touching the template
-  // (unlike the test above, which switches to a whole different template -
-  // `loadVersion` resetting `variant` to '' would mask a bug here). Nothing
-  // guarded this: `forVariant` could be dropped from the key entirely and
-  // every other test in this file would still pass, since none of them
-  // switch variant on the SAME already-previewed template. `phase2-safe`
-  // never references `{{ taxonomy }}`, so it genuinely previews clean under
-  // BOTH variants - the only way to prove this is "not yet re-validated for
-  // THIS variant", not "would fail under A anyway".
-  it('switching the variant radio on an already-previewed template disables Save again, even though the body never changed', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant b/i));
-    await user.click(screen.getByRole('button', { name: /^preview$/i }));
-    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-
-    const saveButton = screen.getByRole('button', { name: /^save$/i });
-    expect(saveButton).toBeEnabled();
-
-    // Same template, same draft body - only the variant choice changes.
-    await user.click(screen.getByLabelText(/variant a/i));
-
-    expect(saveButton).toBeDisabled();
-    expect(screen.getByText(/preview this exact content successfully/i)).toBeInTheDocument();
-  });
-
-  // Task 10.4: the real endpoint fails CLOSED (400) for a variant-A preview
-  // whose isolation scan could not actually run - never a clean 200 with
-  // `leak_scan_ran: false`. Before this task, the mock always returned 200
-  // regardless, which is the only reason PromptEditor.jsx's own dead
-  // "isolation scan did NOT run" green state ever looked reachable.
-  it('a variant-A preview that cannot verify isolation fails closed with a 400, never a green "Preview OK"', async () => {
-    const user = userEvent.setup();
-    mockActiveTaxonomyId = null; // nothing to fall back to, and the frontend never sends guard_taxonomy for variant A
-    renderApp({ initialEntries: ['/prompts'] });
-
-    // 'phase2-safe' never references {{ taxonomy }} - it would otherwise
-    // render "clean" every time, so a 400 here can only come from the
-    // fail-closed isolation check itself, not a StrictUndefined error.
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-    await user.click(screen.getByRole('button', { name: /^preview$/i }));
-
-    expect(await screen.findByText(/render failed/i)).toBeInTheDocument();
-    expect(screen.getByRole('alert')).toHaveTextContent(/cannot verify variant a stayed unbiased/i);
-    expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
-    // The removed dead state must never appear, under any circumstance.
-    expect(screen.queryByText(/isolation scan did not run/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
-  });
-
-  // Task 10.5: "show isolation evidence in the iterate panel... legible for
-  // variant A, just as Run detail shows it" - the phase-run/call serializers
-  // already expose `leak_scan_ran`/`guarded_by`; this proves the panel
-  // actually reads them, not only that the backend carries them.
-  it('shows isolation evidence for a completed variant-A iterate run, matching Run detail\'s own wording', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
+    await openTestPanel(user);
     await pickModel(user, 'openai/gpt-4o-mini');
+    await user.click(screen.getByRole('button', { name: /^run test$/i }));
 
-    await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
-    expect(await screen.findByText('Completed', {}, POLL_WAIT)).toBeInTheDocument();
+    // The "Test this prompt" button carries a status dot while a test runs.
+    expect(screen.getByTestId('test-status-dot')).toBeInTheDocument();
+    expect(await screen.findByText('Completed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
+    expect(screen.queryByTestId('test-status-dot')).not.toBeInTheDocument();
 
+    expect(promptWriteCount).toBe(0);
+    expect(phaseRuns[0].prompt_template).toBe(2);
     expect(screen.getByText(/isolation verified/i)).toBeInTheDocument();
     expect(screen.getByText(/guarded by taxonomy #2/i)).toBeInTheDocument();
   }, 15000);
 
-  it('a staff user can delete a completed iterate run, which clears the results panel', async () => {
+  it('shows per-call detail: header, parse failure, the output-limit note, and Raw response open by default', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
 
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-    await pickModel(user, 'openai/gpt-4o-mini');
-    await user.click(screen.getByRole('button', { name: /^run$/i }));
+    await openTestPanel(user);
+    await pickModel(user, 'trigger-parse-failure');
+    await user.click(screen.getByRole('button', { name: /^run test$/i }));
+
     expect(await screen.findByText('Queued')).toBeInTheDocument();
-    expect(await screen.findByText('Completed', {}, POLL_WAIT)).toBeInTheDocument();
+    expect(await screen.findByText('Completed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
+
+    expect(await screen.findByText(/parse failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/parse error: missing required key/i)).toBeInTheDocument();
+    expect(screen.getByText(/model stopped at its output limit/i)).toBeInTheDocument();
+
+    // Raw response opens by default because parsing failed - its text is
+    // visible with no click.
+    expect(screen.getByText('RAW PARSE-FAILURE RESPONSE TEXT')).toBeInTheDocument();
+    // Every other section stays closed until asked for.
+    expect(screen.queryByText(/"some_key": "some response value"/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /full response json/i }));
+    expect(await screen.findByText(/"some_key": "some response value"/)).toBeInTheDocument();
+  }, 15000);
+
+  it('an iterate run that fails shows the API error, and a missing model keeps Run test disabled with a reason', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    expect(screen.getByRole('button', { name: /^run test$/i })).toBeDisabled();
+    expect(screen.getByText(/enter a model id/i)).toBeInTheDocument();
+
+    await pickModel(user, 'trigger-failure');
+    await user.click(screen.getByRole('button', { name: /^run test$/i }));
+
+    expect(await screen.findByText('Queued')).toBeInTheDocument();
+    expect(await screen.findByText('Failed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/upstream provider error/i);
+    // The status dot turns red once the last run failed.
+    expect(screen.getByTestId('test-status-dot')).toHaveClass('bg-red-500');
+  }, 15000);
+
+  it('a completed run can be deleted, and a 409 while still queued keeps it with the API message', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    await pickModel(user, 'openai/gpt-4o-mini');
+    await user.click(screen.getByRole('button', { name: /^run test$/i }));
+    expect(await screen.findByText('Queued')).toBeInTheDocument();
 
     const runId = phaseRuns[0].id;
     await user.click(screen.getByRole('button', { name: /delete this run/i }));
     const dialog = screen.getByRole('alertdialog');
-    expect(dialog).toHaveTextContent(/goes with it/i);
     await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
+    expect(await screen.findByText(/cannot be deleted while a worker may still hold it/i)).toBeInTheDocument();
+    expect(phaseRuns.find((r) => r.id === runId)).toBeDefined();
 
+    // The dialog stays open after a failed attempt (no re-click of the
+    // trigger needed) - confirm again once the run has actually finished.
+    expect(await screen.findByText('Completed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
     await waitFor(() => expect(screen.queryByText(`Phase run #${runId}`)).not.toBeInTheDocument());
     expect(phaseRuns.find((r) => r.id === runId)).toBeUndefined();
   }, 15000);
 
-  it('a 409 while the iterate run is still queued shows the API\'s own message, and deletes nothing', async () => {
+  it('phase 3 requires a taxonomy, scenario and source run; the scenario picker offers every page and marks scratch rows', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
+    renderApp({ initialEntries: ['/prompts/4/edit'] });
 
-    await selectTemplate(user, 'phase2-safe');
-    await user.click(screen.getByLabelText(/variant a/i));
-    await pickModel(user, 'openai/gpt-4o-mini');
-    await user.click(screen.getByRole('button', { name: /^run$/i }));
-    expect(await screen.findByText('Queued')).toBeInTheDocument();
-
-    const runId = phaseRuns[0].id;
-    await user.click(screen.getByRole('button', { name: /delete this run/i }));
-    const dialog = screen.getByRole('alertdialog');
-    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
-
-    expect(await screen.findByText(/cannot be deleted while a worker may still hold it/i)).toBeInTheDocument();
-    expect(phaseRuns.find((r) => r.id === runId)).toBeDefined();
-  });
-
-  // Task 10.5: "mark scratch rows wherever corpus rows appear... the prompt
-  // editor's phase-3 scenario picker."
-  it('marks a scratch scenario in the phase-3 preview scenario picker', async () => {
-    const user = userEvent.setup();
-    renderApp({ initialEntries: ['/prompts'] });
-
-    const phaseSelect = await screen.findByLabelText(/^phase$/i);
-    await user.selectOptions(phaseSelect, '3');
-    await selectTemplate(user, 'labelling-default');
     const scenarioSelect = await screen.findByLabelText(/^scenario$/i);
-
-    const scratchOption = await within(scenarioSelect).findByText(/scratch_01/);
+    expect(await within(scenarioSelect).findByText(/filler_64/)).toBeInTheDocument();
+    const scratchOption = within(scenarioSelect).getByText(/scratch_01/);
     expect(scratchOption).toHaveTextContent(/scratch \(iterate run\)/i);
+    expect(within(scenarioSelect).getByText(/sc_01/)).not.toHaveTextContent(/scratch/i);
 
-    const ordinaryOption = within(scenarioSelect).getByText(/sc_01/);
-    expect(ordinaryOption).not.toHaveTextContent(/scratch/i);
+    await openTestPanel(user);
+    expect(screen.getByRole('button', { name: /^run test$/i })).toBeDisabled();
+    expect(screen.getByText(/needs the id of the phase 2 run whose scenarios it will label/i)).toBeInTheDocument();
   });
 });

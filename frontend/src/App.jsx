@@ -8,6 +8,8 @@ import Dashboard from './pages/Dashboard';
 import Resources from './pages/Resources';
 import Taxonomy from './pages/Taxonomy';
 import PromptEditor from './pages/PromptEditor';
+import PromptList from './pages/PromptList';
+import PromptView from './pages/PromptView';
 import ExperimentBuilder from './pages/ExperimentBuilder';
 import ExperimentDetail from './pages/ExperimentDetail';
 import RunDetail from './pages/RunDetail';
@@ -62,7 +64,14 @@ export default function App() {
               tab (task 11) - this old route just forwards there so any
               existing bookmark/link keeps working. */}
           <Route path="/corpus" element={<Navigate to="/resources?tab=corpus" replace />} />
-          <Route path="/prompts" element={<PromptEditor />} />
+          <Route path="/prompts" element={<PromptList />} />
+          {/* Order matters: "new" must match before the ":id" route below,
+              the same way "/experiments/:id/edit" is ordered ahead of
+              "/experiments/:id" - otherwise react-router would try to parse
+              "new" as an id. */}
+          <Route path="/prompts/new" element={<PromptEditor />} />
+          <Route path="/prompts/:id/edit" element={<PromptEditor />} />
+          <Route path="/prompts/:id" element={<PromptView />} />
           <Route path="/experiments/new" element={<ExperimentBuilder />} />
           {/* task 10.3: an experiment is never stranded - it always has a
               route back (`/experiments/:id`, linked from the Dashboard and

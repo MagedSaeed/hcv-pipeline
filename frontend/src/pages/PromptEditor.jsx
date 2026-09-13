@@ -1,10 +1,10 @@
 import { useState } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
   useCreatePhaseRun,
   useCreatePromptTemplate,
   useDeletePhaseRun,
-  useDeletePromptTemplate,
   useExperiments,
   useModels,
   usePhaseRun,
@@ -19,13 +19,11 @@ import CodeBlock from '../components/CodeBlock';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
+import SidePanel from '../components/SidePanel';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
 
-const PHASES = [
-  { value: 2, label: 'Phase 2 — generation' },
-  { value: 3, label: 'Phase 3 — labelling' },
-];
+const PHASE_LABELS = { 2: 'Phase 2 — generation', 3: 'Phase 3 — labelling' };
 
 // prompts/rendering.py's VARIANT_UNBIASED/VARIANT_GUIDED. Spelled out in
 // full here rather than just "A"/"B" - this label is the whole point of
@@ -44,17 +42,11 @@ const DELETE_ITERATE_RUN_MESSAGE =
   'Its generated material — every system description and scenario it produced — goes with it. ' +
   'There is no per-row undo.';
 
-const DELETE_TEMPLATE_VERSION_MESSAGE =
-  'This version is gone for good. If an experiment or a run still pins it, the API refuses the delete instead.';
-
 // Task 10.5: the same isolation evidence Run detail shows per phase run
 // (`leak_scan_ran`/`guarded_by`, both already on `PhaseRunSerializer`), read
 // straight off THIS iterate run rather than off whatever `phase`/`variant`
-// happen to be selected in the editor right now — those can drift out of
-// sync with what the run actually was (the researcher is free to keep
-// editing the form after launching one). Only meaningful for a phase-2,
-// variant-A run: phase 3 always receives the taxonomy on purpose, and
-// variant B is never withheld from it, so there is nothing to verify there.
+// happen to be selected in the editor right now - only meaningful for a
+// phase-2, variant-A run.
 function IterateIsolationNote({ iterateRun }) {
   if (iterateRun.phase !== 2 || iterateRun.variant !== 'A') return null;
   if (iterateRun.leak_scan_ran) {
@@ -73,24 +65,81 @@ function IterateIsolationNote({ iterateRun }) {
 }
 
 // PhaseRunSerializer's `error` field (a plain string) is not itself an
-// axios/DRF error object - ErrorBanner (task 1/2) only knows how to read
-// that shape via extractErrorMessage. Wrapping a bare string this way lets
-// a phase run's own failure reason reuse the exact same banner, rather than
-// this page inventing a second way to render an error message.
+// axios/DRF error object - wrap it so ErrorBanner can render it the same way.
 function asApiError(detail) {
   return { response: { data: { detail } } };
 }
 
-function groupTemplatesByName(templates) {
-  const groups = new Map();
-  for (const template of templates) {
-    if (!groups.has(template.name)) groups.set(template.name, []);
-    groups.get(template.name).push(template);
-  }
-  for (const versions of groups.values()) {
-    versions.sort((a, b) => b.version - a.version);
-  }
-  return groups;
+// A closed-by-default disclosure around one call detail block - kept tiny
+// and local rather than a shared component since nothing else in the app
+// needs this exact "click to reveal a big JSON/text blob" shape yet.
+function CallSection({ title, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-md border border-gray-200">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between px-2 py-1 text-left text-xs font-medium text-gray-700 hover:bg-gray-50"
+      >
+        <span>{title}</span>
+        <span className="text-gray-400">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open && <div className="border-t border-gray-200 p-2">{children}</div>}
+    </div>
+  );
+}
+
+// One LLMCall row (pipeline.serializers.PhaseRunCallSerializer) - a compact
+// header of what happened, then every raw artifact behind its own
+// disclosure so a long response/request never dominates the screen. "Raw
+// response" opens by default exactly when parsing failed - that is the one
+// case a researcher reads it first, not last.
+function PhaseRunCallCard({ call }) {
+  return (
+    <div className="space-y-2 rounded-md border border-gray-200 p-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+        <span className="font-semibold text-gray-900">Call #{call.sequence}</span>
+        <span>{call.model}</span>
+        <span>HTTP {call.http_status}</span>
+        <span>finish: {call.finish_reason || '—'}</span>
+        <span>
+          {call.prompt_tokens ?? '—'} → {call.completion_tokens ?? '—'} tokens
+        </span>
+        <span>${Number(call.cost ?? 0).toFixed(4)}</span>
+        <span className={call.parsed_ok ? 'font-medium text-green-700' : 'font-medium text-red-700'}>
+          {call.parsed_ok ? 'Parsed OK' : 'Parse failed'}
+        </span>
+      </div>
+      {!call.parsed_ok && call.parse_error && (
+        <p className="text-xs text-red-700">Parse error: {call.parse_error}</p>
+      )}
+      {call.transport_error && <p className="text-xs text-red-700">Transport error: {call.transport_error}</p>}
+      {call.finish_reason === 'length' && (
+        <p role="note" className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          The model stopped at its output limit, so the output is incomplete.
+        </p>
+      )}
+      <div className="space-y-2">
+        <CallSection title="Raw response" defaultOpen={!call.parsed_ok}>
+          <CodeBlock title="Raw response" code={call.raw_response} />
+        </CallSection>
+        <CallSection title="Full response JSON">
+          <CodeBlock title="Full response JSON" code={JSON.stringify(call.response_json ?? {}, null, 2)} />
+        </CallSection>
+        <CallSection title="Request sent">
+          <CodeBlock title="Request sent" code={JSON.stringify(call.request_json ?? {}, null, 2)} />
+        </CallSection>
+        <CallSection title="Rendered prompt">
+          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+            <CodeBlock title="Rendered system prompt" code={call.rendered_system_prompt} />
+            <CodeBlock title="Rendered user prompt" code={call.rendered_user_prompt} />
+          </div>
+        </CallSection>
+      </div>
+    </div>
+  );
 }
 
 function parseOutputSchema(text) {
@@ -105,23 +154,27 @@ function parseOutputSchema(text) {
 
 const emptyDraft = { systemPrompt: '', userPrompt: '', outputSchemaText: '{}' };
 
+// This page now edits the template named by the URL - `/prompts/new?phase=`
+// (empty draft) or `/prompts/:id/edit` (loads that version) - browsing by
+// name/phase/version lives on PromptList/PromptView instead.
 export default function PromptEditor() {
   const { isStaff } = useAuth();
+  const navigate = useNavigate();
+  const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const isEditing = id != null;
+  const phaseParam = Number(searchParams.get('phase'));
 
-  const [phase, setPhase] = useState(2);
-  const [selectedName, setSelectedName] = useState('');
-  const [selectedId, setSelectedId] = useState(null);
+  const [loadedId, setLoadedId] = useState(null);
   const [variant, setVariant] = useState('');
-  const [creatingNew, setCreatingNew] = useState(false);
   const [newName, setNewName] = useState('');
   const [draft, setDraft] = useState(emptyDraft);
   const [schemaError, setSchemaError] = useState(null);
+  const [testOpen, setTestOpen] = useState(false);
 
-  // Preview/save context - the same fields PreviewSerializer accepts
-  // (spec §9: "assembling the same fields by hand... is the whole
-  // interface"). previewTaxonomyId is an explicit OVERRIDE; when blank the
-  // active taxonomy is used (see previewTaxonomyValue below) rather than
-  // forcing every visit to this screen to pick one by hand.
+  // Preview/save context - the same fields PreviewSerializer accepts.
+  // previewTaxonomyId is an explicit OVERRIDE; when blank the active
+  // taxonomy is used (see previewTaxonomyValue below).
   const [previewTaxonomyId, setPreviewTaxonomyId] = useState('');
   const [previewScenarioId, setPreviewScenarioId] = useState('');
   const [previewNSystems, setPreviewNSystems] = useState('3');
@@ -129,16 +182,13 @@ export default function PromptEditor() {
 
   const [previewResult, setPreviewResult] = useState(null);
   const [previewError, setPreviewError] = useState(null);
-  // Snapshot of exactly what the LAST *successful* preview was run against
-  // (backend commit 65f6387 lets preview render a draft body without
-  // persisting anything - see the top-of-file note above `handlePreview`).
+  // Snapshot of exactly what the LAST *successful* preview was run against.
   // Save is enabled only while this still matches the current draft/
   // variant/context; any edit, a variant switch, or a different preview
-  // taxonomy/scenario invalidates it, so a save can never go out ahead of
-  // a render check on byte-identical content.
+  // taxonomy/scenario invalidates it.
   const [previewedKey, setPreviewedKey] = useState(null);
 
-  // Iterate panel - POST /api/phase-runs/ (spec §9/§10).
+  // Iterate ("Test this prompt") panel - POST /api/phase-runs/.
   const [iterateExperimentId, setIterateExperimentId] = useState('');
   const [iterateModel, setIterateModel] = useState('');
   const [iterateTemperature, setIterateTemperature] = useState('0');
@@ -147,33 +197,58 @@ export default function PromptEditor() {
   const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
   const [iterateRunId, setIterateRunId] = useState(null);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
-  const [confirmingDeleteTemplate, setConfirmingDeleteTemplate] = useState(false);
 
-  const templatesQuery = usePromptTemplates({ phase });
+  // Fetch-all rather than phase-filtered: an edit route only carries an id,
+  // not a phase, so the template's own row (found below) is what tells us
+  // which phase this is.
+  const templatesQuery = usePromptTemplates({});
   const taxonomiesQuery = useTaxonomies();
-  // Only phase 3 previews/iterate runs need a scenario - no point fetching
-  // it while the researcher is working on a phase 2 template.
-  const scenariosQuery = useScenarios({}, { enabled: phase === 3 });
   const experimentsQuery = useExperiments();
-  // The iterate panel's model field is a ModelPicker (task C) - staff only,
-  // same as the builder's own model fields.
   const modelsQuery = useModels({ enabled: isStaff });
 
   const previewMutation = usePreviewPromptTemplate();
   const createTemplate = useCreatePromptTemplate();
   const updateTemplate = useUpdatePromptTemplate();
-  const deleteTemplate = useDeletePromptTemplate();
   const createPhaseRun = useCreatePhaseRun();
   const deletePhaseRun = useDeletePhaseRun();
   const iterateRunQuery = usePhaseRun(iterateRunId);
+  // A failed run can still carry call records (whatever ran before the
+  // failure) - fetch on either terminal status, not completed only. The
+  // query is naturally "refetch on status change": it stays disabled while
+  // queued/running and only fires once `enabled` flips true on arrival.
   const iterateCallsQuery = usePhaseRunCalls(iterateRunId, {
-    enabled: iterateRunId != null && iterateRunQuery.data?.status === 'completed',
+    enabled:
+      iterateRunId != null &&
+      (iterateRunQuery.data?.status === 'completed' || iterateRunQuery.data?.status === 'failed'),
   });
 
   const templates = templatesQuery.data?.results ?? [];
-  const groups = groupTemplatesByName(templates);
-  const names = [...groups.keys()].sort((a, b) => a.localeCompare(b));
-  const versions = selectedName ? (groups.get(selectedName) ?? []) : [];
+  const currentTemplate = isEditing ? templates.find((template) => String(template.id) === id) : null;
+  const phase = isEditing ? currentTemplate?.phase : phaseParam;
+  // Only phase 3 previews/iterate runs need a scenario.
+  const scenariosQuery = useScenarios({}, { enabled: phase === 3 });
+
+  // React's own "adjust state when a prop changes" pattern (same as
+  // ExperimentBuilder.jsx): once the addressed version has loaded, seed the
+  // draft/variant from it - guarded so this only fires once per id, not on
+  // every render, and re-fires whenever the id in the URL changes (Save
+  // navigating to the new version, or a link to a different version).
+  if (isEditing && currentTemplate && loadedId !== id) {
+    setDraft({
+      systemPrompt: currentTemplate.system_prompt,
+      userPrompt: currentTemplate.user_prompt,
+      outputSchemaText: JSON.stringify(currentTemplate.output_schema ?? {}, null, 2),
+    });
+    // Task D: preselect from the stored value - a legacy/missing variant on
+    // a phase-2 row is "not set" (radio unselected), exactly as a brand-new
+    // draft starts.
+    setVariant(currentTemplate.variant ?? '');
+    setSchemaError(null);
+    setPreviewedKey(null);
+    setPreviewResult(null);
+    setPreviewError(null);
+    setLoadedId(id);
+  }
 
   const taxonomies = taxonomiesQuery.data?.results ?? [];
   const activeTaxonomy = taxonomies.find((taxonomy) => taxonomy.is_active) ?? null;
@@ -183,71 +258,28 @@ export default function PromptEditor() {
   const experiments = experimentsQuery.data?.results ?? [];
   const chosenExperiment = experiments.find((experiment) => experiment.id === Number(iterateExperimentId)) ?? null;
 
+  if (!isEditing && phaseParam !== 2 && phaseParam !== 3) {
+    return (
+      <ErrorBanner
+        error={asApiError('Missing or invalid phase — start a new prompt from the prompts list.')}
+      />
+    );
+  }
+
+  if (isEditing && (templatesQuery.isLoading || loadedId !== id)) {
+    if (templatesQuery.isError) return <ErrorBanner error={templatesQuery.error} />;
+    // A stale lookup (id not found YET) while a background refetch is still
+    // in flight - e.g. right after Save navigated here - is not the same as
+    // a genuinely missing id: wait for the refetch before calling it gone.
+    if (templatesQuery.isSuccess && !currentTemplate && !templatesQuery.isFetching) {
+      return <ErrorBanner error={asApiError('This prompt version could not be found.')} />;
+    }
+    return <p className="text-sm text-gray-500">Loading template…</p>;
+  }
+
   function clearPreviewState() {
     setPreviewResult(null);
     setPreviewError(null);
-  }
-
-  function resetEditorState() {
-    setSelectedName('');
-    setSelectedId(null);
-    setVariant('');
-    setCreatingNew(false);
-    setNewName('');
-    setDraft(emptyDraft);
-    setSchemaError(null);
-    setPreviewedKey(null);
-    clearPreviewState();
-  }
-
-  function handlePhaseChange(nextPhase) {
-    setPhase(nextPhase);
-    resetEditorState();
-  }
-
-  // Task 10.4's own confirmed bug: this never reset `variant`, so loading a
-  // DIFFERENT template (or a different version of the same one) inherited
-  // whichever variant happened to be selected before - silently, with the
-  // radio still shown as checked. A template only ever meant to run as
-  // variant A, but that references `{{ taxonomy }}`, would then preview
-  // CLEAN under a stale "B" left over from browsing a different template
-  // moments earlier, gate Save open, and get saved - only to be picked for
-  // `phase2_prompt_a` in the builder later, where it fails at launch (or,
-  // before task 10.4's backend half, silently passed through). Resetting to
-  // '' here forces an EXPLICIT re-choice every time a template loads -
-  // `missingRequiredPreviewInputs`/`canPreview`/`canSave` below already key
-  // off `variant === ''`, so this alone is what makes a stale variant
-  // impossible to leave in place, not merely unlikely.
-  function loadVersion(template) {
-    setSelectedName(template.name);
-    setSelectedId(template.id);
-    setCreatingNew(false);
-    setVariant('');
-    setDraft({
-      systemPrompt: template.system_prompt,
-      userPrompt: template.user_prompt,
-      outputSchemaText: JSON.stringify(template.output_schema ?? {}, null, 2),
-    });
-    setSchemaError(null);
-    setPreviewedKey(null);
-    clearPreviewState();
-  }
-
-  function handleSelectName(name) {
-    const versionsForName = groups.get(name) ?? [];
-    if (versionsForName.length > 0) loadVersion(versionsForName[0]);
-  }
-
-  function startNewTemplate() {
-    setSelectedName('');
-    setSelectedId(null);
-    setCreatingNew(true);
-    setNewName('');
-    setVariant('');
-    setDraft(emptyDraft);
-    setSchemaError(null);
-    setPreviewedKey(null);
-    clearPreviewState();
   }
 
   function updateDraftField(field, value) {
@@ -260,31 +292,22 @@ export default function PromptEditor() {
     clearPreviewState();
   }
 
-  // The exact draft+context a preview attempt was run against - `id`
-  // included so switching which named template/version is loaded (or
-  // toggling into "new template" mode) never lets a stale success from a
-  // DIFFERENT template read as validation for this one. Unlike before
-  // backend commit 65f6387, this id never changes as a SIDE EFFECT of
-  // previewing - preview no longer writes anything - so there is no longer
-  // a staleness trap to route around by keying off a not-yet-known
-  // post-save id; this key is simply "what am I looking at right now".
-  function computeAttemptKey({ id, isNew, forVariant, body, taxonomy, scenario }) {
-    return JSON.stringify({ id, isNew, forVariant, body, taxonomy, scenario });
+  // The exact draft+context a preview attempt was run against - keyed off
+  // the id (or null for a not-yet-saved draft) so switching which version is
+  // loaded never lets a stale success from a DIFFERENT version read as
+  // validation for this one.
+  function computeAttemptKey({ id: templateId, forVariant, body, taxonomy, scenario }) {
+    return JSON.stringify({ id: templateId, forVariant, body, taxonomy, scenario });
   }
 
   const currentAttemptKey = computeAttemptKey({
-    id: selectedId,
-    isNew: creatingNew,
+    id: isEditing ? currentTemplate.id : null,
     forVariant: variant,
     body: draft,
     taxonomy: previewTaxonomyValue,
     scenario: previewScenarioId,
   });
-  // Save is gated on a SUCCESSFUL preview of this exact content - not
-  // merely on the absence of a current error. This is the literal reading
-  // of spec §10: "validated against its own variant before it can be
-  // saved" - a template that has never been previewed at all is just as
-  // unsaved-until-proven as one whose last preview failed.
+  // Save is gated on a SUCCESSFUL preview of this exact content (spec §10).
   const previewedCurrentDraft = previewedKey === currentAttemptKey;
 
   const missingRequiredPreviewInputs =
@@ -292,11 +315,27 @@ export default function PromptEditor() {
       ? variant === '' || (variant === 'B' && !previewTaxonomyValue)
       : !previewTaxonomyValue || !previewScenarioId;
 
-  const missingName = creatingNew ? !newName.trim() : !selectedId;
+  const missingName = isEditing ? false : !newName.trim();
   const isPreviewing = previewMutation.isPending;
   const isPersisting = createTemplate.isPending || updateTemplate.isPending;
   const canPreview = isStaff && !missingRequiredPreviewInputs && !isPreviewing;
   const canSave = isStaff && !missingName && previewedCurrentDraft && !isPersisting;
+
+  // Task D: an existing phase-2 prompt's variant is fixed once saved -
+  // changing it means starting a new prompt from the list instead.
+  const variantLocked = isEditing && Boolean(currentTemplate?.variant);
+
+  // A draft differs from what is actually saved (or nothing is saved yet) -
+  // this decides whether "Test this prompt" reads "Save & test" or "Run
+  // test" (task D). Deliberately body-only: `variant` is never sent on
+  // update (it is "writable on create; copied forward on new versions" per
+  // the backend contract), so a variant choice alone is never something
+  // Save would actually persist.
+  const hasUnsavedChanges =
+    !isEditing ||
+    draft.systemPrompt !== currentTemplate.system_prompt ||
+    draft.userPrompt !== currentTemplate.user_prompt ||
+    draft.outputSchemaText !== JSON.stringify(currentTemplate.output_schema ?? {}, null, 2);
 
   function previewBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
@@ -316,15 +355,7 @@ export default function PromptEditor() {
   }
 
   // Renders the current draft through the real backend renderer WITHOUT
-  // persisting anything - `POST /api/prompts/{id}/preview/` (an existing
-  // template) or `POST /api/prompts/preview/` (a brand-new one, no id yet)
-  // both accept `system_prompt`/`user_prompt`/`output_schema` in the body
-  // and render THAT instead of any stored row, leaving no new version and
-  // no new row behind even when refused (backend commit 65f6387,
-  // `prompts/views.py::_resolve_template`). This is what makes "validated
-  // before it can be saved" literally true, rather than the save-first,
-  // validate-immediately-after compromise this screen shipped with
-  // originally - see the task report for that history.
+  // persisting anything (spec §9/§10) - never a client-side stand-in.
   async function handlePreview() {
     let outputSchema;
     try {
@@ -358,8 +389,8 @@ export default function PromptEditor() {
 
     try {
       const result = await previewMutation.mutateAsync({
-        id: creatingNew ? null : selectedId,
-        ...(creatingNew ? { phase } : {}),
+        id: isEditing ? currentTemplate.id : null,
+        ...(!isEditing ? { phase } : {}),
         ...draftFields,
         ...contextFields,
       });
@@ -371,77 +402,55 @@ export default function PromptEditor() {
   }
 
   // Only reachable once `canSave` is true, i.e. once `handlePreview` has
-  // already rendered this EXACT draft cleanly - so this simply persists
-  // content already proven to render, through the ordinary
-  // create-a-version/create-version-one endpoints. No second preview call
-  // is needed: render() is a pure function of the template's text and the
-  // context, both unchanged since the successful preview.
-  async function handleSave(event) {
-    event.preventDefault();
+  // already rendered this EXACT draft cleanly. Returns the saved row (the
+  // NEW version, per useUpdatePromptTemplate's own comment) or null on
+  // failure - shared by the top Save button and "Save & test" below.
+  async function saveDraft() {
     let outputSchema;
     try {
       outputSchema = parseOutputSchema(draft.outputSchemaText);
       setSchemaError(null);
     } catch (error) {
       setSchemaError(error.message);
-      return;
+      return null;
     }
 
-    let saved;
     try {
-      if (creatingNew) {
-        saved = await createTemplate.mutateAsync({
-          phase,
-          name: newName.trim(),
-          system_prompt: draft.systemPrompt,
-          user_prompt: draft.userPrompt,
-          output_schema: outputSchema,
-        });
-      } else {
-        saved = await updateTemplate.mutateAsync({
-          id: selectedId,
+      if (isEditing) {
+        return await updateTemplate.mutateAsync({
+          id: currentTemplate.id,
           system_prompt: draft.systemPrompt,
           user_prompt: draft.userPrompt,
           output_schema: outputSchema,
         });
       }
+      return await createTemplate.mutateAsync({
+        phase,
+        name: newName.trim(),
+        ...(phase === 2 ? { variant } : {}),
+        system_prompt: draft.systemPrompt,
+        user_prompt: draft.userPrompt,
+        output_schema: outputSchema,
+      });
     } catch {
       // Surfaced below via createTemplate.error/updateTemplate.error.
-      return;
+      return null;
     }
-
-    setSelectedName(saved.name);
-    setSelectedId(saved.id);
-    setCreatingNew(false);
   }
 
-  const canRunIterate =
-    isStaff &&
-    selectedId != null &&
-    !creatingNew &&
-    iterateModel.trim() !== '' &&
-    (chosenExperiment ? chosenExperiment.taxonomy != null : activeTaxonomy != null) &&
-    (phase !== 2 || variant !== '') &&
-    (phase !== 3 || iterateSourcePhaseRunId !== '');
-
-  function iterateBlockedReason() {
-    if (!isStaff) return null; // covered by its own notice below
-    if (creatingNew || selectedId == null) return 'Save a template above before running it here — iterate mode runs a persisted template id.';
-    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B above before running.';
-    if (!chosenExperiment && !activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen, or borrow an experiment instead.';
-    if (phase === 3 && iterateSourcePhaseRunId === '') return 'A phase 3 run needs the id of the phase 2 run whose scenarios it will label.';
-    if (iterateModel.trim() === '') return 'Enter a model id to run.';
-    return null;
-  }
-
-  async function handleRunIterate(event) {
+  async function handleSave(event) {
     event.preventDefault();
+    const saved = await saveDraft();
+    if (saved) navigate(`/prompts/${saved.id}/edit`, { replace: true });
+  }
+
+  async function runIterate(templateId) {
     const derivedTaxonomyId = chosenExperiment ? chosenExperiment.taxonomy : activeTaxonomy?.id;
     const body = {
       phase,
       model: iterateModel.trim(),
       temperature: Number(iterateTemperature || 0),
-      prompt_template: selectedId,
+      prompt_template: templateId,
       taxonomy: derivedTaxonomyId,
     };
     if (phase === 2) body.variant = variant;
@@ -461,631 +470,537 @@ export default function PromptEditor() {
     }
   }
 
+  // Task D: a test run needs a saved version - with unsaved changes, save
+  // (creating the next version) first, then run THAT one; otherwise run the
+  // version already being edited. The route is updated to the new version
+  // only AFTER the run is already under way (`iterateRunId` set), so the
+  // brief re-render while the new version loads never has a window where
+  // the just-started run is invisible.
+  async function handleTestPrompt(event) {
+    event.preventDefault();
+    if (hasUnsavedChanges) {
+      const saved = await saveDraft();
+      if (!saved) return;
+      await runIterate(saved.id);
+      navigate(`/prompts/${saved.id}/edit`, { replace: true });
+    } else {
+      await runIterate(currentTemplate.id);
+    }
+  }
+
+  function testBlockedReason() {
+    if (!isStaff) return null; // covered by its own notice below
+    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B above before testing.';
+    if (!chosenExperiment && !activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen, or borrow an experiment instead.';
+    if (phase === 3 && iterateSourcePhaseRunId === '') return 'A phase 3 run needs the id of the phase 2 run whose scenarios it will label.';
+    if (iterateModel.trim() === '') return 'Enter a model id to run.';
+    if (hasUnsavedChanges) return saveBlockedReason();
+    return null;
+  }
+
+  const canTest = isStaff && testBlockedReason() == null && !createPhaseRun.isPending && !isPersisting;
+
   async function handleDeleteIterateRunConfirmed() {
     try {
       await deletePhaseRun.mutateAsync(iterateRunId);
       setConfirmingDeleteIterateRun(false);
-      // Nothing left to show — the run and everything it generated is gone.
       setIterateRunId(null);
     } catch {
-      // Surfaced below via deletePhaseRun.isError/error - dialog stays open
-      // so the API's own 409 message (e.g. "run_in_flight") is visible.
-    }
-  }
-
-  // DELETE /api/prompts/{id}/ - refused with a 400 while an experiment or a
-  // run still pins this version (see this hook's own comment in
-  // api/queries.js). On success, land on another version of the SAME
-  // template if one is left, otherwise clear the editor entirely - computed
-  // off `versions` BEFORE the invalidated query has necessarily refetched,
-  // so this never races the cache.
-  async function handleDeleteTemplateConfirmed() {
-    try {
-      const deletedId = selectedId;
-      await deleteTemplate.mutateAsync(deletedId);
-      setConfirmingDeleteTemplate(false);
-      const remaining = versions.filter((version) => version.id !== deletedId);
-      if (remaining.length > 0) {
-        loadVersion(remaining[0]);
-      } else {
-        resetEditorState();
-      }
-    } catch {
-      // Surfaced below via deleteTemplate.isError/error - dialog stays open
-      // so the API's own 400 message (in use by an experiment or a run) is
-      // visible, and the version stays selected/loaded.
+      // Surfaced below via deletePhaseRun.isError/error - dialog stays open.
     }
   }
 
   const iterateRun = iterateRunQuery.data ?? null;
   const iterateCalls = iterateCallsQuery.data?.results ?? [];
 
+  // A small status dot on the "Test this prompt" button - the only trace of
+  // a run left once the panel itself is hidden (it is never unmounted, but
+  // a closed panel shows nothing on screen until reopened).
+  const testStatusDotClass =
+    iterateRun?.status === 'failed'
+      ? 'bg-red-500'
+      : iterateRun?.status === 'queued' || iterateRun?.status === 'running'
+        ? 'animate-pulse bg-blue-500'
+        : null;
+
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Prompt editor</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Jinja2 templates, versioned. Editing never mutates a version — it creates the next one, so
-          a run's pinned template id always stays recoverable.
-        </p>
-        {!isStaff && (
-          <p role="note" className="mt-2 text-sm text-amber-800">
-            You can browse templates and history. Only staff may edit, preview, or run one.
+    <div className={`space-y-8 ${testOpen ? 'md:pr-[calc(45%+1.5rem)]' : ''}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            {isEditing ? `Editing “${currentTemplate.name}”` : 'New prompt'}
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            {PHASE_LABELS[phase]} · Jinja2 templates, versioned. Saving never mutates a version — it
+            creates the next one, so a run's pinned template id always stays recoverable.
           </p>
-        )}
-      </div>
-
-      <section aria-labelledby="picker-heading" className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-        <h2 id="picker-heading" className="text-lg font-medium text-gray-900">
-          Choose a template
-        </h2>
-        <div className="flex flex-wrap items-end gap-4">
-          <div>
-            <label htmlFor="phase-select" className="block text-xs font-medium text-gray-700">
-              Phase
-            </label>
-            <select
-              id="phase-select"
-              value={phase}
-              onChange={(event) => handlePhaseChange(Number(event.target.value))}
-              className="mt-1 block rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-            >
-              {PHASES.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label htmlFor="template-select" className="block text-xs font-medium text-gray-700">
-              Template
-            </label>
-            <select
-              id="template-select"
-              value={creatingNew ? '' : selectedName}
-              onChange={(event) => handleSelectName(event.target.value)}
-              className="mt-1 block min-w-48 rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-            >
-              <option value="" disabled>
-                Select a template…
-              </option>
-              {names.map((name) => (
-                <option key={name} value={name}>
-                  {name} (v{groups.get(name)[0].version})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {isStaff && (
-            <button
-              type="button"
-              onClick={startNewTemplate}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setTestOpen(true)}
+            className="relative rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+          >
+            Test this prompt
+            {testStatusDotClass && (
+              <span
+                data-testid="test-status-dot"
+                className={`absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full ring-2 ring-white ${testStatusDotClass}`}
+              />
+            )}
+          </button>
+          {isEditing && (
+            <Link
+              to={`/prompts/${currentTemplate.id}`}
               className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
             >
-              New template
-            </button>
+              View
+            </Link>
           )}
         </div>
+      </div>
 
-        {templatesQuery.isLoading && <p className="text-sm text-gray-500">Loading templates…</p>}
-        {templatesQuery.isError && <ErrorBanner error={templatesQuery.error} />}
-        {templatesQuery.isSuccess && names.length === 0 && !creatingNew && (
-          <p className="text-sm text-gray-500">
-            No phase {phase} templates yet. {isStaff && 'Click "New template" to write the first one.'}
-          </p>
-        )}
-      </section>
-
-      {(selectedId != null || creatingNew) && (
-        <section aria-labelledby="editor-heading" className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 id="editor-heading" className="text-lg font-medium text-gray-900">
-              {creatingNew ? 'New template' : `Editing “${selectedName}”`}
-            </h2>
-            {isStaff && !creatingNew && selectedId != null && !confirmingDeleteTemplate && (
-              <button
-                type="button"
-                onClick={() => setConfirmingDeleteTemplate(true)}
-                className="rounded-md border border-red-600 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
-              >
-                Delete this version
-              </button>
-            )}
-          </div>
-
-          {confirmingDeleteTemplate && (
-            <ConfirmDialog
-              title={`Delete “${selectedName}” version ${versions.find((v) => v.id === selectedId)?.version ?? ''}?`}
-              message={DELETE_TEMPLATE_VERSION_MESSAGE}
-              confirmLabel="Confirm"
-              cancelLabel="Never mind"
-              pending={deleteTemplate.isPending}
-              onConfirm={handleDeleteTemplateConfirmed}
-              onCancel={() => setConfirmingDeleteTemplate(false)}
-            />
-          )}
-          {deleteTemplate.isError && <ErrorBanner error={deleteTemplate.error} />}
-
-          {creatingNew && (
-            <div>
-              <label htmlFor="new-name" className="block text-xs font-medium text-gray-700">
-                Name
-              </label>
-              <input
-                id="new-name"
-                value={newName}
-                onChange={(event) => setNewName(event.target.value)}
-                disabled={!isStaff}
-                className="mt-1 block w-full max-w-md rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm"
-              />
-            </div>
-          )}
-
-          {phase === 2 && (
-            <fieldset className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3">
-              <legend className="px-1 text-sm font-semibold text-amber-900">
-                Which variant is this template for?
-              </legend>
-              <p className="text-xs text-amber-800">
-                Phase 2 has two fully independent templates, one per variant. Getting this wrong
-                means editing the wrong arm of the experiment.
-              </p>
-              <div className="flex flex-col gap-2 sm:flex-row sm:gap-6">
-                {(['A', 'B']).map((choice) => (
-                  <label key={choice} className="flex items-center gap-2 text-sm text-amber-900">
-                    <input
-                      type="radio"
-                      name="variant"
-                      value={choice}
-                      checked={variant === choice}
-                      onChange={() => handleVariantChange(choice)}
-                      disabled={!isStaff}
-                    />
-                    <span>
-                      <strong>{VARIANT_COPY[choice].label}</strong> — {VARIANT_COPY[choice].detail}
-                    </span>
-                  </label>
-                ))}
-              </div>
-              <p className="text-sm font-semibold text-amber-900">
-                {variant
-                  ? `Editing: ${VARIANT_COPY[variant].label} — ${VARIANT_COPY[variant].detail}`
-                  : 'No variant chosen yet — preview and save are disabled until you pick one.'}
-              </p>
-            </fieldset>
-          )}
-
-          <div>
-            <label htmlFor="system-prompt" className="block text-xs font-medium text-gray-700">
-              System prompt (Jinja2)
-            </label>
-            <textarea
-              id="system-prompt"
-              value={draft.systemPrompt}
-              onChange={(event) => updateDraftField('systemPrompt', event.target.value)}
-              disabled={!isStaff}
-              rows={4}
-              spellCheck={false}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="user-prompt" className="block text-xs font-medium text-gray-700">
-              User prompt (Jinja2)
-            </label>
-            <textarea
-              id="user-prompt"
-              value={draft.userPrompt}
-              onChange={(event) => updateDraftField('userPrompt', event.target.value)}
-              disabled={!isStaff}
-              rows={8}
-              spellCheck={false}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="output-schema" className="block text-xs font-medium text-gray-700">
-              Output schema (JSON Schema, pinned into the request)
-            </label>
-            <textarea
-              id="output-schema"
-              value={draft.outputSchemaText}
-              onChange={(event) => updateDraftField('outputSchemaText', event.target.value)}
-              disabled={!isStaff}
-              rows={4}
-              spellCheck={false}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
-            />
-            {schemaError && <p className="mt-1 text-xs text-red-700">{schemaError}</p>}
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 rounded-md bg-gray-50 p-3 sm:grid-cols-2">
-            <p className="text-xs font-medium uppercase tracking-wide text-gray-500 sm:col-span-2">
-              Preview context — rendered by the real backend renderer, never synthesised here
-            </p>
-            {(phase === 3 || variant === 'B') && (
-              <div>
-                <label htmlFor="preview-taxonomy" className="block text-xs font-medium text-gray-700">
-                  Taxonomy
-                </label>
-                <select
-                  id="preview-taxonomy"
-                  value={previewTaxonomyValue}
-                  onChange={(event) => {
-                    setPreviewTaxonomyId(event.target.value);
-                    clearPreviewState();
-                  }}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                >
-                  <option value="">Select a taxonomy…</option>
-                  {taxonomies.map((taxonomy) => (
-                    <option key={taxonomy.id} value={taxonomy.id}>
-                      {taxonomy.vocabulary_id} v{taxonomy.version}
-                      {taxonomy.is_active ? ' (active)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            {phase === 3 && (
-              <div>
-                <label htmlFor="preview-scenario" className="block text-xs font-medium text-gray-700">
-                  Scenario
-                </label>
-                <select
-                  id="preview-scenario"
-                  value={previewScenarioId}
-                  onChange={(event) => {
-                    setPreviewScenarioId(event.target.value);
-                    clearPreviewState();
-                  }}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                >
-                  <option value="">Select a scenario…</option>
-                  {scenarios.map((scenario) => (
-                    <option key={scenario.id} value={scenario.id}>
-                      #{scenario.id} · system {scenario.system_description} · {scenario.scenario_id}
-                      {/* Task 10.5: say so plainly wherever a corpus row is
-                          listed - scratch material from an iterate run,
-                          not part of any experiment's record. */}
-                      {scenario.is_scratch ? ' · scratch (iterate run)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            {phase === 2 && (
-              <>
-                <div>
-                  <label htmlFor="preview-n-systems" className="block text-xs font-medium text-gray-700">
-                    n_systems
-                  </label>
-                  <input
-                    id="preview-n-systems"
-                    type="number"
-                    min="1"
-                    value={previewNSystems}
-                    onChange={(event) => {
-                      setPreviewNSystems(event.target.value);
-                      clearPreviewState();
-                    }}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="preview-n-scenarios" className="block text-xs font-medium text-gray-700">
-                    n_scenarios_per_system
-                  </label>
-                  <input
-                    id="preview-n-scenarios"
-                    type="number"
-                    min="1"
-                    value={previewNScenarios}
-                    onChange={(event) => {
-                      setPreviewNScenarios(event.target.value);
-                      clearPreviewState();
-                    }}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                  />
-                </div>
-              </>
-            )}
-          </div>
-
-          {isStaff && (
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handlePreview}
-                  disabled={!canPreview}
-                  className="rounded-md border border-brand-600 px-4 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isPreviewing ? 'Previewing…' : 'Preview'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={!canSave}
-                  className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isPersisting ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-              <p className="text-xs text-gray-500">
-                Preview renders the draft above through the real backend renderer — never a
-                client-side stand-in — and persists nothing, win or lose (a refused draft creates no
-                new version). Save is disabled until this exact draft has previewed cleanly for this
-                exact variant, so a template that fails to render can never be written.
-              </p>
-              {previewBlockedReason() && (
-                <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
-              )}
-              {saveBlockedReason() && <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>}
-              {createTemplate.isError && <ErrorBanner error={createTemplate.error} />}
-              {updateTemplate.isError && <ErrorBanner error={updateTemplate.error} />}
-            </div>
-          )}
-
-          {previewError && (
-            <div className="space-y-1">
-              <p className="text-sm font-semibold text-red-800">
-                Render failed — nothing was saved, and there is no preview to show.
-              </p>
-              <ErrorBanner error={previewError} />
-            </div>
-          )}
-
-          {previewResult && (
-            <div className="space-y-3">
-              {/* Task 10.4: a variant-A preview whose isolation scan did NOT
-                  run is never OK - the real endpoint fails CLOSED with a 400
-                  in exactly that case (`_preview` in
-                  backend/prompts/views.py: "must never be presentable as a
-                  clean 200"), so `previewResult` existing at all already
-                  guarantees `leak_scan_ran` is true whenever phase is 2 and
-                  variant is A. The old third branch here ("isolation scan
-                  did NOT run") was dead code, reachable only because an
-                  earlier mock returned 200 where the real API refuses -
-                  removed rather than left as a state that looks legitimate
-                  but can never actually occur. */}
-              <p className="text-sm font-semibold text-green-700">
-                Preview OK
-                {previewResult.leak_scan_ran
-                  ? ` — isolation scan ran, guarded by taxonomy #${previewResult.guarded_by}.`
-                  : '.'}
-              </p>
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <CodeBlock title="Rendered system prompt" code={previewResult.system_prompt} />
-                <CodeBlock title="Rendered user prompt" code={previewResult.user_prompt} />
-              </div>
-            </div>
-          )}
-
-          {versions.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium text-gray-900">Version history</h3>
-              <ul className="mt-2 divide-y divide-gray-200 rounded-md border border-gray-200">
-                {versions.map((version) => (
-                  <li key={version.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                    <span>
-                      <span>Version {version.version}</span>
-                      {version.is_active && (
-                        <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
-                          active
-                        </span>
-                      )}
-                      {version.id === selectedId && (
-                        <span className="ml-2 inline-flex items-center rounded-full bg-brand-100 px-2 py-0.5 text-xs font-medium text-brand-700">
-                          loaded
-                        </span>
-                      )}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => loadVersion(version)}
-                      className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                    >
-                      View
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </section>
-      )}
-
-      <section aria-labelledby="iterate-heading" className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
-        <h2 id="iterate-heading" className="text-lg font-medium text-gray-900">
-          Iterate
+      <section aria-labelledby="editor-heading" className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
+        <h2 id="editor-heading" className="sr-only">
+          Template editor
         </h2>
-        <p role="note" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          {SCRATCH_NOTICE}
-        </p>
 
-        {!isStaff && (
-          <p role="note" className="text-sm text-amber-800">
-            Only staff may run an iterate-mode call.
-          </p>
+        {!isEditing && (
+          <div>
+            <label htmlFor="new-name" className="block text-xs font-medium text-gray-700">
+              Name
+            </label>
+            <input
+              id="new-name"
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              disabled={!isStaff}
+              className="mt-1 block w-full max-w-md rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm"
+            />
+          </div>
         )}
 
-        {isStaff && (
-          <form onSubmit={handleRunIterate} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {phase === 2 && (
+          <fieldset className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3">
+            <legend className="px-1 text-sm font-semibold text-amber-900">
+              Which variant is this template for?
+            </legend>
+            <p className="text-xs text-amber-800">
+              Phase 2 has two fully independent templates, one per variant. Getting this wrong
+              means editing the wrong arm of the experiment.
+            </p>
+            {variantLocked && (
+              <p className="text-xs font-medium text-amber-900">
+                Variant is fixed for an existing prompt — start a new prompt from the list to use
+                the other variant.
+              </p>
+            )}
+            <div className="flex flex-col gap-2 sm:flex-row sm:gap-6">
+              {(['A', 'B']).map((choice) => (
+                <label key={choice} className="flex items-center gap-2 text-sm text-amber-900">
+                  <input
+                    type="radio"
+                    name="variant"
+                    value={choice}
+                    checked={variant === choice}
+                    onChange={() => handleVariantChange(choice)}
+                    disabled={!isStaff || variantLocked}
+                  />
+                  <span>
+                    <strong>{VARIANT_COPY[choice].label}</strong> — {VARIANT_COPY[choice].detail}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <p className="text-sm font-semibold text-amber-900">
+              {variant
+                ? `Editing: ${VARIANT_COPY[variant].label} — ${VARIANT_COPY[variant].detail}`
+                : 'No variant chosen yet — preview and save are disabled until you pick one.'}
+            </p>
+          </fieldset>
+        )}
+
+        <div>
+          <label htmlFor="system-prompt" className="block text-xs font-medium text-gray-700">
+            System prompt (Jinja2)
+          </label>
+          <textarea
+            id="system-prompt"
+            value={draft.systemPrompt}
+            onChange={(event) => updateDraftField('systemPrompt', event.target.value)}
+            disabled={!isStaff}
+            rows={4}
+            spellCheck={false}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="user-prompt" className="block text-xs font-medium text-gray-700">
+            User prompt (Jinja2)
+          </label>
+          <textarea
+            id="user-prompt"
+            value={draft.userPrompt}
+            onChange={(event) => updateDraftField('userPrompt', event.target.value)}
+            disabled={!isStaff}
+            rows={8}
+            spellCheck={false}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="output-schema" className="block text-xs font-medium text-gray-700">
+            Output schema (JSON Schema, pinned into the request)
+          </label>
+          <textarea
+            id="output-schema"
+            value={draft.outputSchemaText}
+            onChange={(event) => updateDraftField('outputSchemaText', event.target.value)}
+            disabled={!isStaff}
+            rows={4}
+            spellCheck={false}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-xs shadow-sm"
+          />
+          {schemaError && <p className="mt-1 text-xs text-red-700">{schemaError}</p>}
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 rounded-md bg-gray-50 p-3 sm:grid-cols-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-gray-500 sm:col-span-2">
+            Preview context — rendered by the real backend renderer, never synthesised here
+          </p>
+          {(phase === 3 || variant === 'B') && (
             <div>
-              <label htmlFor="iterate-experiment" className="block text-xs font-medium text-gray-700">
-                Borrow inputs from experiment (optional)
+              <label htmlFor="preview-taxonomy" className="block text-xs font-medium text-gray-700">
+                Taxonomy
               </label>
               <select
-                id="iterate-experiment"
-                value={iterateExperimentId}
-                onChange={(event) => setIterateExperimentId(event.target.value)}
+                id="preview-taxonomy"
+                value={previewTaxonomyValue}
+                onChange={(event) => {
+                  setPreviewTaxonomyId(event.target.value);
+                  clearPreviewState();
+                }}
                 className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
               >
-                <option value="">None — built-in defaults</option>
-                {experiments.map((experiment) => (
-                  <option key={experiment.id} value={experiment.id}>
-                    {experiment.name}
+                <option value="">Select a taxonomy…</option>
+                {taxonomies.map((taxonomy) => (
+                  <option key={taxonomy.id} value={taxonomy.id}>
+                    {taxonomy.vocabulary_id} v{taxonomy.version}
+                    {taxonomy.is_active ? ' (active)' : ''}
                   </option>
                 ))}
               </select>
             </div>
-
-            <ModelPicker
-              id="iterate-model"
-              label="Model"
-              value={iterateModel}
-              onChange={setIterateModel}
-              modelsQuery={modelsQuery}
-            />
-
+          )}
+          {phase === 3 && (
             <div>
-              <label htmlFor="iterate-temperature" className="block text-xs font-medium text-gray-700">
-                Temperature
+              <label htmlFor="preview-scenario" className="block text-xs font-medium text-gray-700">
+                Scenario
               </label>
-              <input
-                id="iterate-temperature"
-                type="number"
-                step="0.1"
-                min="0"
-                value={iterateTemperature}
-                onChange={(event) => setIterateTemperature(event.target.value)}
+              <select
+                id="preview-scenario"
+                value={previewScenarioId}
+                onChange={(event) => {
+                  setPreviewScenarioId(event.target.value);
+                  clearPreviewState();
+                }}
                 className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              />
+              >
+                <option value="">Select a scenario…</option>
+                {scenarios.map((scenario) => (
+                  <option key={scenario.id} value={scenario.id}>
+                    #{scenario.id} · system {scenario.system_description} · {scenario.scenario_id}
+                    {scenario.is_scratch ? ' · scratch (iterate run)' : ''}
+                  </option>
+                ))}
+              </select>
             </div>
-
-            {phase === 3 && (
+          )}
+          {phase === 2 && (
+            <>
               <div>
-                <label htmlFor="iterate-source" className="block text-xs font-medium text-gray-700">
-                  Source phase run id (a phase 2 run to label)
+                <label htmlFor="preview-n-systems" className="block text-xs font-medium text-gray-700">
+                  n_systems
                 </label>
                 <input
-                  id="iterate-source"
+                  id="preview-n-systems"
                   type="number"
-                  value={iterateSourcePhaseRunId}
-                  onChange={(event) => setIterateSourcePhaseRunId(event.target.value)}
+                  min="1"
+                  value={previewNSystems}
+                  onChange={(event) => {
+                    setPreviewNSystems(event.target.value);
+                    clearPreviewState();
+                  }}
                   className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
                 />
               </div>
-            )}
+              <div>
+                <label htmlFor="preview-n-scenarios" className="block text-xs font-medium text-gray-700">
+                  n_scenarios_per_system
+                </label>
+                <input
+                  id="preview-n-scenarios"
+                  type="number"
+                  min="1"
+                  value={previewNScenarios}
+                  onChange={(event) => {
+                    setPreviewNScenarios(event.target.value);
+                    clearPreviewState();
+                  }}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                />
+              </div>
+            </>
+          )}
+        </div>
 
-            {phase === 2 && iterateExperimentId && (
-              <>
-                <div>
-                  <label htmlFor="iterate-n-systems" className="block text-xs font-medium text-gray-700">
-                    Override n_systems (cheap to iterate: try 1)
-                  </label>
-                  <input
-                    id="iterate-n-systems"
-                    type="number"
-                    min="1"
-                    value={iterateNSystems}
-                    onChange={(event) => setIterateNSystems(event.target.value)}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="iterate-n-scenarios" className="block text-xs font-medium text-gray-700">
-                    Override n_scenarios_per_system (cheap to iterate: try 1)
-                  </label>
-                  <input
-                    id="iterate-n-scenarios"
-                    type="number"
-                    min="1"
-                    value={iterateNScenarios}
-                    onChange={(event) => setIterateNScenarios(event.target.value)}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                  />
-                </div>
-              </>
-            )}
-
-            <p className="text-xs text-gray-600 sm:col-span-2">
-              Taxonomy:{' '}
-              {chosenExperiment
-                ? `derived from “${chosenExperiment.name}” — not a free choice`
-                : activeTaxonomy
-                  ? `${activeTaxonomy.vocabulary_id} v${activeTaxonomy.version} (currently active)`
-                  : 'no taxonomy is currently active'}
-              . Template:{' '}
-              {selectedId != null ? `“${selectedName}” v${versions.find((v) => v.id === selectedId)?.version ?? '?'}` : 'none saved yet'}
-              .
-            </p>
-
-            <div className="sm:col-span-2">
+        {isStaff && (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
               <button
-                type="submit"
-                disabled={!canRunIterate || createPhaseRun.isPending}
+                type="button"
+                onClick={handlePreview}
+                disabled={!canPreview}
+                className="rounded-md border border-brand-600 px-4 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isPreviewing ? 'Previewing…' : 'Preview'}
+              </button>
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={!canSave}
                 className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {createPhaseRun.isPending ? 'Starting…' : 'Run'}
+                {isPersisting ? 'Saving…' : 'Save'}
               </button>
-              {iterateBlockedReason() && (
-                <p className="mt-1 text-xs font-medium text-amber-800">{iterateBlockedReason()}</p>
-              )}
-              {createPhaseRun.isError && <ErrorBanner error={createPhaseRun.error} />}
             </div>
-          </form>
+            <p className="text-xs text-gray-500">
+              Preview renders the draft above through the real backend renderer — never a
+              client-side stand-in — and persists nothing, win or lose. Save is disabled until this
+              exact draft has previewed cleanly for this exact variant.
+            </p>
+            {previewBlockedReason() && (
+              <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
+            )}
+            {saveBlockedReason() && <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>}
+            {createTemplate.isError && <ErrorBanner error={createTemplate.error} />}
+            {updateTemplate.isError && <ErrorBanner error={updateTemplate.error} />}
+          </div>
         )}
 
-        {iterateRunId != null && (
-          <div className="space-y-3 border-t border-gray-200 pt-4">
-            <div className="flex flex-wrap items-center gap-3">
-              {iterateRun && <StatusBadge status={iterateRun.status} />}
-              <span className="text-sm text-gray-600">Phase run #{iterateRunId}</span>
-              {isStaff && !confirmingDeleteIterateRun && (
-                <button
-                  type="button"
-                  onClick={() => setConfirmingDeleteIterateRun(true)}
-                  className="rounded-md border border-red-600 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
-                >
-                  Delete this run
-                </button>
-              )}
+        {previewError && (
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-red-800">
+              Render failed — nothing was saved, and there is no preview to show.
+            </p>
+            <ErrorBanner error={previewError} />
+          </div>
+        )}
+
+        {previewResult && (
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-green-700">
+              Preview OK
+              {previewResult.leak_scan_ran
+                ? ` — isolation scan ran, guarded by taxonomy #${previewResult.guarded_by}.`
+                : '.'}
+            </p>
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <CodeBlock title="Rendered system prompt" code={previewResult.system_prompt} />
+              <CodeBlock title="Rendered user prompt" code={previewResult.user_prompt} />
             </div>
-            {iterateRun && <ProgressBar progress={iterateRun.progress} label="This run" />}
-            {iterateRun && <IterateIsolationNote iterateRun={iterateRun} />}
-
-            {confirmingDeleteIterateRun && (
-              <ConfirmDialog
-                title={`Delete iterate run #${iterateRunId}?`}
-                message={DELETE_ITERATE_RUN_MESSAGE}
-                confirmLabel="Confirm"
-                cancelLabel="Never mind"
-                pending={deletePhaseRun.isPending}
-                onConfirm={handleDeleteIterateRunConfirmed}
-                onCancel={() => setConfirmingDeleteIterateRun(false)}
-              />
-            )}
-            {deletePhaseRun.isError && <ErrorBanner error={deletePhaseRun.error} />}
-
-            {iterateRun?.status === 'failed' && (
-              <ErrorBanner error={asApiError(iterateRun.error || 'The run failed.')} />
-            )}
-
-            {iterateRun?.status === 'completed' && (
-              <div className="space-y-3">
-                {iterateCallsQuery.isLoading && <p className="text-sm text-gray-500">Loading the call…</p>}
-                {iterateCallsQuery.isError && <ErrorBanner error={iterateCallsQuery.error} />}
-                {iterateCalls.map((call) => (
-                  <div key={call.id} className="space-y-2 rounded-md border border-gray-200 p-3">
-                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                      <CodeBlock title="Rendered system prompt" code={call.rendered_system_prompt} />
-                      <CodeBlock title="Rendered user prompt" code={call.rendered_user_prompt} />
-                    </div>
-                    <CodeBlock title="Raw response" code={call.raw_response} />
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
       </section>
+
+      <SidePanel title="Test this prompt" open={testOpen} onClose={() => setTestOpen(false)}>
+        <div className="space-y-4">
+          <p role="note" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {SCRATCH_NOTICE}
+          </p>
+
+          {!isStaff && (
+            <p role="note" className="text-sm text-amber-800">
+              Only staff may run an iterate-mode call.
+            </p>
+          )}
+
+          {isStaff && (
+            <form onSubmit={handleTestPrompt} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="iterate-experiment" className="block text-xs font-medium text-gray-700">
+                    Borrow inputs from experiment (optional)
+                  </label>
+                  <select
+                    id="iterate-experiment"
+                    value={iterateExperimentId}
+                    onChange={(event) => setIterateExperimentId(event.target.value)}
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                  >
+                    <option value="">None — built-in defaults</option>
+                    {experiments.map((experiment) => (
+                      <option key={experiment.id} value={experiment.id}>
+                        {experiment.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <ModelPicker
+                  id="iterate-model"
+                  label="Model"
+                  value={iterateModel}
+                  onChange={setIterateModel}
+                  modelsQuery={modelsQuery}
+                />
+
+                <div>
+                  <label htmlFor="iterate-temperature" className="block text-xs font-medium text-gray-700">
+                    Temperature
+                  </label>
+                  <input
+                    id="iterate-temperature"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={iterateTemperature}
+                    onChange={(event) => setIterateTemperature(event.target.value)}
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                  />
+                </div>
+
+                {phase === 3 && (
+                  <div>
+                    <label htmlFor="iterate-source" className="block text-xs font-medium text-gray-700">
+                      Source phase run id (a phase 2 run to label)
+                    </label>
+                    <input
+                      id="iterate-source"
+                      type="number"
+                      value={iterateSourcePhaseRunId}
+                      onChange={(event) => setIterateSourcePhaseRunId(event.target.value)}
+                      className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                    />
+                  </div>
+                )}
+
+                {phase === 2 && iterateExperimentId && (
+                  <>
+                    <div>
+                      <label htmlFor="iterate-n-systems" className="block text-xs font-medium text-gray-700">
+                        Override n_systems (cheap to iterate: try 1)
+                      </label>
+                      <input
+                        id="iterate-n-systems"
+                        type="number"
+                        min="1"
+                        value={iterateNSystems}
+                        onChange={(event) => setIterateNSystems(event.target.value)}
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="iterate-n-scenarios" className="block text-xs font-medium text-gray-700">
+                        Override n_scenarios_per_system (cheap to iterate: try 1)
+                      </label>
+                      <input
+                        id="iterate-n-scenarios"
+                        type="number"
+                        min="1"
+                        value={iterateNScenarios}
+                        onChange={(event) => setIterateNScenarios(event.target.value)}
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                      />
+                    </div>
+                  </>
+                )}
+
+                <p className="text-xs text-gray-600 sm:col-span-2">
+                  Taxonomy:{' '}
+                  {chosenExperiment
+                    ? `derived from “${chosenExperiment.name}” — not a free choice`
+                    : activeTaxonomy
+                      ? `${activeTaxonomy.vocabulary_id} v${activeTaxonomy.version} (currently active)`
+                      : 'no taxonomy is currently active'}
+                  . Template:{' '}
+                  {isEditing
+                    ? `“${currentTemplate.name}” v${currentTemplate.version}${hasUnsavedChanges ? ' (edited, not yet saved)' : ''}`
+                    : 'not saved yet — “Save & test” will create it'}
+                  .
+                </p>
+
+                <div className="sm:col-span-2">
+                  <button
+                    type="submit"
+                    disabled={!canTest || createPhaseRun.isPending}
+                    className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {createPhaseRun.isPending
+                      ? 'Starting…'
+                      : hasUnsavedChanges
+                        ? 'Save & test'
+                        : 'Run test'}
+                  </button>
+                  {testBlockedReason() && (
+                    <p className="mt-1 text-xs font-medium text-amber-800">{testBlockedReason()}</p>
+                  )}
+                  {createTemplate.isError && hasUnsavedChanges && <ErrorBanner error={createTemplate.error} />}
+                  {updateTemplate.isError && hasUnsavedChanges && <ErrorBanner error={updateTemplate.error} />}
+                  {createPhaseRun.isError && <ErrorBanner error={createPhaseRun.error} />}
+                </div>
+              </form>
+            )}
+
+            {iterateRunId != null && (
+              <div className="space-y-3 border-t border-gray-200 pt-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  {iterateRun && <StatusBadge status={iterateRun.status} />}
+                  <span className="text-sm text-gray-600">Phase run #{iterateRunId}</span>
+                  {isStaff && !confirmingDeleteIterateRun && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingDeleteIterateRun(true)}
+                      className="rounded-md border border-red-600 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                    >
+                      Delete this run
+                    </button>
+                  )}
+                </div>
+                {iterateRun && <ProgressBar progress={iterateRun.progress} label="This run" />}
+                {iterateRun && <IterateIsolationNote iterateRun={iterateRun} />}
+
+                {confirmingDeleteIterateRun && (
+                  <ConfirmDialog
+                    title={`Delete iterate run #${iterateRunId}?`}
+                    message={DELETE_ITERATE_RUN_MESSAGE}
+                    confirmLabel="Confirm"
+                    cancelLabel="Never mind"
+                    pending={deletePhaseRun.isPending}
+                    onConfirm={handleDeleteIterateRunConfirmed}
+                    onCancel={() => setConfirmingDeleteIterateRun(false)}
+                  />
+                )}
+                {deletePhaseRun.isError && <ErrorBanner error={deletePhaseRun.error} />}
+
+                {iterateRun?.status === 'failed' && (
+                  <ErrorBanner error={asApiError(iterateRun.error || 'The run failed.')} />
+                )}
+
+                {(iterateRun?.status === 'completed' || iterateRun?.status === 'failed') && (
+                  <div className="space-y-3">
+                    {iterateCallsQuery.isLoading && <p className="text-sm text-gray-500">Loading the calls…</p>}
+                    {iterateCallsQuery.isError && <ErrorBanner error={iterateCallsQuery.error} />}
+                    {iterateCalls.map((call) => (
+                      <PhaseRunCallCard key={call.id} call={call} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </SidePanel>
     </div>
   );
 }
