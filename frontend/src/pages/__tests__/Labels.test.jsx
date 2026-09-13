@@ -283,7 +283,7 @@ async function applyRunFilter(user, { run, variant, hcv } = {}) {
   }
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
   if (hcv !== undefined) await user.selectOptions(screen.getByLabelText(/^hcv$/i), hcv);
-  await user.click(screen.getByRole('button', { name: /apply filters/i }));
+  await user.click(screen.getByRole('button', { name: /^apply$/i }));
 }
 
 describe('Labels', () => {

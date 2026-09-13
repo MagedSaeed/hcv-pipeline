@@ -7,7 +7,6 @@ import ChangePassword from './pages/ChangePassword';
 import Dashboard from './pages/Dashboard';
 import Resources from './pages/Resources';
 import Taxonomy from './pages/Taxonomy';
-import Corpus from './pages/Corpus';
 import PromptEditor from './pages/PromptEditor';
 import ExperimentBuilder from './pages/ExperimentBuilder';
 import ExperimentDetail from './pages/ExperimentDetail';
@@ -59,7 +58,10 @@ export default function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/resources" element={<Resources />} />
           <Route path="/taxonomy" element={<Taxonomy />} />
-          <Route path="/corpus" element={<Corpus />} />
+          {/* Corpus was merged into the Resources page's "Systems & scenarios"
+              tab (task 11) - this old route just forwards there so any
+              existing bookmark/link keeps working. */}
+          <Route path="/corpus" element={<Navigate to="/resources?tab=corpus" replace />} />
           <Route path="/prompts" element={<PromptEditor />} />
           <Route path="/experiments/new" element={<ExperimentBuilder />} />
           {/* task 10.3: an experiment is never stranded - it always has a

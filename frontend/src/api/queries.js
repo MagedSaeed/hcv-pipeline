@@ -520,6 +520,58 @@ export function useTaxonomyHcvs(taxonomyId, options = {}) {
   });
 }
 
+// Taxonomy editing (staff). A taxonomy is locked (`is_locked`, with
+// `locked_reason`) once a run has used it; edits to a locked one are refused
+// with a 400, and the way forward is `useCreateTaxonomyVersion`, which copies
+// it and every HCV row into a new, inactive, editable version.
+function useTaxonomyMutation(mutationFn) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.taxonomies.all });
+    },
+  });
+}
+
+// `{ taxonomyId, hcv_id, name, definition, condition_classes?, order? }`
+export function useCreateHcv() {
+  return useTaxonomyMutation(async ({ taxonomyId, ...payload }) => {
+    const { data } = await apiClient.post(`/taxonomies/${taxonomyId}/hcvs/`, payload);
+    return data;
+  });
+}
+
+// `{ id, ...fields }` - PATCH /hcvs/{id}/
+export function useUpdateHcv() {
+  return useTaxonomyMutation(async ({ id, ...payload }) => {
+    const { data } = await apiClient.patch(`/hcvs/${id}/`, payload);
+    return data;
+  });
+}
+
+export function useDeleteHcv() {
+  return useTaxonomyMutation(async (id) => {
+    await apiClient.delete(`/hcvs/${id}/`);
+    return id;
+  });
+}
+
+export function useActivateTaxonomy() {
+  return useTaxonomyMutation(async (id) => {
+    const { data } = await apiClient.post(`/taxonomies/${id}/activate/`);
+    return data;
+  });
+}
+
+// `{ id, version }` - returns the new taxonomy row.
+export function useCreateTaxonomyVersion() {
+  return useTaxonomyMutation(async ({ id, version }) => {
+    const { data } = await apiClient.post(`/taxonomies/${id}/new-version/`, { version });
+    return data;
+  });
+}
+
 // -----------------------------------------------------------------------
 // Settings - staff only (IsAdminUser). GET returns the masked key and
 // which source is in effect; PATCH sets a new key. Never handles or stores
@@ -601,6 +653,22 @@ export function useDeleteResource() {
   });
 }
 
+// `{ id, name?, kind?, description?, text? }` as JSON. Few-shots resolve
+// their file-backed sides from the resource text, so those refresh too.
+export function useUpdateResource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/resources/${id}/`, payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.resources.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.fewshots.all });
+    },
+  });
+}
+
 // -----------------------------------------------------------------------
 // Few-shots (FewShotExample) - ?phase=2|3. `resolved_input`/`resolved_output`
 // (FewShotExampleSerializer) are read-only, server-computed fields: the
@@ -625,6 +693,32 @@ export function useCreateFewShot() {
     mutationFn: async (payload) => {
       const { data } = await apiClient.post('/fewshots/', payload);
       return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.fewshots.all });
+    },
+  });
+}
+
+export function useUpdateFewShot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...payload }) => {
+      const { data } = await apiClient.patch(`/fewshots/${id}/`, payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.fewshots.all });
+    },
+  });
+}
+
+export function useDeleteFewShot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/fewshots/${id}/`);
+      return id;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.fewshots.all });
@@ -761,6 +855,21 @@ export function useCreatePromptTemplate() {
     mutationFn: async (payload) => {
       const { data } = await apiClient.post('/prompts/', payload);
       return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.prompts.all });
+    },
+  });
+}
+
+// DELETE /prompts/{id}/ - refused with a 400 `{detail}` while an experiment
+// or a run still uses that version.
+export function useDeletePromptTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/prompts/${id}/`);
+      return id;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.prompts.all });

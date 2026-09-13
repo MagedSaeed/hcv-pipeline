@@ -77,15 +77,14 @@ beforeEach(() => {
   server.use(
     http.get('/api/resources/', () => HttpResponse.json(paginated(resources))),
 
-    // Coordinator review (final polish, item 4): none of this file's three
-    // write handlers enforced CSRF before now - every OTHER screen's
-    // handlers do (see Corpus.test.jsx/PromptEditor.test.jsx), but these
-    // three were left as one of the last two permissive spots, so a client
-    // regression that stopped sending `X-CSRFToken` on a resource/few-shot
-    // write would still pass every test in this file. `/api/resources/` and
-    // `/api/fewshots/` carry no extra staff restriction (spec §9's CRUD
-    // routes for both), so only `requireCsrf` applies here - never
-    // `requireStaff`.
+    // Coordinator review (final polish, item 4): none of this file's write
+    // handlers enforced CSRF before now - every OTHER screen's handlers do
+    // (see Corpus.test.jsx/PromptEditor.test.jsx), but these were left as
+    // one of the last permissive spots, so a client regression that stopped
+    // sending `X-CSRFToken` on a resource/few-shot write would still pass
+    // every test in this file. `/api/resources/` and `/api/fewshots/` carry
+    // no extra staff restriction (spec §9's CRUD routes for both), so only
+    // `requireCsrf` applies here - never `requireStaff`.
     http.post('/api/resources/', async ({ request }) => {
       const csrfRefusal = requireCsrf(request);
       if (csrfRefusal) return csrfRefusal;
@@ -104,6 +103,15 @@ beforeEach(() => {
       };
       resources.push(created);
       return HttpResponse.json(created, { status: 201 });
+    }),
+
+    http.patch('/api/resources/:id/', async ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
+      const resource = resourceById(params.id);
+      const body = await request.json();
+      Object.assign(resource, body);
+      return HttpResponse.json(resource);
     }),
 
     http.delete('/api/resources/:id/', ({ request, params }) => {
@@ -148,24 +156,44 @@ beforeEach(() => {
       };
       fewshots.push(created);
       return HttpResponse.json(toFewShotResponse(created), { status: 201 });
+    }),
+
+    http.patch('/api/fewshots/:id/', async ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
+      const id = Number(params.id);
+      const fewshot = fewshots.find((item) => item.id === id);
+      const body = await request.json();
+      Object.assign(fewshot, body);
+      return HttpResponse.json(toFewShotResponse(fewshot));
+    }),
+
+    http.delete('/api/fewshots/:id/', ({ request, params }) => {
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
+      const id = Number(params.id);
+      fewshots = fewshots.filter((item) => item.id !== id);
+      return new HttpResponse(null, { status: 204 });
     })
   );
 });
 
 // Resource names double as <option> text in the few-shot pairing form's two
 // selects, so a plain screen.getByText('oldsmar-system') is ambiguous the
-// moment that form is on the page (which is always, on this screen). Every
-// resource-row lookup below is scoped to the "Resources" list itself; every
-// few-shot-row lookup to the "Few-shot examples" list - see the
-// aria-label on each <ul> in Resources.jsx. Both are `find`-based (async):
-// the list itself only exists once the initial GET has resolved, so a
-// caller must await it before using it, even on the very first call.
+// moment that form is open. Every resource-row lookup below is scoped to the
+// "Resources" list itself - see the aria-label on that <ul> in
+// Resources.jsx. It is `find`-based (async): the list itself only exists
+// once the initial GET has resolved, so a caller must await it before using
+// it, even on the very first call.
 async function resourceList() {
   return screen.findByRole('list', { name: /^resources$/i });
 }
 
-async function fewshotList() {
-  return screen.findByRole('list', { name: /^few-shot examples$/i });
+// Few-shots are grouped under a per-phase <ul aria-label="Phase N — ..."> -
+// one list per phase, not one shared "Few-shot examples" list - so a
+// caller names which phase's group it wants.
+async function fewshotGroup(phaseLabel) {
+  return screen.findByRole('list', { name: phaseLabel });
 }
 
 describe('Resources', () => {
@@ -181,15 +209,37 @@ describe('Resources', () => {
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('hcv-table');
 
-    await user.type(screen.getByLabelText(/^name$/i, { selector: '#resource-name' }), 'incident-report');
+    await user.click(screen.getByRole('button', { name: /^add resource$/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'incident-report');
     await user.selectOptions(screen.getByLabelText(/^kind$/i), 'other');
     const file = new NodeFile(['Full incident write-up, verbatim.'], 'incident.txt', { type: 'text/plain' });
-    await user.upload(screen.getByLabelText(/file/i), file);
+    // Not /file/i - that also matches the "Upload file" radio label.
+    await user.upload(screen.getByLabelText(/^file /i), file);
     await user.click(screen.getByRole('button', { name: /^upload$/i }));
 
     expect(await within(resourceListEl).findByText('incident-report')).toBeInTheDocument();
     // Unique across the page - only the extracted-text <pre> carries it.
     expect(await screen.findByText('Full incident write-up, verbatim.')).toBeInTheDocument();
+  });
+
+  it('pastes text instead of uploading a file when adding a resource', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources'] });
+
+    const resourceListEl = await resourceList();
+    await within(resourceListEl).findByText('hcv-table');
+
+    await user.click(screen.getByRole('button', { name: /^add resource$/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'pasted-vocab');
+    await user.click(screen.getByRole('radio', { name: /paste text/i }));
+    await user.type(screen.getByLabelText(/^text$/i), 'Term: definition.');
+    await user.click(screen.getByRole('button', { name: /^upload$/i }));
+
+    expect(await within(resourceListEl).findByText('pasted-vocab')).toBeInTheDocument();
+    expect(resources.find((resource) => resource.name === 'pasted-vocab')).toMatchObject({
+      text: 'Term: definition.',
+      file: null,
+    });
   });
 
   it('visibly marks a taxonomy-kind resource with a note that it will be refused for variant A', async () => {
@@ -209,25 +259,45 @@ describe('Resources', () => {
     expect(within(otherRow).queryByRole('note')).not.toBeInTheDocument();
   });
 
-  it('pairs an input and an output resource into a few-shot, with the phase chosen', async () => {
+  it('edits a resource through the Edit modal', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('oldsmar-system');
-    // No few-shot exists yet, so the "Few-shot examples" list itself isn't
-    // rendered (an EmptyState stands in for it) - only await it AFTER
-    // pairing creates the first one.
+    const row = within(resourceListEl).getByText('oldsmar-system').closest('li');
+    await user.click(within(row).getByRole('button', { name: /^edit$/i }));
 
-    await user.type(screen.getByLabelText(/^name$/i, { selector: '#fewshot-name' }), 'oldsmar-pair');
+    const nameField = screen.getByLabelText(/^name$/i);
+    await user.clear(nameField);
+    await user.type(nameField, 'oldsmar-system-renamed');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    expect(await within(resourceListEl).findByText('oldsmar-system-renamed')).toBeInTheDocument();
+    expect(resources.find((resource) => resource.id === 2).name).toBe('oldsmar-system-renamed');
+  });
+
+  it('pairs an input and an output resource into a few-shot, with the phase chosen', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=fewshots'] });
+
+    // Switch to the resources tab isn't needed - the pairing form's selects
+    // read from the same `useResources` data regardless of which tab is
+    // active. `findByRole` (not `getByRole`): the app shell itself renders
+    // only once the auth check (`/api/auth/me/`) resolves, so the very
+    // first query after a fresh render must be one that awaits.
+    await user.click(await screen.findByRole('button', { name: /^new few-shot$/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'oldsmar-pair');
     await user.selectOptions(screen.getByLabelText(/^phase$/i), '3');
-    await user.selectOptions(screen.getByLabelText(/input resource/i), 'oldsmar-system');
-    await user.selectOptions(screen.getByLabelText(/output resource/i), 'oldsmar-scenarios');
+    const inputSelect = screen.getByLabelText(/input resource/i);
+    await within(inputSelect).findByText('oldsmar-system'); // wait for useResources to resolve
+    await user.selectOptions(inputSelect, 'oldsmar-system');
+    const outputSelect = screen.getByLabelText(/output resource/i);
+    await user.selectOptions(outputSelect, 'oldsmar-scenarios');
     await user.click(screen.getByRole('button', { name: /pair few-shot/i }));
 
-    const fewshotListEl = await fewshotList();
-    expect(await within(fewshotListEl).findByText('oldsmar-pair')).toBeInTheDocument();
-    expect(within(fewshotListEl).getByText(/phase 3/i)).toBeInTheDocument();
+    const phase3List = await fewshotGroup(/phase 3 — labelling/i);
+    expect(await within(phase3List).findByText('oldsmar-pair')).toBeInTheDocument();
     expect(fewshots).toHaveLength(1);
     expect(fewshots[0]).toMatchObject({ phase: 3, name: 'oldsmar-pair', input_file: 2, output_file: 3 });
   });
@@ -245,18 +315,67 @@ describe('Resources', () => {
       is_active: true,
     });
 
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=fewshots'] });
 
-    const fewshotListEl = await fewshotList();
-    await within(fewshotListEl).findByText('seeded-pair');
+    const phase2List = await fewshotGroup(/phase 2 — generation/i);
+    await within(phase2List).findByText('seeded-pair');
     // Input side is inline text; output side resolves through the file -
     // both must come from the server's resolved_input/resolved_output, not
-    // be recomputed client-side from input_text/input_file. The output text
-    // happens to equal the underlying resource's own extracted text
-    // (resolved_output IS that text) - scoped to the few-shot list, since
-    // the resource list shows the identical string too, by design.
-    expect(within(fewshotListEl).getByText('Inline system prompt for testing.')).toBeInTheDocument();
-    expect(within(fewshotListEl).getByText('sc_01: an operator notices...')).toBeInTheDocument();
+    // be recomputed client-side from input_text/input_file.
+    expect(within(phase2List).getByText('Inline system prompt for testing.')).toBeInTheDocument();
+    expect(within(phase2List).getByText('sc_01: an operator notices...')).toBeInTheDocument();
+  });
+
+  it('edits a few-shot through the Edit modal', async () => {
+    fewshots.push({
+      id: 5,
+      phase: 2,
+      name: 'to-rename',
+      input_text: 'in',
+      input_file: null,
+      output_text: 'out',
+      output_file: null,
+      order: 0,
+      is_active: true,
+    });
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=fewshots'] });
+
+    const phase2List = await fewshotGroup(/phase 2 — generation/i);
+    const card = within(phase2List).getByText('to-rename').closest('li');
+    await user.click(within(card).getByRole('button', { name: /^edit$/i }));
+
+    const nameField = screen.getByLabelText(/^name$/i);
+    await user.clear(nameField);
+    await user.type(nameField, 'renamed-pair');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    expect(await within(phase2List).findByText('renamed-pair')).toBeInTheDocument();
+    expect(fewshots.find((item) => item.id === 5).name).toBe('renamed-pair');
+  });
+
+  it('deletes a few-shot after confirming', async () => {
+    fewshots.push({
+      id: 6,
+      phase: 3,
+      name: 'to-delete',
+      input_text: 'in',
+      input_file: null,
+      output_text: 'out',
+      output_file: null,
+      order: 0,
+      is_active: true,
+    });
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=fewshots'] });
+
+    const phase3List = await fewshotGroup(/phase 3 — labelling/i);
+    const card = within(phase3List).getByText('to-delete').closest('li');
+    await user.click(within(card).getByRole('button', { name: /^delete$/i }));
+    await user.click(within(card).getByRole('button', { name: /^confirm$/i }));
+
+    expect(screen.queryByText('to-delete')).not.toBeInTheDocument();
+    expect(fewshots.find((item) => item.id === 6)).toBeUndefined();
   });
 
   it('shows the API refusal, not a crash, when deleting a resource a few-shot references', async () => {
@@ -277,13 +396,26 @@ describe('Resources', () => {
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('oldsmar-scenarios');
     const row = within(resourceListEl).getByText('oldsmar-scenarios').closest('li');
-    await user.click(within(row).getByRole('button', { name: /delete/i }));
+    await user.click(within(row).getByRole('button', { name: /^delete$/i }));
+    await user.click(within(row).getByRole('button', { name: /^confirm$/i }));
 
     expect(await within(row).findByRole('alert')).toHaveTextContent(/still referenced by/i);
     expect(await within(row).findByRole('alert')).toHaveTextContent(/oldsmar/i);
     // Not removed, and the rest of the page is still intact - no crash.
     expect(within(resourceListEl).getByText('oldsmar-scenarios')).toBeInTheDocument();
     expect(within(resourceListEl).getByText('hcv-table')).toBeInTheDocument();
+  });
+
+  it('switches between the Text resources and Few-shot examples tabs, keeping the choice in the URL', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources'] });
+
+    await resourceList();
+    expect(screen.getByRole('button', { name: /^add resource$/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /few-shot examples/i }));
+    expect(screen.getByRole('button', { name: /^new few-shot$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^add resource$/i })).not.toBeInTheDocument();
   });
 
   it('fetches every page of the resources list, not just the first 50 (fails if only page 1 is read)', async () => {
@@ -326,10 +458,10 @@ describe('Resources', () => {
     }));
     server.use(http.get('/api/fewshots/', ({ request }) => HttpResponse.json(paginate(fillerFewshots, request))));
 
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=fewshots'] });
 
-    const fewshotListEl = await fewshotList();
-    expect(await within(fewshotListEl).findByText('filler-fewshot-55')).toBeInTheDocument();
+    const phase2List = await fewshotGroup(/phase 2 — generation/i);
+    expect(await within(phase2List).findByText('filler-fewshot-55')).toBeInTheDocument();
   });
 
   // Coordinator review (final polish, item 4): proves the CSRF guard just

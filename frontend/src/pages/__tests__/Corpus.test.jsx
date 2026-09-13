@@ -221,12 +221,24 @@ async function applyFilterForm(user, { origin, run, variant, phaseRun, system } 
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
   if (phaseRun !== undefined) await setNumberField(user, screen.getByLabelText(/phase run id/i), phaseRun);
   if (system !== undefined) await setNumberField(user, screen.getByLabelText(/system id \(scenarios\)/i), system);
-  await user.click(screen.getByRole('button', { name: /apply filters/i }));
+  await user.click(screen.getByRole('button', { name: /^apply$/i }));
 }
 
 describe('Corpus', () => {
-  it('lists system descriptions and scenarios with origin badges', async () => {
+  // Corpus was merged into the Resources page as its "Systems & scenarios"
+  // tab (task 11) - the old `/corpus` route now just forwards to
+  // `/resources?tab=corpus` (App.jsx) so any existing bookmark/link keeps
+  // working. Every other test below renders the tab's URL directly; this
+  // one is the one place that proves the redirect itself is wired.
+  it('redirects the old /corpus route into the Resources page\'s "Systems & scenarios" tab', async () => {
     renderApp({ initialEntries: ['/corpus'] });
+
+    expect(await screen.findByRole('heading', { name: /^resources$/i })).toBeInTheDocument();
+    expect(await screen.findByText('Seed system')).toBeInTheDocument();
+  });
+
+  it('lists system descriptions and scenarios with origin badges', async () => {
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     const seedRow = screen.getByText('Seed system').closest('li');
@@ -241,7 +253,7 @@ describe('Corpus', () => {
   });
 
   it('a generated row is read-only and the UI states why', async () => {
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('System A');
     const generatedRow = screen.getByText('System A').closest('li');
@@ -252,7 +264,7 @@ describe('Corpus', () => {
 
   it('a seed row is editable and saves', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     const seedRow = screen.getByText('Seed system').closest('li');
@@ -269,7 +281,7 @@ describe('Corpus', () => {
 
   it('the run filter reaches only the pipeline-run-backed row, never the ad-hoc one', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { run: 101 });
@@ -282,7 +294,7 @@ describe('Corpus', () => {
 
   it('the phase-run filter reaches the ad-hoc row and labels it as scratch, never archived', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { phaseRun: 203 });
@@ -311,7 +323,7 @@ describe('Corpus', () => {
   // serializers.py), so this must hold with NO phase-run filter applied at
   // all - the exact case the old implementation could not catch.
   it('marks scratch rows with a per-row badge wherever they appear, not only under the phase-run filter', async () => {
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     const adhocRow = screen.getByText('System adhoc').closest('li');
@@ -336,7 +348,7 @@ describe('Corpus', () => {
   it('a staff user can delete an iterate run from the phase-run filtered view, which removes its generated material', async () => {
     authState.currentUserEmail = 'admin@example.com'; // staff - see test/server.js SEED_USERS
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { phaseRun: 203 });
@@ -356,7 +368,7 @@ describe('Corpus', () => {
   it('a 409 while the run is still in flight shows the API\'s own message, and deletes nothing', async () => {
     authState.currentUserEmail = 'admin@example.com';
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { phaseRun: 204 }); // still queued - see PHASE_RUNS_SEED
@@ -375,7 +387,7 @@ describe('Corpus', () => {
 
   it('a non-staff user viewing scratch material has no delete action available', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] }); // researcher@example.com - not staff, see beforeEach
+    renderApp({ initialEntries: ['/resources?tab=corpus'] }); // researcher@example.com - not staff, see beforeEach
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { phaseRun: 203 });
@@ -386,7 +398,7 @@ describe('Corpus', () => {
 
   it('origin and variant filters combine, narrowing further together than either alone', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
 
@@ -400,7 +412,7 @@ describe('Corpus', () => {
     // Adding variant=A on top must narrow further, not replace the origin
     // filter - System B (variant B) must now disappear too.
     await user.selectOptions(screen.getByLabelText(/^variant$/i), 'A');
-    await user.click(screen.getByRole('button', { name: /apply filters/i }));
+    await user.click(screen.getByRole('button', { name: /^apply$/i }));
 
     expect(await screen.findByText('System A')).toBeInTheDocument();
     expect(screen.getByText('System adhoc')).toBeInTheDocument();
@@ -409,7 +421,7 @@ describe('Corpus', () => {
 
   it('the scenario system filter combines with variant', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     await applyFilterForm(user, { system: 3, variant: 'A' });
@@ -422,14 +434,14 @@ describe('Corpus', () => {
     // Same system, wrong variant - must exclude it, proving `variant`
     // narrows rather than being ignored once `system` is also present.
     await user.selectOptions(screen.getByLabelText(/^variant$/i), 'B');
-    await user.click(screen.getByRole('button', { name: /apply filters/i }));
+    await user.click(screen.getByRole('button', { name: /^apply$/i }));
 
     expect(screen.queryByText('Generated narrative A')).not.toBeInTheDocument();
     expect(screen.queryByText('Generated narrative B')).not.toBeInTheDocument();
   });
 
   it('fetches every page of the unfiltered corpus, not just the first 50 (fails if only page 1 is read)', async () => {
-    renderApp({ initialEntries: ['/corpus'] });
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     // 60 system-description rows and 59 scenario rows total - one page (50)
     // could never show either "last" row below.

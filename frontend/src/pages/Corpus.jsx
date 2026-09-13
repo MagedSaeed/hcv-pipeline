@@ -8,6 +8,7 @@ import {
   useUpdateScenario,
   useUpdateSystemDescription,
 } from '../api/queries';
+import CollapsibleText from '../components/CollapsibleText';
 import ConfirmDialog from '../components/ConfirmDialog';
 import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
@@ -63,6 +64,14 @@ const SCENARIO_FIELDS = [
   ['outcome', 'Outcome'],
   ['narrative', 'Narrative'],
 ];
+
+// The card fields that are filled in, then the narrative, as one readable block.
+function scenarioSummary(scenario) {
+  const card = SCENARIO_FIELDS.filter(([key]) => key !== 'narrative' && scenario[key])
+    .map(([key, label]) => `${label}: ${scenario[key]}`)
+    .join('\n');
+  return [card, scenario.narrative].filter(Boolean).join('\n\n');
+}
 
 function pick(source, keys) {
   return Object.fromEntries(keys.map((key) => [key, source[key] ?? '']));
@@ -148,7 +157,7 @@ function SystemDescriptionRow({ system }) {
       )}
 
       {!editing && (
-        <p className="whitespace-pre-wrap text-sm text-gray-600">{system.body || '(no body yet)'}</p>
+        <CollapsibleText text={system.body} empty="(no body yet)" mono={false} />
       )}
 
       {editing && (
@@ -255,9 +264,7 @@ function ScenarioRow({ scenario, systemTitle }) {
       )}
 
       {!editing && (
-        <p className="whitespace-pre-wrap text-sm text-gray-600">
-          {scenario.narrative || '(no narrative yet)'}
-        </p>
+        <CollapsibleText text={scenarioSummary(scenario)} empty="(empty scenario)" mono={false} />
       )}
 
       {editing && (
@@ -355,14 +362,6 @@ export default function Corpus() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Corpus</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          System descriptions and scenarios, seed and generated alike. Seed and manual rows are
-          editable; generated rows are the record of what a run produced and are read-only.
-        </p>
-      </div>
-
       <form
         onSubmit={handleApply}
         aria-label="Corpus filters"
@@ -440,7 +439,7 @@ export default function Corpus() {
             type="submit"
             className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
           >
-            Apply filters
+            Apply
           </button>
           <button
             type="button"

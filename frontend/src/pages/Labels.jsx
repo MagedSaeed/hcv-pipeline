@@ -366,7 +366,7 @@ export default function Labels() {
             type="submit"
             className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
           >
-            Apply filters
+            Apply
           </button>
           <button
             type="button"

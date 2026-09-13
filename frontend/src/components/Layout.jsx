@@ -28,9 +28,6 @@ export default function Layout() {
             <NavLink to="/taxonomy" className={navLinkClassName}>
               Taxonomy
             </NavLink>
-            <NavLink to="/corpus" className={navLinkClassName}>
-              Corpus
-            </NavLink>
             <NavLink to="/prompts" className={navLinkClassName}>
               Prompts
             </NavLink>
