@@ -285,14 +285,12 @@ def test_a_run_in_flight_cannot_be_deleted(api_client, staff, executed):
 
 
 @pytest.mark.django_db
-def test_deleting_the_last_run_frees_the_experiment_for_deletion(api_client, staff, executed):
-    """Task 1's 409 tells the operator to delete the runs first. Prove that works."""
+def test_an_experiment_with_a_finished_run_is_deleted_with_its_output(api_client, staff, executed):
     experiment_id = executed.experiment_id
     api_client.force_authenticate(user=staff)
 
-    assert api_client.delete(f"/api/experiments/{experiment_id}/").status_code == 409
-    assert api_client.delete(f"/api/pipeline-runs/{executed.pk}/").status_code == 204
     assert api_client.delete(f"/api/experiments/{experiment_id}/").status_code == 204
+    assert not PipelineRun.objects.filter(pk=executed.pk).exists()
 
 
 @pytest.mark.django_db

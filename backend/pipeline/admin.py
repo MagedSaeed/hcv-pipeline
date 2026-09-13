@@ -9,30 +9,19 @@ class ExperimentAdmin(admin.ModelAdmin):
     filter_horizontal = ("seed_systems", "fewshots")
 
     def has_delete_permission(self, request, obj=None):
-        """Refuse deletion of an experiment with any runs recorded against it.
-
-        The same guard as `ExperimentViewSet.perform_destroy`'s 409, closed
-        here too: `Experiment.delete()` cascades away every PipelineRun,
-        PhaseRun, generated SystemDescription/Scenario and LLMCall for it,
-        and the admin is a surface an operator actually uses, not just the
-        API. `obj is None` is Django's own "is deletion possible at all"
-        probe — used to decide whether to show the 'Delete selected' bulk
-        action in the dropdown — and must defer to the default check; only
-        once there is a real object to inspect does the run count matter.
-        Both the single-object delete view and the 'Delete selected' bulk
-        action route through this same method with the real object (Django's
-        NestedObjects collector checks has_delete_permission on every object
-        it would cascade through, including the ones directly selected), so
-        one override covers both.
-        """
-        if obj is not None and (obj.runs.exists() or obj.adhoc_phase_runs.exists()):
-            # `adhoc_phase_runs` (`PhaseRun.experiment`, `on_delete=PROTECT`
-            # — see that field's own comment) mirrors `ExperimentViewSet
-            # .perform_destroy`'s identical guard: an ad-hoc run borrowing
-            # this experiment reads its live fields at execution time, so
-            # deleting the experiment out from under a still-live one would
-            # either crash mid-render or (with a laxer on_delete) silently
-            # switch it to bare defaults.
+        """Mirror the API: an experiment is deletable unless one of its runs is
+        pending, queued or running, or an iterate run borrows it (PROTECT; the API
+        removes those first, the admin's collector cannot)."""
+        if obj is not None and (
+            obj.runs.filter(
+                status__in=(
+                    PipelineRun.Status.PENDING,
+                    PipelineRun.Status.QUEUED,
+                    PipelineRun.Status.RUNNING,
+                )
+            ).exists()
+            or obj.adhoc_phase_runs.exists()
+        ):
             return False
         return super().has_delete_permission(request, obj)
 

@@ -254,50 +254,39 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         serializer.save(created_by=self.request.user)
 
     def perform_destroy(self, instance):
-        """Refuse to delete an experiment with any runs recorded against it.
+        """Delete the experiment with everything recorded against it.
 
-        The spec makes generated output immutable and the archive the record
-        of what a model actually produced — cascading a DELETE through an
-        experiment's runs, phase runs, calls and labels would erase exactly
-        that record, and would do so with a 204 even while a worker still
-        holds a RUNNING PipelineRun. An experiment nobody has ever launched
-        carries no such record and stays deletable.
-
-        `adhoc_phase_runs` (`PhaseRun.experiment`, `on_delete=PROTECT` — see
-        that field's own comment) is checked too, for the identical reason
-        `runs` is: an ad-hoc run borrowing this experiment reads its live
-        fields at EXECUTION time, so a still-QUEUED/RUNNING one deleted out
-        from under its own borrowed experiment would either crash mid-render
-        or, if `on_delete` were SET_NULL instead of PROTECT, silently fall
-        back to bare defaults — exactly the silent failure this whole field
-        exists to prevent. `instance.delete()` would otherwise raise a bare
-        `ProtectedError` here (DRF has no handler for it — a 500), so this is
-        checked explicitly, with the same actionable 409 shape as `runs`
-        rather than left to that crash.
+        Cascades through its repetitions, their phase runs, calls, labels and
+        generated systems/scenarios, and removes iterate runs that borrowed its
+        inputs (scratch, and PROTECT-ed on the experiment). Refused only while
+        a worker may still hold one of those runs: deleting rows mid-flight
+        turns an orderly run into a crash inside the task.
         """
-        if instance.runs.exists():
+        in_flight = (
+            PipelineRun.Status.PENDING,
+            PipelineRun.Status.QUEUED,
+            PipelineRun.Status.RUNNING,
+        )
+        busy_runs = list(
+            instance.runs.filter(status__in=in_flight).values_list("repetition_index", flat=True)
+        )
+        busy_adhoc = list(
+            instance.adhoc_phase_runs.filter(status__in=in_flight).values_list("id", flat=True)
+        )
+        if busy_runs or busy_adhoc:
+            parts = []
+            if busy_runs:
+                parts.append(f"repetition(s) {sorted(busy_runs)}")
+            if busy_adhoc:
+                parts.append(f"iterate run(s) {sorted(busy_adhoc)}")
             raise Conflict(
-                f"{instance.name!r} has runs recorded against it and cannot be "
-                "deleted. Delete each of its runs via DELETE /api/pipeline-runs/"
-                "{id}/ first if you really want to remove it.",
-                code="experiment_has_runs",
+                f"{instance.name!r} cannot be deleted while {' and '.join(parts)} "
+                "may still be held by a worker. Wait for them to finish, or cancel them first.",
+                code="run_in_flight",
             )
-        adhoc_ids = list(instance.adhoc_phase_runs.order_by("id").values_list("id", flat=True))
-        if adhoc_ids:
-            # Coordinator review round, finding 3: the first version of this
-            # message named the route (`DELETE /api/phase-runs/{id}/`) but
-            # not which `{id}`s, and `?experiment=` (below) used to be no
-            # help either — an operator had a 409 and no way to act on it.
-            # Naming the ids here makes the message actually actionable on
-            # its own, without a second lookup.
-            raise Conflict(
-                f"{instance.name!r} has ad-hoc (iterate-mode) phase runs "
-                f"{adhoc_ids} borrowing its inputs and cannot be deleted. "
-                "Delete each of them via DELETE /api/phase-runs/{id}/ first "
-                "if you really want to remove it.",
-                code="experiment_has_adhoc_runs",
-            )
-        instance.delete()
+        with transaction.atomic():
+            instance.adhoc_phase_runs.all().delete()
+            instance.delete()
 
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None, format=None):

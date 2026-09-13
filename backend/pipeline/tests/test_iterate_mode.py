@@ -1375,24 +1375,9 @@ def test_an_adhoc_run_borrowing_an_experiment_is_still_excluded_from_its_export(
 
 
 @pytest.mark.django_db
-def test_an_experiment_cannot_be_deleted_while_an_adhoc_run_still_borrows_it(
+def test_an_experiment_cannot_be_deleted_while_a_borrowing_adhoc_run_is_in_flight(
     api_client, staff, taxonomy, borrowable_experiment
 ):
-    """`ExperimentViewSet.perform_destroy`'s new guard — the API-level proof
-    that `PhaseRun.experiment`'s `on_delete=PROTECT` (see
-    `test_execution_config
-    .test_an_experiment_borrowed_by_an_adhoc_run_cannot_be_deleted` for the
-    model-level proof, and the same test file for a probe that this really
-    is what PROTECT buys, not incidental) surfaces as a friendly 409, not a
-    bare `ProtectedError` 500.
-
-    Coordinator review round, finding 3: the FIRST version of this 409
-    named the route (`DELETE /api/phase-runs/{id}/`) but not which
-    `{id}`s — an operator had a 409 and no way to act on it, since
-    `?experiment=` (see the filter test below) used to return 0 for the
-    exact ad-hoc run causing the conflict. The message must name the
-    blocking id(s) so it is actionable on its own.
-    """
     blocker = PhaseRun.objects.create(
         phase=2,
         variant="A",
@@ -1400,15 +1385,36 @@ def test_an_experiment_cannot_be_deleted_while_an_adhoc_run_still_borrows_it(
         prompt_template=borrowable_experiment.phase2_prompt_a,
         taxonomy=taxonomy,
         experiment=borrowable_experiment,
+        status=PhaseRun.Status.QUEUED,
     )
     api_client.force_authenticate(user=staff)
 
     response = api_client.delete(f"/api/experiments/{borrowable_experiment.pk}/")
 
     assert response.status_code == 409
-    assert response.json()["code"] == "experiment_has_adhoc_runs"
+    assert response.json()["code"] == "run_in_flight"
     assert str(blocker.pk) in str(response.json())
-    assert Experiment.objects.filter(pk=borrowable_experiment.pk).exists()
+
+
+@pytest.mark.django_db
+def test_deleting_an_experiment_removes_finished_adhoc_runs_that_borrowed_it(
+    api_client, staff, taxonomy, borrowable_experiment
+):
+    finished = PhaseRun.objects.create(
+        phase=2,
+        variant="A",
+        model="m2",
+        prompt_template=borrowable_experiment.phase2_prompt_a,
+        taxonomy=taxonomy,
+        experiment=borrowable_experiment,
+        status=PhaseRun.Status.COMPLETED,
+    )
+    api_client.force_authenticate(user=staff)
+
+    response = api_client.delete(f"/api/experiments/{borrowable_experiment.pk}/")
+
+    assert response.status_code == 204
+    assert not PhaseRun.objects.filter(pk=finished.pk).exists()
 
 
 @pytest.mark.django_db

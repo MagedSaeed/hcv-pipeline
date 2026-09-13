@@ -404,9 +404,7 @@ def test_a_generated_system_cannot_be_seeded_by_an_update(api_client, staff, exp
 
 
 @pytest.mark.django_db
-def test_deleting_an_experiment_with_runs_is_refused(api_client, staff, experiment):
-    """The archive is the research record — cascading it away via DELETE
-    would erase what a model actually produced, even mid-run."""
+def test_deleting_an_experiment_with_a_queued_run_is_refused(api_client, staff, experiment):
     api_client.force_authenticate(user=staff)
     with patch("pipeline.orchestration.async_task"):
         api_client.post(
@@ -415,11 +413,23 @@ def test_deleting_an_experiment_with_runs_is_refused(api_client, staff, experime
 
     response = api_client.delete(f"/api/experiments/{experiment.id}/")
     assert response.status_code == 409
-    assert response.json()["code"] == "experiment_has_runs"
-    body = str(response.json()).lower()
-    assert "run" in body
-    assert "/api/pipeline-runs/" in body
+    assert response.json()["code"] == "run_in_flight"
     assert Experiment.objects.filter(pk=experiment.id).exists()
+
+
+@pytest.mark.django_db
+def test_deleting_an_experiment_with_finished_runs_removes_them(api_client, staff, experiment):
+    api_client.force_authenticate(user=staff)
+    with patch("pipeline.orchestration.async_task"):
+        api_client.post(
+            f"/api/experiments/{experiment.id}/run/", {"n_repetitions": 2}, format="json"
+        )
+    experiment.runs.update(status=PipelineRun.Status.COMPLETED)
+
+    response = api_client.delete(f"/api/experiments/{experiment.id}/")
+    assert response.status_code == 204
+    assert not Experiment.objects.filter(pk=experiment.id).exists()
+    assert not PipelineRun.objects.filter(experiment_id=experiment.id).exists()
 
 
 @pytest.mark.django_db
