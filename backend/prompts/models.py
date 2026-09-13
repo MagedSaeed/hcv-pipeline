@@ -25,11 +25,14 @@ class PromptTemplate(models.Model):
     """
 
     PHASE_CHOICES = [(2, "Phase 2 — generation"), (3, "Phase 3 — labelling")]
-    COPIED_FIELDS = ("phase", "name", "system_prompt", "user_prompt", "output_schema")
+    COPIED_FIELDS = ("phase", "name", "variant", "system_prompt", "user_prompt", "output_schema")
+    VARIANT_CHOICES = [("", "None (phase 3)"), ("A", "Variant A"), ("B", "Variant B")]
 
     phase = models.PositiveSmallIntegerField(choices=PHASE_CHOICES, db_index=True)
     name = models.CharField(max_length=200)
     version = models.PositiveIntegerField()
+    # Which phase 2 variant this template is written for; blank for phase 3.
+    variant = models.CharField(max_length=1, choices=VARIANT_CHOICES, blank=True, default="")
     system_prompt = models.TextField(blank=True, default="")
     user_prompt = models.TextField()
     output_schema = models.JSONField(default=dict, blank=True)

@@ -1039,3 +1039,29 @@ def test_non_staff_cannot_preview_a_brand_new_template(api_client, member):
         format="json",
     )
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_variant_is_stored_and_copied_forward(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    created = api_client.post(
+        "/api/prompts/",
+        {"phase": 2, "name": "gen", "variant": "A", "user_prompt": "x"},
+        format="json",
+    )
+    assert created.status_code == 201 and created.json()["variant"] == "A"
+    edited = api_client.patch(
+        f"/api/prompts/{created.json()['id']}/", {"user_prompt": "y"}, format="json"
+    )
+    assert edited.json()["variant"] == "A"
+
+
+@pytest.mark.django_db
+def test_phase_3_templates_refuse_a_variant(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/",
+        {"phase": 3, "name": "lab", "variant": "B", "user_prompt": "x"},
+        format="json",
+    )
+    assert response.status_code == 400

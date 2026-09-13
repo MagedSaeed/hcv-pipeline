@@ -169,18 +169,21 @@ DEFAULT_TEMPLATES = [
     {
         "phase": 2,
         "name": "default-generation-variant-a",
+        "variant": "A",
         "system_prompt": GENERATION_SYSTEM_PROMPT,
         "user_prompt": GENERATION_VARIANT_A,
     },
     {
         "phase": 2,
         "name": "default-generation-variant-b",
+        "variant": "B",
         "system_prompt": GENERATION_SYSTEM_PROMPT,
         "user_prompt": GENERATION_VARIANT_B,
     },
     {
         "phase": 3,
         "name": "default-labelling",
+        "variant": "",
         "system_prompt": LABELLING_SYSTEM_PROMPT,
         "user_prompt": LABELLING_USER_PROMPT,
     },

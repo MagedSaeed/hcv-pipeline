@@ -30,6 +30,7 @@ class PromptTemplateSerializer(serializers.ModelSerializer):
             "phase",
             "name",
             "version",
+            "variant",
             "system_prompt",
             "user_prompt",
             "output_schema",
@@ -46,6 +47,13 @@ class PromptTemplateSerializer(serializers.ModelSerializer):
 
     def validate_output_schema(self, value):
         return _require_json_object(value)
+
+    def validate(self, attrs):
+        phase = attrs.get("phase", getattr(self.instance, "phase", None))
+        variant = attrs.get("variant", getattr(self.instance, "variant", ""))
+        if phase == 3 and variant:
+            raise serializers.ValidationError({"variant": "Phase 3 templates have no variant."})
+        return attrs
 
 
 class PreviewSerializer(serializers.Serializer):

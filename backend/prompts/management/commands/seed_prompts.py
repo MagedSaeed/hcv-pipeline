@@ -15,6 +15,7 @@ class Command(BaseCommand):
             PromptTemplate.objects.create_version(
                 phase=spec["phase"],
                 name=spec["name"],
+                variant=spec["variant"],
                 system_prompt=spec["system_prompt"],
                 user_prompt=spec["user_prompt"],
                 output_schema={},
