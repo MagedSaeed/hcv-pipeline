@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
+  useDeleteExperiment,
   useExperiment,
   useFewShots,
   usePipelineRuns,
@@ -13,6 +14,7 @@ import {
 } from '../api/queries';
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
+import Modal from '../components/Modal';
 import ProgressBar from '../components/ProgressBar';
 import StatusBadge from '../components/StatusBadge';
 
@@ -70,6 +72,76 @@ function FieldNote({ message }) {
 // banner - it simply vanished, and Launch appeared to silently do nothing.
 const INLINE_LAUNCH_FIELDS = new Set(['phase2_prompt_a', 'phase2_prompt_b']);
 
+// Deleting an experiment with runs takes their generated output with it, so the
+// name must be typed to confirm; a never-run experiment only needs one click.
+function DeleteExperimentModal({ experiment, runCount, onClose }) {
+  const navigate = useNavigate();
+  const deleteExperiment = useDeleteExperiment();
+  const [typedName, setTypedName] = useState('');
+  const needsTypedName = runCount > 0;
+  const confirmed = !needsTypedName || typedName.trim() === experiment.name;
+
+  async function handleDelete() {
+    try {
+      await deleteExperiment.mutateAsync(experiment.id);
+      navigate('/dashboard', { replace: true });
+    } catch {
+      // Shown below via deleteExperiment.error.
+    }
+  }
+
+  return (
+    <Modal title={`Delete “${experiment.name}”?`} onClose={onClose}>
+      <div className="space-y-3 text-sm text-gray-700">
+        {needsTypedName ? (
+          <p>
+            This permanently deletes the experiment and its{' '}
+            <strong>
+              {runCount} {runCount === 1 ? 'repetition' : 'repetitions'}
+            </strong>{' '}
+            with everything they produced: generated systems and scenarios, labels, and every recorded model
+            call. Iterate runs that borrowed its inputs are deleted too. This cannot be undone.
+          </p>
+        ) : (
+          <p>This experiment has never been run. Deleting it removes only its configuration.</p>
+        )}
+        {needsTypedName && (
+          <div>
+            <label htmlFor="confirm-experiment-name" className="block text-xs font-medium text-gray-700">
+              Type the experiment name to confirm
+            </label>
+            <input
+              id="confirm-experiment-name"
+              value={typedName}
+              onChange={(event) => setTypedName(event.target.value)}
+              autoComplete="off"
+              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm"
+            />
+          </div>
+        )}
+        {deleteExperiment.isError && <ErrorBanner error={deleteExperiment.error} />}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={!confirmed || deleteExperiment.isPending}
+            className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {deleteExperiment.isPending ? 'Deleting…' : 'Delete experiment'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function ExperimentDetail() {
   const { id } = useParams();
   const experimentId = Number(id);
@@ -77,6 +149,7 @@ export default function ExperimentDetail() {
 
   const [nRepetitions, setNRepetitions] = useState('1');
   const [launchResult, setLaunchResult] = useState(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const experimentQuery = useExperiment(experimentId);
   // One row per repetition, `?experiment=` (spec §9) - this screen's own
@@ -165,14 +238,30 @@ export default function ExperimentDetail() {
           )}
         </div>
         {isStaff && (
-          <Link
-            to={`/experiments/${experimentId}/edit`}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
-          >
-            Edit
-          </Link>
+          <div className="flex gap-2">
+            <Link
+              to={`/experiments/${experimentId}/edit`}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+            >
+              Edit
+            </Link>
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(true)}
+              className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
+            >
+              Delete
+            </button>
+          </div>
         )}
       </div>
+      {confirmingDelete && (
+        <DeleteExperimentModal
+          experiment={experiment}
+          runCount={runsQuery.isSuccess ? runs.length : experiment.run_count}
+          onClose={() => setConfirmingDelete(false)}
+        />
+      )}
 
       <section
         aria-labelledby="config-heading"

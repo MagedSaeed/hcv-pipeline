@@ -144,6 +144,48 @@ describe('ExperimentDetail', () => {
     expect(within(screen.getByTestId('current-config')).getByText('1 system × 1 scenario')).toBeInTheDocument();
   });
 
+  it('deletes a never-run experiment after one confirmation and returns to the Dashboard', async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    server.use(
+      http.delete('/api/experiments/77/', ({ request }) => {
+        const refusal = requireCsrf(request);
+        if (refusal) return refusal;
+        deleted = true;
+        return new HttpResponse(null, { status: 204 });
+      })
+    );
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    await screen.findByRole('heading', { name: 'Baseline comparison' });
+    await user.click(screen.getByRole('button', { name: /^delete$/i }));
+    await user.click(await screen.findByRole('button', { name: /delete experiment/i }));
+
+    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeInTheDocument();
+    expect(deleted).toBe(true);
+  });
+
+  it('requires typing the name before deleting an experiment that has runs', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/pipeline-runs/', () =>
+        HttpResponse.json(
+          paginated([
+            { id: 501, experiment: 77, repetition_index: 1, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: null, finished_at: null },
+          ])
+        )
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    await screen.findByRole('link', { name: /repetition 1/i });
+    await user.click(screen.getByRole('button', { name: /^delete$/i }));
+    const confirm = await screen.findByRole('button', { name: /delete experiment/i });
+    expect(confirm).toBeDisabled();
+    await user.type(screen.getByLabelText(/type the experiment name/i), 'Baseline comparison');
+    expect(confirm).toBeEnabled();
+  });
+
   it('links to Edit, which reuses the builder form', async () => {
     renderApp({ initialEntries: ['/experiments/77'] });
 

@@ -247,6 +247,22 @@ export function useUpdateExperiment() {
   });
 }
 
+// DELETE /experiments/{id}/ - staff. Removes its runs and everything they
+// generated; 409 `run_in_flight` while one is pending, queued or running.
+export function useDeleteExperiment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      await apiClient.delete(`/experiments/${id}/`);
+      return id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.experiments.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns.all });
+    },
+  });
+}
+
 // `POST /api/experiments/{id}/run/` - staff; {n_repetitions} -> batch mode.
 // The 202 body carries `runs` (one {id, repetition_index} per queued
 // repetition - link straight to those, per task 6's own acceptance bar) and
