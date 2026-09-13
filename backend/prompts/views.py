@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -32,18 +33,15 @@ class PromptTemplateViewSet(
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
     mixins.ListModelMixin,
     viewsets.GenericViewSet,
 ):
-    """List/create/retrieve/update, deliberately no destroy.
+    """List/create/retrieve/update/delete.
 
-    A template version is a provenance record: a run pins its id, so deleting one
-    is unrecoverable — worse than the in-place mutation this task exists to
-    prevent, since a mutated row could at least be reconstructed from history.
-    `DestroyModelMixin` is left out entirely rather than included and blocked, so
-    the router never binds a `delete` handler for the detail route and
-    `DELETE /api/prompts/{id}/` is a plain 405 (the operation does not exist),
-    not a 403 (the operation exists but you may not do it).
+    A version a run or an experiment points at is a provenance record, and the
+    PROTECT foreign keys refuse its deletion; `perform_destroy` turns that into a
+    400 naming what still uses it. Unused versions can be deleted freely.
     """
 
     serializer_class = PromptTemplateSerializer
@@ -66,6 +64,19 @@ class PromptTemplateViewSet(
         serializer.instance = PromptTemplate.objects.create_version(
             phase=phase, name=name, created_by=self.request.user, **data
         )
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError as error:
+            users = sorted({str(obj) for obj in error.protected_objects})
+            shown = ", ".join(users[:5]) + (f" and {len(users) - 5} more" if len(users) > 5 else "")
+            raise ValidationError(
+                {
+                    "detail": f"{instance} is still used by: {shown}. "
+                    "Point those at another version, or delete them first."
+                }
+            ) from error
 
     def update(self, request, *args, **kwargs):
         """Editing a template creates the next version rather than mutating this one.

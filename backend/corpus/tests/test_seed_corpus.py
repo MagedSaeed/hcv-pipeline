@@ -39,7 +39,7 @@ def test_reseeding_is_idempotent():
     call_command("seed_corpus")
     assert SystemDescription.objects.count() == 1
     assert Scenario.objects.count() == 3
-    assert FewShotExample.objects.count() == 1
+    assert FewShotExample.objects.count() == 2
 
 
 @pytest.mark.django_db

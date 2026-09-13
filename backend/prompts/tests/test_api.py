@@ -278,10 +278,30 @@ def test_non_staff_cannot_activate(api_client, member, template):
 
 
 @pytest.mark.django_db
-def test_delete_is_not_a_supported_operation(api_client, staff, template):
+def test_an_unused_version_can_be_deleted(api_client, staff, template):
     api_client.force_authenticate(user=staff)
     response = api_client.delete(f"/api/prompts/{template.id}/")
-    assert response.status_code == 405
+    assert response.status_code == 204
+    assert not PromptTemplate.objects.filter(pk=template.id).exists()
+
+
+@pytest.mark.django_db
+def test_a_version_a_run_uses_cannot_be_deleted(api_client, staff, template, taxonomy):
+    from pipeline.models import PhaseRun
+
+    PhaseRun.objects.create(
+        phase=template.phase, model="m", prompt_template=template, taxonomy=taxonomy
+    )
+    api_client.force_authenticate(user=staff)
+    response = api_client.delete(f"/api/prompts/{template.id}/")
+    assert response.status_code == 400
+    assert "still used by" in response.json()["detail"]
+
+
+@pytest.mark.django_db
+def test_members_cannot_delete_a_version(api_client, member, template):
+    api_client.force_authenticate(user=member)
+    assert api_client.delete(f"/api/prompts/{template.id}/").status_code == 403
 
 
 @pytest.mark.django_db

@@ -1,3 +1,5 @@
+import json
+
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -13,6 +15,33 @@ from corpus.models import (
 from corpus.parsers import parse_scenarios
 
 PACK_TITLES = {"oldsmar": "Oldsmar Water Treatment"}
+
+# Phase 3 few-shot labels per pack: a starting example for the researcher to
+# review, not a gold standard.
+LABELLING_EXAMPLES = {
+    "oldsmar": {
+        "scenario_id": "sc_01",
+        "labels": [
+            {
+                "hcv_id": "HCV-17",
+                "evidence": (
+                    "The credential is one shared password, set at commissioning in 2013 "
+                    "and the one in use."
+                ),
+                "rationale": "A single shared password left unchanged for years is a weak "
+                "password practice the intruder's session relies on.",
+            },
+            {
+                "hcv_id": "HCV-18",
+                "evidence": (
+                    "The TeamViewer Session accepts connections from any address on the internet."
+                ),
+                "rationale": "Remote access is not restricted to known parties, so an "
+                "unmanaged external party reaches a privileged control path.",
+            },
+        ],
+    }
+}
 
 
 class Command(BaseCommand):
@@ -41,6 +70,7 @@ class Command(BaseCommand):
             self._seed_scenarios(system, scenarios_text)
             self._seed_resources(pack, system_text, scenarios_text)
             self._seed_fewshot(pack)
+            self._seed_labelling_fewshot(pack, system)
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -95,6 +125,32 @@ class Command(BaseCommand):
                 "output_file": ResourceFile.objects.get(name=f"{pack}-scenarios"),
                 "input_text": "",
                 "output_text": "",
+                "order": 1,
+                "is_active": True,
+            },
+        )
+
+    def _seed_labelling_fewshot(self, pack, system):
+        """A phase 3 example: the pack's first scenario and the labels an expert
+        gives it. Only seeded where the pack defines them (LABELLING_EXAMPLES)."""
+        example = LABELLING_EXAMPLES.get(pack)
+        scenario = system.scenarios.filter(
+            scenario_id=example["scenario_id"] if example else None, generation_run=None
+        ).first()
+        if example is None or scenario is None:
+            return
+        card = "\n".join(
+            f"- {field.replace('_', ' ').capitalize()}: {getattr(scenario, field)}"
+            for field in Scenario.CARD_FIELDS
+        )
+        FewShotExample.objects.update_or_create(
+            phase=3,
+            name=f"{pack}-{scenario.scenario_id}",
+            defaults={
+                "input_text": f"{card}\n\n{scenario.narrative}".strip(),
+                "output_text": json.dumps({"labels": example["labels"]}, indent=2),
+                "input_file": None,
+                "output_file": None,
                 "order": 1,
                 "is_active": True,
             },

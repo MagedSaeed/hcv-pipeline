@@ -36,7 +36,8 @@ From `backend/`:
 uv sync
 uv run python manage.py migrate
 uv run python manage.py import_taxonomy --activate   # loads HCV-21 and marks it active
-uv run python manage.py seed_corpus                  # the Oldsmar expert seed pack
+uv run python manage.py seed_corpus                  # the Oldsmar seed pack + phase 2/3 few-shots
+uv run python manage.py seed_prompts                 # default variant A, variant B and labelling prompts
 uv run python manage.py create_user you@example.com --staff
 ```
 
