@@ -93,6 +93,14 @@ function guardedRunWrite(resolver) {
   };
 }
 
+// The model fields are searchable pickers (components/ModelPicker.jsx).
+async function pickModel(user, label, modelId) {
+  const field = await screen.findByLabelText(label);
+  await user.click(field);
+  await user.type(field, modelId);
+  await user.click(await screen.findByTestId(`model-option-${modelId}`));
+}
+
 function installDetailFixtures(experiment = EXPERIMENT) {
   server.use(
     http.get('/api/experiments/77/', () => HttpResponse.json(experiment)),
@@ -454,7 +462,7 @@ describe('ExperimentDetail', () => {
     const user = userEvent.setup();
     let experiments = [];
     server.use(
-      http.get('/api/models/', () => HttpResponse.json({ count: 1, results: [{ id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', pricing: { prompt: '0.000003' } }] })),
+      http.get('/api/models/', () => HttpResponse.json({ count: 2, results: [{ id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', pricing: { prompt: '0.000003' } }, { id: 'openai/gpt-4o-mini', name: 'GPT-4o mini', pricing: { prompt: '0.00000015' } }] })),
       http.post(
         '/api/experiments/',
         guardedRunWrite(async ({ request }) => {
@@ -473,16 +481,13 @@ describe('ExperimentDetail', () => {
     await screen.findByLabelText(/^name$/i);
     await user.type(screen.getByLabelText(/^name$/i), 'Baseline comparison');
     await user.selectOptions(await screen.findByLabelText(/^taxonomy$/i), '2');
-    const phase2ModelField = await screen.findByLabelText(/^phase 2 model$/i);
-    await within(phase2ModelField).findByText(/claude sonnet 4/i);
-    await user.selectOptions(phase2ModelField, 'anthropic/claude-sonnet-4');
+    await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
     const variantASelect = await screen.findByLabelText(/variant a/i, { selector: 'select' });
     await within(variantASelect).findByText('gen-a (v1)');
     await user.selectOptions(variantASelect, '1');
     const variantBSelect = screen.getByLabelText(/variant b/i, { selector: 'select' });
     await user.selectOptions(variantBSelect, '2');
-    const phase3ModelField = screen.getByLabelText(/^phase 3 model$/i);
-    await user.type(phase3ModelField, 'openai/gpt-4o-mini');
+    await pickModel(user, /^phase 3 model$/i, 'openai/gpt-4o-mini');
     const phase3PromptField = await screen.findByLabelText(/^phase 3 prompt$/i);
     await within(phase3PromptField).findByText('label (v1)');
     await user.selectOptions(phase3PromptField, '3');

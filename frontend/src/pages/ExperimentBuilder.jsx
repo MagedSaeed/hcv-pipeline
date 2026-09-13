@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
@@ -13,6 +13,7 @@ import {
 } from '../api/queries';
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
+import ModelPicker from '../components/ModelPicker';
 
 // corpus.models.Origin.choices, spelled out here the same way Corpus.jsx's
 // ORIGIN_LABELS does — a generated row is a previous run's own output;
@@ -78,47 +79,15 @@ function formFromExperiment(experiment) {
   };
 }
 
-function ModelField({ id, label, value, onChange, modelsQuery, models, fieldError }) {
-  return (
-    <div>
-      <label htmlFor={id} className="block text-xs font-medium text-gray-700">
-        {label}
-      </label>
-      {modelsQuery.isError ? (
-        // Only swap to a plain text field on a genuine failure (no key
-        // configured, catalogue unreachable) - NOT while merely loading, so
-        // this field's element identity never flips between an <input> and
-        // a <select> mid-fetch, which would silently strand a reference a
-        // caller grabbed before the swap.
-        <input
-          id={id}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="openai/gpt-4o-mini"
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm"
-        />
-      ) : (
-        <select
-          id={id}
-          value={value}
-          disabled={!modelsQuery.isSuccess}
-          onChange={(event) => onChange(event.target.value)}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-        >
-          <option value="">Select a model…</option>
-          {models.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.name ? `${model.name} (${model.id})` : model.id}
-            </option>
-          ))}
-        </select>
-      )}
-      {modelsQuery.isError && (
-        <p className="mt-1 text-xs text-amber-700">Model catalogue unavailable — enter a model id by hand.</p>
-      )}
-      <FieldError message={fieldError} />
-    </div>
-  );
+// Names the lead's backend seeds by default (common.md's API contract) -
+// one per phase-2 variant plus the phase-3 template - so a brand-new
+// experiment starts with a runnable configuration instead of three blank
+// selects. Prefers the ACTIVE version of that name, falling back to the
+// highest version number if somehow none is active.
+function pickDefaultTemplate(templates, name) {
+  const matches = templates.filter((template) => template.name === name);
+  if (matches.length === 0) return null;
+  return matches.find((template) => template.is_active) ?? matches.reduce((best, t) => (t.version > best.version ? t : best));
 }
 
 export default function ExperimentBuilder() {
@@ -161,6 +130,35 @@ export default function ExperimentBuilder() {
   const updateExperiment = useUpdateExperiment();
   const saveExperiment = isEditing ? updateExperiment : createExperiment;
 
+  // User feedback: "have one default prompt for both variant[s]... as a
+  // default there should be one for each variant." CREATE mode only, once
+  // both templates lists have loaded - fills in only whichever of the three
+  // prompt fields is still empty, so a value the researcher (or an earlier
+  // run of this same effect) already set is never overwritten.
+  useEffect(() => {
+    if (isEditing) return;
+    if (!phase2TemplatesQuery.isSuccess || !phase3TemplatesQuery.isSuccess) return;
+    const phase2 = phase2TemplatesQuery.data?.results ?? [];
+    const phase3 = phase3TemplatesQuery.data?.results ?? [];
+    setForm((current) => {
+      let next = current;
+      if (!next.phase2PromptA) {
+        const match = pickDefaultTemplate(phase2, 'default-generation-variant-a');
+        if (match) next = { ...next, phase2PromptA: String(match.id) };
+      }
+      if (!next.phase2PromptB) {
+        const match = pickDefaultTemplate(phase2, 'default-generation-variant-b');
+        if (match) next = { ...next, phase2PromptB: String(match.id) };
+      }
+      if (!next.phase3Prompt) {
+        const match = pickDefaultTemplate(phase3, 'default-labelling');
+        if (match) next = { ...next, phase3Prompt: String(match.id) };
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, phase2TemplatesQuery.isSuccess, phase3TemplatesQuery.isSuccess]);
+
   if (!isStaff) {
     return (
       <div className="space-y-2">
@@ -181,7 +179,6 @@ export default function ExperimentBuilder() {
     return <p className="text-sm text-gray-500">Loading experiment…</p>;
   }
 
-  const models = modelsQuery.data?.results ?? [];
   const taxonomies = taxonomiesQuery.data?.results ?? [];
   const phase2Templates = phase2TemplatesQuery.data?.results ?? [];
   const phase3Templates = phase3TemplatesQuery.data?.results ?? [];
@@ -323,13 +320,12 @@ export default function ExperimentBuilder() {
         <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Phase 2 — generation</legend>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ModelField
+            <ModelPicker
               id="phase2-model"
               label="Phase 2 model"
               value={form.phase2Model}
               onChange={(value) => updateField('phase2Model', value)}
               modelsQuery={modelsQuery}
-              models={models}
               fieldError={fieldErrors.phase2_model}
             />
             <div>
@@ -391,13 +387,12 @@ export default function ExperimentBuilder() {
         <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Phase 3 — labelling</legend>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ModelField
+            <ModelPicker
               id="phase3-model"
               label="Phase 3 model"
               value={form.phase3Model}
               onChange={(value) => updateField('phase3Model', value)}
               modelsQuery={modelsQuery}
-              models={models}
               fieldError={fieldErrors.phase3_model}
             />
             <div>

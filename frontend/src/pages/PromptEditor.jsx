@@ -4,7 +4,9 @@ import {
   useCreatePhaseRun,
   useCreatePromptTemplate,
   useDeletePhaseRun,
+  useDeletePromptTemplate,
   useExperiments,
+  useModels,
   usePhaseRun,
   usePhaseRunCalls,
   usePreviewPromptTemplate,
@@ -16,6 +18,7 @@ import {
 import CodeBlock from '../components/CodeBlock';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
+import ModelPicker from '../components/ModelPicker';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
 
@@ -40,6 +43,9 @@ const SCRATCH_NOTICE =
 const DELETE_ITERATE_RUN_MESSAGE =
   'Its generated material — every system description and scenario it produced — goes with it. ' +
   'There is no per-row undo.';
+
+const DELETE_TEMPLATE_VERSION_MESSAGE =
+  'This version is gone for good. If an experiment or a run still pins it, the API refuses the delete instead.';
 
 // Task 10.5: the same isolation evidence Run detail shows per phase run
 // (`leak_scan_ran`/`guarded_by`, both already on `PhaseRunSerializer`), read
@@ -141,6 +147,7 @@ export default function PromptEditor() {
   const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
   const [iterateRunId, setIterateRunId] = useState(null);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
+  const [confirmingDeleteTemplate, setConfirmingDeleteTemplate] = useState(false);
 
   const templatesQuery = usePromptTemplates({ phase });
   const taxonomiesQuery = useTaxonomies();
@@ -148,10 +155,14 @@ export default function PromptEditor() {
   // it while the researcher is working on a phase 2 template.
   const scenariosQuery = useScenarios({}, { enabled: phase === 3 });
   const experimentsQuery = useExperiments();
+  // The iterate panel's model field is a ModelPicker (task C) - staff only,
+  // same as the builder's own model fields.
+  const modelsQuery = useModels({ enabled: isStaff });
 
   const previewMutation = usePreviewPromptTemplate();
   const createTemplate = useCreatePromptTemplate();
   const updateTemplate = useUpdatePromptTemplate();
+  const deleteTemplate = useDeletePromptTemplate();
   const createPhaseRun = useCreatePhaseRun();
   const deletePhaseRun = useDeletePhaseRun();
   const iterateRunQuery = usePhaseRun(iterateRunId);
@@ -462,6 +473,30 @@ export default function PromptEditor() {
     }
   }
 
+  // DELETE /api/prompts/{id}/ - refused with a 400 while an experiment or a
+  // run still pins this version (see this hook's own comment in
+  // api/queries.js). On success, land on another version of the SAME
+  // template if one is left, otherwise clear the editor entirely - computed
+  // off `versions` BEFORE the invalidated query has necessarily refetched,
+  // so this never races the cache.
+  async function handleDeleteTemplateConfirmed() {
+    try {
+      const deletedId = selectedId;
+      await deleteTemplate.mutateAsync(deletedId);
+      setConfirmingDeleteTemplate(false);
+      const remaining = versions.filter((version) => version.id !== deletedId);
+      if (remaining.length > 0) {
+        loadVersion(remaining[0]);
+      } else {
+        resetEditorState();
+      }
+    } catch {
+      // Surfaced below via deleteTemplate.isError/error - dialog stays open
+      // so the API's own 400 message (in use by an experiment or a run) is
+      // visible, and the version stays selected/loaded.
+    }
+  }
+
   const iterateRun = iterateRunQuery.data ?? null;
   const iterateCalls = iterateCallsQuery.data?.results ?? [];
 
@@ -546,9 +581,33 @@ export default function PromptEditor() {
 
       {(selectedId != null || creatingNew) && (
         <section aria-labelledby="editor-heading" className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
-          <h2 id="editor-heading" className="text-lg font-medium text-gray-900">
-            {creatingNew ? 'New template' : `Editing “${selectedName}”`}
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="editor-heading" className="text-lg font-medium text-gray-900">
+              {creatingNew ? 'New template' : `Editing “${selectedName}”`}
+            </h2>
+            {isStaff && !creatingNew && selectedId != null && !confirmingDeleteTemplate && (
+              <button
+                type="button"
+                onClick={() => setConfirmingDeleteTemplate(true)}
+                className="rounded-md border border-red-600 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+              >
+                Delete this version
+              </button>
+            )}
+          </div>
+
+          {confirmingDeleteTemplate && (
+            <ConfirmDialog
+              title={`Delete “${selectedName}” version ${versions.find((v) => v.id === selectedId)?.version ?? ''}?`}
+              message={DELETE_TEMPLATE_VERSION_MESSAGE}
+              confirmLabel="Confirm"
+              cancelLabel="Never mind"
+              pending={deleteTemplate.isPending}
+              onConfirm={handleDeleteTemplateConfirmed}
+              onCancel={() => setConfirmingDeleteTemplate(false)}
+            />
+          )}
+          {deleteTemplate.isError && <ErrorBanner error={deleteTemplate.error} />}
 
           {creatingNew && (
             <div>
@@ -877,18 +936,13 @@ export default function PromptEditor() {
               </select>
             </div>
 
-            <div>
-              <label htmlFor="iterate-model" className="block text-xs font-medium text-gray-700">
-                Model
-              </label>
-              <input
-                id="iterate-model"
-                value={iterateModel}
-                onChange={(event) => setIterateModel(event.target.value)}
-                placeholder="openai/gpt-4o-mini"
-                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm"
-              />
-            </div>
+            <ModelPicker
+              id="iterate-model"
+              label="Model"
+              value={iterateModel}
+              onChange={setIterateModel}
+              modelsQuery={modelsQuery}
+            />
 
             <div>
               <label htmlFor="iterate-temperature" className="block text-xs font-medium text-gray-700">

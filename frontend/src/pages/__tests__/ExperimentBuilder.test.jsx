@@ -44,6 +44,13 @@ const TEMPLATES_SEED = [
   { id: 1, phase: 2, name: 'gen-a', version: 1, system_prompt: '', user_prompt: 'A', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
   { id: 2, phase: 2, name: 'gen-b', version: 1, system_prompt: '', user_prompt: 'B {{ taxonomy }}', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
   { id: 3, phase: 3, name: 'label', version: 1, system_prompt: '', user_prompt: 'L', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  // The app's own seeded defaults (common.md's API contract) - separate
+  // from gen-a/gen-b/label above so every OTHER test in this file, which
+  // deliberately picks those by name, is unaffected by preselection ever
+  // reaching for these three instead.
+  { id: 4, phase: 2, name: 'default-generation-variant-a', version: 1, system_prompt: '', user_prompt: 'Default A', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  { id: 5, phase: 2, name: 'default-generation-variant-b', version: 1, system_prompt: '', user_prompt: 'Default B', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  { id: 6, phase: 3, name: 'default-labelling', version: 1, system_prompt: '', user_prompt: 'Default label', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
   ...PAGINATION_FILLER_TEMPLATES,
 ];
 
@@ -172,24 +179,48 @@ async function selectOnceLoaded(user, label, optionText, value, selectorOpts) {
   await user.selectOptions(field, value);
 }
 
+// ModelPicker (task C) is a searchable combobox, not a native <select> -
+// open it, type the model's id to narrow the list to one row, then click
+// that row (found by the id ModelPicker itself puts on the option's
+// `data-testid`).
+async function pickModel(user, label, modelId) {
+  const field = await screen.findByLabelText(label);
+  await user.click(field);
+  await user.type(field, modelId);
+  const option = await screen.findByTestId(`model-option-${modelId}`);
+  await user.click(option);
+}
+
 async function fillMinimalValidForm(user, { name = 'Baseline comparison' } = {}) {
   await user.type(screen.getByLabelText(/^name$/i), name);
   await selectOnceLoaded(user, /^taxonomy$/i, /active/i, '2'); // active taxonomy, from server.js's TAXONOMIES_SEED
-  await selectOnceLoaded(user, /^phase 2 model$/i, /claude sonnet 4/i, 'anthropic/claude-sonnet-4');
+  await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
   await selectOnceLoaded(user, /variant a/i, 'gen-a (v1)', '1', { selector: 'select' });
   await selectOnceLoaded(user, /variant b/i, 'gen-b (v1)', '2', { selector: 'select' });
-  await selectOnceLoaded(user, /^phase 3 model$/i, /gpt-4o mini/i, 'openai/gpt-4o-mini');
+  await pickModel(user, /^phase 3 model$/i, 'openai/gpt-4o-mini');
   await selectOnceLoaded(user, /^phase 3 prompt$/i, 'label (v1)', '3');
 }
 
 describe('ExperimentBuilder', () => {
   it('selects models per phase from the model catalogue', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/experiments/new'] });
 
-    const phase2Model = await screen.findByLabelText(/^phase 2 model$/i);
-    expect(await within(phase2Model).findByText(/claude sonnet 4/i)).toBeInTheDocument();
-    const phase3Model = screen.getByLabelText(/^phase 3 model$/i);
-    expect(await within(phase3Model).findByText(/gpt-4o mini/i)).toBeInTheDocument();
+    await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
+    expect(screen.getByLabelText(/^phase 2 model$/i)).toHaveValue('Claude Sonnet 4 (anthropic/claude-sonnet-4)');
+
+    await pickModel(user, /^phase 3 model$/i, 'openai/gpt-4o-mini');
+    expect(screen.getByLabelText(/^phase 3 model$/i)).toHaveValue('GPT-4o mini (openai/gpt-4o-mini)');
+  });
+
+  it('a model picker shows its own price and an OpenRouter link once a model is selected', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
+    const link = screen.getByRole('link', { name: /openrouter/i });
+    expect(link).toHaveAttribute('href', 'https://openrouter.ai/anthropic/claude-sonnet-4');
+    expect(link).toHaveAttribute('target', '_blank');
   });
 
   it('selects a phase-2 prompt per variant, and a phase-3 prompt', async () => {
@@ -236,6 +267,27 @@ describe('ExperimentBuilder', () => {
   // Experiment detail screen (ExperimentDetail.test.jsx) - this screen no
   // longer has an inline "Launch" section at all, so those tests moved with
   // it rather than staying here against UI that no longer exists.
+
+  // User feedback: "please have one default prompt for both variant[s]...
+  // as a default there should be one for each variant."
+  it('preselects the seeded default prompt templates on a brand-new experiment, and a later pick still wins', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    const variantA = await screen.findByLabelText(/variant a/i, { selector: 'select' });
+    await within(variantA).findByText('default-generation-variant-a (v1)');
+    expect(variantA).toHaveValue('4');
+
+    const variantB = screen.getByLabelText(/variant b/i, { selector: 'select' });
+    expect(variantB).toHaveValue('5');
+
+    const phase3Prompt = screen.getByLabelText(/^phase 3 prompt$/i);
+    expect(phase3Prompt).toHaveValue('6');
+
+    // Still a free choice - picking something else overrides the preselected default.
+    await user.selectOptions(variantA, '1');
+    expect(variantA).toHaveValue('1');
+  });
 
   it("surfaces the API's validation errors field-by-field, never in a generic banner", async () => {
     const user = userEvent.setup();

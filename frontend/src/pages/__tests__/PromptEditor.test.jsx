@@ -7,6 +7,21 @@ import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 import { RUN_POLL_INTERVAL_MS } from '../../api/queries';
 
+// The OpenRouter catalogue shape llm/models_api.py's AvailableModelsView
+// actually returns - {count, results} (see ExperimentBuilder.test.jsx's own
+// copy of this same shape). The iterate panel's model field is a
+// ModelPicker now (task C), so it only ever commits an id from this list -
+// 'trigger-failure' is a fixture-only stand-in for a real catalogue entry,
+// seeded here purely so this file's own "an iterate run that fails" test
+// can still select it like any other model.
+const MODELS_SEED = {
+  count: 2,
+  results: [
+    { id: 'openai/gpt-4o-mini', name: 'GPT-4o mini', pricing: { prompt: '0.0000002', completion: '0.0000006' }, context_length: 128000 },
+    { id: 'trigger-failure', name: 'Trigger Failure (test double)', pricing: { prompt: '0', completion: '0' } },
+  ],
+};
+
 // 55 versions of ONE template name, deliberately kept separate from every
 // other fixture template above (`generation-baseline`/`phase2-safe`) so it
 // never perturbs an existing test's version-count assertions. `PATCH
@@ -174,6 +189,10 @@ let promptWriteCount;
 // views.py) does, rather than the old, more permissive mock that always
 // returned a clean 200 for variant A regardless.
 let mockActiveTaxonomyId;
+// Task C: `DELETE /api/prompts/{id}/` - ids in this set stand in for a
+// template version an experiment or a run still pins, and get the real
+// API's own 400 refusal instead of actually being removed.
+let blockedPromptDeleteIds;
 
 function resetFixtures() {
   templates = [...TEMPLATES_SEED, ...PAGINATION_TEMPLATE_VERSIONS].map((row) => ({ ...row }));
@@ -182,6 +201,7 @@ function resetFixtures() {
   nextPhaseRunId = 900;
   promptWriteCount = 0;
   mockActiveTaxonomyId = 2;
+  blockedPromptDeleteIds = new Set();
 }
 
 // Stands in for prompts/rendering.py's render(): raises exactly the way
@@ -283,6 +303,29 @@ beforeEach(() => {
       // `usePromptTemplates` (now fetch-all, task 10.1) has something real
       // to prove itself against.
       return HttpResponse.json(paginate(rows, url));
+    }),
+
+    http.get('/api/models/', () => HttpResponse.json(MODELS_SEED)),
+
+    // Task C: "add a Delete this version action" - staff-only, refused with
+    // the real 400 shape (`{detail}`) while an experiment or a run still
+    // pins this version, matching prompts/views.py.
+    http.delete('/api/prompts/:id/', async ({ request, params }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
+      const id = Number(params.id);
+      const index = templates.findIndex((t) => t.id === id);
+      if (index === -1) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
+      if (blockedPromptDeleteIds.has(id)) {
+        return HttpResponse.json(
+          { detail: `Prompt template ${id} is in use by an experiment or a run and cannot be deleted.` },
+          { status: 400 }
+        );
+      }
+      templates.splice(index, 1);
+      return new HttpResponse(null, { status: 204 });
     }),
 
     http.post('/api/prompts/', async ({ request }) => {
@@ -530,6 +573,17 @@ async function selectTemplate(user, name) {
   await user.selectOptions(select, name);
 }
 
+// The iterate panel's model field is a ModelPicker now (task C), not a
+// plain text input - open it, type the id to narrow the list to one row,
+// then click that row (found by ModelPicker's own `data-testid`).
+async function pickModel(user, modelId) {
+  const field = await screen.findByLabelText(/^model$/i);
+  await user.click(field);
+  await user.type(field, modelId);
+  const option = await screen.findByTestId(`model-option-${modelId}`);
+  await user.click(option);
+}
+
 describe('PromptEditor', () => {
   it('lists templates by phase, and makes the phase-2 variant an explicit, required choice', async () => {
     const user = userEvent.setup();
@@ -650,6 +704,43 @@ describe('PromptEditor', () => {
     expect(screen.getByLabelText(/user prompt/i)).toHaveValue('Write {{ n_systems }} systems.');
   });
 
+  // User feedback: "please have one default prompt for both variant[s]...
+  // the user can add, update, or delete" - task C adds the delete action.
+  it('a staff user can delete the selected template version, landing on another version of the same template', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts'] });
+
+    await selectTemplate(user, 'pagination-fixture');
+    expect(await screen.findByText('Version 55')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /delete this version/i }));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent(/version 55/i);
+    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
+
+    await waitFor(() => expect(screen.queryByText('Version 55')).not.toBeInTheDocument());
+    // Landed on another version of the SAME template, not cleared entirely.
+    expect(screen.getByText(/editing.*pagination-fixture/i)).toBeInTheDocument();
+    expect(screen.getByText('Version 54')).toBeInTheDocument();
+    expect(templates.find((t) => t.name === 'pagination-fixture' && t.version === 55)).toBeUndefined();
+  });
+
+  it("shows the API's refusal when deleting a version still pinned by an experiment or a run, and keeps it selected", async () => {
+    const user = userEvent.setup();
+    blockedPromptDeleteIds.add(1); // generation-baseline v1
+    renderApp({ initialEntries: ['/prompts'] });
+
+    await selectTemplate(user, 'generation-baseline');
+    await user.click(screen.getByRole('button', { name: /delete this version/i }));
+    const dialog = screen.getByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: /^confirm$/i }));
+
+    expect(await screen.findByText(/in use by an experiment or a run/i)).toBeInTheDocument();
+    // Nothing was removed, and the version is still the one loaded.
+    expect(screen.getByText('Version 1')).toBeInTheDocument();
+    expect(templates.find((t) => t.id === 1)).toBeDefined();
+  });
+
   it('previews a brand-new template with no id yet through the id-less route, then creates it', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/prompts'] });
@@ -705,7 +796,7 @@ describe('PromptEditor', () => {
     expect(screen.getByLabelText(/override n_systems/i)).toHaveValue(1);
     expect(screen.getByLabelText(/override n_scenarios_per_system/i)).toHaveValue(1);
 
-    await user.type(screen.getByLabelText(/^model$/i), 'openai/gpt-4o-mini');
+    await pickModel(user, 'openai/gpt-4o-mini');
 
     await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
@@ -726,7 +817,7 @@ describe('PromptEditor', () => {
 
     await selectTemplate(user, 'phase2-safe');
     await user.click(screen.getByLabelText(/variant a/i));
-    await user.type(screen.getByLabelText(/^model$/i), 'trigger-failure');
+    await pickModel(user, 'trigger-failure');
 
     await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
@@ -888,7 +979,7 @@ describe('PromptEditor', () => {
 
     await selectTemplate(user, 'phase2-safe');
     await user.click(screen.getByLabelText(/variant a/i));
-    await user.type(screen.getByLabelText(/^model$/i), 'openai/gpt-4o-mini');
+    await pickModel(user, 'openai/gpt-4o-mini');
 
     await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
@@ -904,7 +995,7 @@ describe('PromptEditor', () => {
 
     await selectTemplate(user, 'phase2-safe');
     await user.click(screen.getByLabelText(/variant a/i));
-    await user.type(screen.getByLabelText(/^model$/i), 'openai/gpt-4o-mini');
+    await pickModel(user, 'openai/gpt-4o-mini');
     await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
     expect(await screen.findByText('Completed', {}, POLL_WAIT)).toBeInTheDocument();
@@ -925,7 +1016,7 @@ describe('PromptEditor', () => {
 
     await selectTemplate(user, 'phase2-safe');
     await user.click(screen.getByLabelText(/variant a/i));
-    await user.type(screen.getByLabelText(/^model$/i), 'openai/gpt-4o-mini');
+    await pickModel(user, 'openai/gpt-4o-mini');
     await user.click(screen.getByRole('button', { name: /^run$/i }));
     expect(await screen.findByText('Queued')).toBeInTheDocument();
 
