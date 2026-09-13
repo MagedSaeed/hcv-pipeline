@@ -31,6 +31,8 @@ const emptyForm = {
   name: '',
   description: '',
   taxonomy: '',
+  // Phase 2 always runs; phase 3 (labelling its output) is optional.
+  runPhase3: true,
   phase2Model: '',
   phase2Temperature: '1',
   phase2PromptA: '',
@@ -60,6 +62,7 @@ function formFromExperiment(experiment) {
     name: experiment.name ?? '',
     description: experiment.description ?? '',
     taxonomy: experiment.taxonomy != null ? String(experiment.taxonomy) : '',
+    runPhase3: (experiment.phases ?? [2, 3]).includes(3),
     phase2Model: experiment.phase2_model ?? '',
     phase2Temperature: String(experiment.phase2_temperature ?? '1'),
     phase2PromptA: experiment.phase2_prompt_a != null ? String(experiment.phase2_prompt_a) : '',
@@ -223,6 +226,7 @@ export default function ExperimentBuilder() {
       name: form.name,
       description: form.description,
       taxonomy: form.taxonomy ? Number(form.taxonomy) : null,
+      phases: form.runPhase3 ? [2, 3] : [2],
       phase2_model: form.phase2Model,
       phase2_temperature: Number(form.phase2Temperature || 0),
       phase2_prompt_a: form.phase2PromptA ? Number(form.phase2PromptA) : null,
@@ -317,6 +321,30 @@ export default function ExperimentBuilder() {
           />
         </div>
 
+        <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
+          <legend className="px-1 text-sm font-semibold text-gray-900">Phases</legend>
+          <label htmlFor="phase-2" className="flex items-center gap-2 text-sm text-gray-500">
+            <input id="phase-2" type="checkbox" checked disabled />
+            Phase 2 — generate scenarios
+            <span className="text-xs">(always runs: phase 3 labels what it generates)</span>
+          </label>
+          <label htmlFor="phase-3" className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              id="phase-3"
+              type="checkbox"
+              checked={form.runPhase3}
+              onChange={(event) => updateField('runPhase3', event.target.checked)}
+            />
+            Phase 3 — label the generated scenarios
+          </label>
+          <p className="text-xs text-gray-500">
+            {form.runPhase3
+              ? 'Each repetition generates scenarios, then labels them against the taxonomy.'
+              : 'Each repetition only generates scenarios; nothing is labelled.'}
+          </p>
+          <FieldError message={fieldErrors.phases} />
+        </fieldset>
+
         <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Phase 2 — generation</legend>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -384,53 +412,55 @@ export default function ExperimentBuilder() {
           </div>
         </fieldset>
 
-        <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
-          <legend className="px-1 text-sm font-semibold text-gray-900">Phase 3 — labelling</legend>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ModelPicker
-              id="phase3-model"
-              label="Phase 3 model"
-              value={form.phase3Model}
-              onChange={(value) => updateField('phase3Model', value)}
-              modelsQuery={modelsQuery}
-              fieldError={fieldErrors.phase3_model}
-            />
-            <div>
-              <label htmlFor="phase3-temperature" className="block text-xs font-medium text-gray-700">
-                Phase 3 temperature
-              </label>
-              <input
-                id="phase3-temperature"
-                type="number"
-                step="0.1"
-                min="0"
-                value={form.phase3Temperature}
-                onChange={(event) => updateField('phase3Temperature', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+        {form.runPhase3 && (
+          <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">Phase 3 — labelling</legend>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <ModelPicker
+                id="phase3-model"
+                label="Phase 3 model"
+                value={form.phase3Model}
+                onChange={(value) => updateField('phase3Model', value)}
+                modelsQuery={modelsQuery}
+                fieldError={fieldErrors.phase3_model}
               />
-              <FieldError message={fieldErrors.phase3_temperature} />
+              <div>
+                <label htmlFor="phase3-temperature" className="block text-xs font-medium text-gray-700">
+                  Phase 3 temperature
+                </label>
+                <input
+                  id="phase3-temperature"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={form.phase3Temperature}
+                  onChange={(event) => updateField('phase3Temperature', event.target.value)}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                />
+                <FieldError message={fieldErrors.phase3_temperature} />
+              </div>
+              <div>
+                <label htmlFor="phase3-prompt" className="block text-xs font-medium text-gray-700">
+                  Phase 3 prompt
+                </label>
+                <select
+                  id="phase3-prompt"
+                  value={form.phase3Prompt}
+                  onChange={(event) => updateField('phase3Prompt', event.target.value)}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                >
+                  <option value="">Select a template…</option>
+                  {phase3Templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} (v{template.version})
+                    </option>
+                  ))}
+                </select>
+                <FieldError message={fieldErrors.phase3_prompt} />
+              </div>
             </div>
-            <div>
-              <label htmlFor="phase3-prompt" className="block text-xs font-medium text-gray-700">
-                Phase 3 prompt
-              </label>
-              <select
-                id="phase3-prompt"
-                value={form.phase3Prompt}
-                onChange={(event) => updateField('phase3Prompt', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a template…</option>
-                {phase3Templates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.name} (v{template.version})
-                  </option>
-                ))}
-              </select>
-              <FieldError message={fieldErrors.phase3_prompt} />
-            </div>
-          </div>
-        </fieldset>
+          </fieldset>
+        )}
 
         <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Seed systems</legend>

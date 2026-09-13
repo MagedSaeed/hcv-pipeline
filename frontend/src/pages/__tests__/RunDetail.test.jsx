@@ -27,6 +27,7 @@ function guardedStaffWrite(resolver) {
 // PipelineRun.config's exact shape (backend/pipeline/execution_config.py's
 // config_snapshot) - what THIS repetition actually pinned at launch.
 const PINNED_CONFIG = {
+  phases: [2, 3],
   seed_systems: [
     { id: 10, title: 'Pinned Oldsmar (as launched)', slug: 'oldsmar', body: 'body', scenarios: [] },
   ],
@@ -274,6 +275,18 @@ describe('RunDetail', () => {
     const currentPanel = screen.getByTestId('current-config');
     expect(within(pinnedPanel).queryByText(/current oldsmar/i)).not.toBeInTheDocument();
     expect(within(currentPanel).queryByText(/pinned oldsmar/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the pinned phases, which may differ from the experiment\'s current phases', async () => {
+    const run = pipelineRun({ status: 'completed', config: { ...PINNED_CONFIG, phases: [2] } });
+    installBaseFixtures({ run, phaseRuns: [] });
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    const pinnedPanel = await screen.findByTestId('pinned-config');
+    expect(within(pinnedPanel).getByText('Phase 2 only (generate, no labelling)')).toBeInTheDocument();
+    const currentPanel = screen.getByTestId('current-config');
+    expect(await within(currentPanel).findByText('Phase 2 (generate) → Phase 3 (label)')).toBeInTheDocument();
   });
 
   it('counts a single pinned system and scenario in the singular', async () => {

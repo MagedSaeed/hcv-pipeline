@@ -124,6 +124,62 @@ def test_staff_creates_an_experiment(api_client, staff, taxonomy, prompts, seed)
 
 
 @pytest.mark.django_db
+def test_staff_creates_a_generation_only_experiment_without_phase_three_fields(
+    api_client, staff, taxonomy, prompts, seed
+):
+    api_client.force_authenticate(user=staff)
+    generation, _ = prompts
+    response = api_client.post(
+        "/api/experiments/",
+        {
+            "name": "gen-only",
+            "taxonomy": taxonomy.id,
+            "phases": [2],
+            "phase2_model": "m2",
+            "phase2_prompt_a": generation.id,
+            "phase2_prompt_b": generation.id,
+            "seed_systems": [seed.id],
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.json()
+    body = response.json()
+    assert body["phases"] == [2]
+    assert body["phase3_prompt"] is None
+
+
+@pytest.mark.django_db
+def test_an_experiment_without_phases_defaults_to_both(api_client, member, experiment):
+    api_client.force_authenticate(user=member)
+    assert api_client.get(f"/api/experiments/{experiment.id}/").json()["phases"] == [2, 3]
+
+
+@pytest.mark.django_db
+def test_phase_three_without_phase_two_is_a_400_on_phases(api_client, staff, experiment):
+    api_client.force_authenticate(user=staff)
+    response = api_client.patch(
+        f"/api/experiments/{experiment.id}/", {"phases": [3]}, format="json"
+    )
+    assert response.status_code == 400
+    assert response.json()["phases"] == [
+        "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
+    ]
+
+
+@pytest.mark.django_db
+def test_launching_a_generation_only_experiment_creates_only_phase_two_runs(
+    api_client, staff, experiment
+):
+    api_client.force_authenticate(user=staff)
+    experiment.phases = [2]
+    experiment.save()
+    with patch("pipeline.orchestration.async_task"):
+        response = api_client.post(f"/api/experiments/{experiment.id}/run/", {}, format="json")
+    assert response.status_code == 202, response.json()
+    assert set(PhaseRun.objects.values_list("phase", flat=True)) == {2}
+
+
+@pytest.mark.django_db
 def test_an_invalid_experiment_is_refused_with_the_reason(api_client, staff, taxonomy, prompts):
     """Validation lives on the model; the API must surface it, not bypass it."""
     api_client.force_authenticate(user=staff)

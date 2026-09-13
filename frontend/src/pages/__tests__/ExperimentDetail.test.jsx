@@ -136,6 +136,24 @@ describe('ExperimentDetail', () => {
     expect(within(config).getByText('3 systems × 5 scenarios')).toBeInTheDocument();
   });
 
+  it('shows both phases by default, with the phase-3 settings', async () => {
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    const config = await screen.findByTestId('current-config');
+    expect(within(config).getByText('Phase 2 (generate) → Phase 3 (label)')).toBeInTheDocument();
+    expect(within(config).getByText(/phase 3 model/i)).toBeInTheDocument();
+  });
+
+  it('a generation-only experiment says so and hides the phase-3 rows', async () => {
+    installDetailFixtures({ ...EXPERIMENT, phases: [2], phase3_model: '', phase3_prompt: null });
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    const config = await screen.findByTestId('current-config');
+    expect(within(config).getByText('Phase 2 only (generate, no labelling)')).toBeInTheDocument();
+    expect(within(config).queryByText(/phase 3 model/i)).not.toBeInTheDocument();
+    expect(within(config).queryByText(/phase 3 prompt/i)).not.toBeInTheDocument();
+  });
+
   it('counts a single system and scenario in the singular', async () => {
     installDetailFixtures({ ...EXPERIMENT, n_systems: 1, n_scenarios_per_system: 1 });
     renderApp({ initialEntries: ['/experiments/77'] });

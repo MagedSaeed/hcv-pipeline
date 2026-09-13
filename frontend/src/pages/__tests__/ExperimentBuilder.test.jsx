@@ -424,6 +424,38 @@ describe('ExperimentBuilder', () => {
     expect(screen.queryByLabelText(/^name$/i)).not.toBeInTheDocument();
   });
 
+  it('always runs phase 2; unticking phase 3 hides its section and saves phases [2]', async () => {
+    const user = userEvent.setup();
+    let posted = null;
+    server.use(
+      http.post(
+        '/api/experiments/',
+        guardedExperimentWrite(async ({ request }) => {
+          posted = await request.json();
+          return HttpResponse.json({ phases: ['Phase 3 labels the scenarios phase 2 generates, so it needs phase 2.'] }, { status: 400 });
+        })
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    const phase2 = await screen.findByRole('checkbox', { name: /phase 2 — generate scenarios/i });
+    expect(phase2).toBeChecked();
+    expect(phase2).toBeDisabled();
+    const phase3 = screen.getByRole('checkbox', { name: /phase 3 — label the generated scenarios/i });
+    expect(phase3).toBeChecked();
+    expect(screen.getByLabelText(/^phase 3 prompt$/i)).toBeInTheDocument();
+
+    await fillMinimalValidForm(user);
+    await user.click(phase3);
+    expect(screen.queryByLabelText(/^phase 3 prompt$/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^phase 3 model$/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/only generates scenarios; nothing is labelled/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /create experiment/i }));
+    expect(await screen.findByText(/so it needs phase 2/i)).toBeInTheDocument();
+    expect(posted.phases).toEqual([2]);
+  });
+
   it('a non-staff user cannot see the builder form', async () => {
     authState.currentUserEmail = 'researcher@example.com';
     renderApp({ initialEntries: ['/experiments/new'] });
@@ -527,6 +559,14 @@ describe('ExperimentBuilder editing an existing experiment', () => {
     expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument();
     // Never the create-mode heading/button for an existing experiment.
     expect(screen.queryByRole('button', { name: /^create experiment$/i })).not.toBeInTheDocument();
+  });
+
+  it('loads a generation-only experiment with phase 3 unticked and its section hidden', async () => {
+    currentExperiment = { ...EXISTING_SEED, phases: [2] };
+    renderApp({ initialEntries: ['/experiments/42/edit'] });
+
+    expect(await screen.findByRole('checkbox', { name: /phase 3 — label/i })).not.toBeChecked();
+    expect(screen.queryByLabelText(/^phase 3 prompt$/i)).not.toBeInTheDocument();
   });
 
   it('PATCHes (not POSTs) on save, and navigates back to the detail screen', async () => {

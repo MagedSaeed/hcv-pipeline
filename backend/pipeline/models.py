@@ -8,6 +8,15 @@ from prompts.rendering import VARIANT_GUIDED, VARIANT_UNBIASED, unscannable_hcv_
 from taxonomy.models import Taxonomy
 
 VARIANTS = (VARIANT_UNBIASED, VARIANT_GUIDED)
+PHASE_GENERATION = 2
+PHASE_LABELLING = 3
+# The only two pipeline shapes: labelling always needs this run's own generation.
+ALLOWED_PHASES = ([PHASE_GENERATION], [PHASE_GENERATION, PHASE_LABELLING])
+PHASE3_NEEDS_PHASE2 = "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
+
+
+def default_phases():
+    return [PHASE_GENERATION, PHASE_LABELLING]
 
 
 def _progress_dict(done, total, failed):
@@ -398,6 +407,20 @@ def unbound_guard_taxonomy_error(taxonomy, experiment):
     return None
 
 
+def _phases_error(phases):
+    """Inline `Experiment.clean()` rule (not a `*_error` helper): an ad-hoc run
+    has a single `phase` field and nothing equivalent to check."""
+    if not isinstance(phases, list) or not phases:
+        return "Choose the phases to run: [2] or [2, 3]."
+    if any(isinstance(p, bool) or p not in (PHASE_GENERATION, PHASE_LABELLING) for p in phases):
+        return f"Unknown phase(s) in {phases!r}; expected 2 and/or 3."
+    if len(set(phases)) != len(phases):
+        return f"Duplicate phase(s) in {phases!r}; each phase may appear at most once."
+    if PHASE_GENERATION not in phases:
+        return PHASE3_NEEDS_PHASE2
+    return None
+
+
 class Experiment(models.Model):
     """A pinned configuration. Everything a run needs is frozen here.
 
@@ -442,13 +465,19 @@ class Experiment(models.Model):
         related_name="phase2_experiments_b",
         on_delete=models.PROTECT,
     )
-    phase3_model = models.CharField(max_length=200)
+    # Blank/null allowed because a generation-only experiment (`phases=[2]`)
+    # has no labelling; `clean()` requires both whenever phase 3 is enabled.
+    phase3_model = models.CharField(max_length=200, blank=True, default="")
     phase3_temperature = models.FloatField(default=0.0)
     phase3_prompt = models.ForeignKey(
         "prompts.PromptTemplate",
+        null=True,
+        blank=True,
         related_name="phase3_experiments",
         on_delete=models.PROTECT,
     )
+    # [2] (generation only) or [2, 3] (generate, then label that output).
+    phases = models.JSONField(default=default_phases)
 
     seed_systems = models.ManyToManyField("corpus.SystemDescription", blank=True)
     fewshots = models.ManyToManyField("corpus.FewShotExample", blank=True)
@@ -479,6 +508,10 @@ class Experiment(models.Model):
         if not self.variants:
             self.variants = list(VARIANTS)
         super().save(*args, **kwargs)
+
+    @property
+    def runs_labelling(self):
+        return isinstance(self.phases, list) and PHASE_LABELLING in self.phases
 
     def phase2_prompt_for(self, variant):
         """Which per-variant phase-2 template `launch()` pins onto `variant`'s
@@ -570,6 +603,10 @@ class Experiment(models.Model):
         # never silently swapped for the default.
         effective_variants = variants if variants else list(VARIANTS)
 
+        phases_error = _phases_error(self.phases)
+        if phases_error:
+            errors["phases"] = phases_error
+
         # A phase-3 labelling template pinned as the generation prompt (or the
         # reverse) validated fine and only surfaced later as a baffling render
         # or a wasted run. See `template_phase_mismatch_error`'s own
@@ -613,6 +650,13 @@ class Experiment(models.Model):
                     "this experiment actually runs."
                 )
 
+        # Phase-3 settings are required only when this experiment labels.
+        if self.runs_labelling:
+            if not (self.phase3_model or "").strip():
+                errors["phase3_model"] = "Set phase3_model: phase 3 is enabled."
+            if self.phase3_prompt_id is None:
+                errors["phase3_prompt"] = "Set phase3_prompt: phase 3 is enabled."
+
         if self.taxonomy_id:
             # See `taxonomy_missing_rows_error`'s own docstring — shared with
             # `PhaseRunCreateSerializer`'s identical check.
@@ -642,7 +686,7 @@ class Experiment(models.Model):
 
 
 class PipelineRun(models.Model):
-    """One repetition of an experiment — every variant, both phases."""
+    """One repetition of an experiment — every variant, each pinned phase."""
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"

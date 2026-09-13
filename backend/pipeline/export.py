@@ -80,6 +80,7 @@ def _experiment(experiment):
         "id": experiment.pk,
         "name": experiment.name,
         "description": experiment.description,
+        "phases": experiment.phases,
         "phase2_model": experiment.phase2_model,
         "phase2_temperature": experiment.phase2_temperature,
         "phase3_model": experiment.phase3_model,

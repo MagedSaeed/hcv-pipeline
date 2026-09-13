@@ -76,6 +76,7 @@ class ExperimentSerializer(serializers.ModelSerializer):
             "name",
             "description",
             "taxonomy",
+            "phases",
             "phase2_model",
             "phase2_temperature",
             "phase2_prompt_a",

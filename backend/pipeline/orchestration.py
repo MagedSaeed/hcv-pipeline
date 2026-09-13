@@ -16,7 +16,7 @@ from core.keys import resolve_openrouter_key
 from pipeline.execution_config import config_snapshot, generation_config_from_snapshot
 from pipeline.generation import render_generation_prompt, run_phase2
 from pipeline.labelling import failed_calls, finish_labelling_run, label_scenario, scenarios_for
-from pipeline.models import LLMCall, PhaseRun, PipelineRun
+from pipeline.models import PHASE_LABELLING, LLMCall, PhaseRun, PipelineRun
 from prompts.rendering import VARIANT_GUIDED, VARIANT_UNBIASED, PromptRenderError, TaxonomyLeak
 
 # The django-q task path a queued run is handed to. A plain string — the
@@ -139,6 +139,9 @@ def launch(experiment, n_repetitions=1, inline=False):
     refused with a `ValidationError` naming its field, with nothing created
     and no provider call made, instead of launching a repetition whose
     variant A is doomed while variant B still bills.
+
+    Labelling `PhaseRun`s are created only when the pinned snapshot's
+    `phases` includes 3 — read from `config`, so the rows match the record.
     """
     resolve_openrouter_key()
     experiment.full_clean()
@@ -156,6 +159,7 @@ def launch(experiment, n_repetitions=1, inline=False):
     # insurance against that changing later).
     config = config_snapshot(experiment)
     _refuse_templates_that_fail_as_their_own_variant(experiment, config)
+    labels = PHASE_LABELLING in config["phases"]
 
     for offset in range(n_repetitions):
         run = PipelineRun.objects.create(
@@ -167,6 +171,8 @@ def launch(experiment, n_repetitions=1, inline=False):
             generation = PhaseRun.objects.create(
                 pipeline_run=run, **_generation_run_fields(experiment, variant)
             )
+            if not labels:
+                continue
             PhaseRun.objects.create(
                 pipeline_run=run,
                 phase=3,
@@ -358,11 +364,8 @@ def execute_pipeline_run(pipeline_run, on_progress=None):
             on_progress(generation)
 
         if labelling is None:
-            # launch() always creates a phase-3 run pointing at every
-            # phase-2 run it creates. Its absence here means the
-            # configuration changed after launch in a way that left this
-            # generation without a labelling counterpart — nothing further
-            # to drive for it, and nothing to raise over.
+            # A generation-only repetition (pinned `phases` == [2]) has no
+            # labelling counterpart by design — nothing further to drive.
             continue
 
         if generation.status != PhaseRun.Status.COMPLETED:

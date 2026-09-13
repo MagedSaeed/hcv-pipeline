@@ -85,6 +85,8 @@ from types import SimpleNamespace
 
 from corpus.models import ResourceKind, SystemDescription
 from pipeline.models import (
+    ALLOWED_PHASES,
+    PHASE_LABELLING,
     Experiment,
     generated_target_system_error,
     generation_config_errors,
@@ -393,6 +395,7 @@ def _adhoc_labelling_fewshots(phase_run):
 # so the two can never silently drift apart the way two independently
 # maintained lists could.
 _TOP_LEVEL_KEY_ORDER = (
+    "phases",
     "seed_systems",
     "fewshots",
     "target_system",
@@ -516,6 +519,8 @@ def config_snapshot(experiment):
     not N times as many.
     """
     return {
+        # Which phases `launch` creates rows for — the run's own record of what it did.
+        "phases": sorted(experiment.phases),
         "seed_systems": [
             _snapshot_system(system) for system in experiment.seed_systems.order_by("title", "id")
         ],
@@ -682,6 +687,14 @@ def _require_file_kind_pairing(file_id, kind, what):
         )
 
 
+def _require_phases(value):
+    """Exactly one of the shapes launch can pin — a list, in that order, of
+    real ints (so `[3]`, `[3, 2]`, `(2, 3)` or `[True]` all fail closed)."""
+    valid = isinstance(value, list) and all(type(p) is int for p in value)
+    if not valid or value not in ALLOWED_PHASES:
+        raise MalformedSnapshot(f"phases must be one of {list(ALLOWED_PHASES)}, got {value!r}.")
+
+
 def _validate_scenario(scenario, what):
     _require_str(scenario["scenario_id"], f"{what}.scenario_id")
     for field in ("actor", "trigger", "standing_state", "asset", "threat", "outcome", "narrative"):
@@ -760,6 +773,7 @@ def validate_snapshot(config):
             "get a run with a real snapshot."
         )
     _require_exact_keys(config, _TOP_LEVEL_KEYS, "PipelineRun.config")
+    _require_phases(config["phases"])
     _require_list(config["seed_systems"], "seed_systems")
     for system in config["seed_systems"]:
         _validate_system(system, "a seed system")
@@ -913,4 +927,9 @@ def resolve_labelling_fewshots(phase_run):
         return _adhoc_labelling_fewshots(phase_run)
     snapshot = phase_run.pipeline_run.config
     validate_snapshot(snapshot)
+    if PHASE_LABELLING not in snapshot["phases"]:
+        raise MalformedSnapshot(
+            f"This run pinned phases {snapshot['phases']!r}, so it has no labelling; "
+            "refusing to label under a record that says phase 3 never ran."
+        )
     return _snapshot_fewshots(snapshot, phase=3)

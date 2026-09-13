@@ -315,6 +315,75 @@ def test_launch_creates_a_phase_run_per_variant_and_phase(experiment):
 
 
 @pytest.mark.django_db
+def test_launch_pins_the_phases_onto_the_snapshot(experiment):
+    run = launch(experiment, n_repetitions=1)[0]
+    assert run.config["phases"] == [2, 3]
+
+
+@pytest.mark.django_db
+def test_a_generation_only_launch_creates_no_labelling_runs(experiment):
+    experiment.phases = [2]
+    experiment.phase3_model = ""
+    experiment.phase3_prompt = None
+    experiment.save()
+
+    run = launch(experiment, n_repetitions=2)[0]
+
+    assert run.config["phases"] == [2]
+    assert {(p.phase, p.variant) for p in run.phase_runs.all()} == {(2, "A"), (2, "B")}
+    assert not PhaseRun.objects.filter(phase=3).exists()
+
+
+@pytest.mark.django_db
+def test_a_generation_only_launch_reads_phases_from_the_snapshot_not_the_live_experiment(
+    experiment,
+):
+    """launch() builds its rows from the snapshot it pins, so the record and
+    the rows can never disagree."""
+    experiment.phases = [2]
+    experiment.save()
+    with patch(
+        "pipeline.orchestration.config_snapshot",
+        side_effect=lambda exp: {**config_snapshot(exp), "phases": [2, 3]},
+    ):
+        run = launch(experiment, n_repetitions=1)[0]
+    assert run.phase_runs.filter(phase=3).count() == 2
+
+
+@pytest.mark.django_db
+def test_executing_a_generation_only_run_completes_without_labelling(_client, experiment):
+    experiment.phases = [2]
+    experiment.save()
+    for _ in experiment.variants:
+        _client.queue(GENERATED)
+    run = launch(experiment, n_repetitions=1)[0]
+
+    execute_pipeline_run(run)
+    run.refresh_from_db()
+
+    assert run.status == PipelineRun.Status.COMPLETED
+    assert run.progress == {"done": 2, "total": 2, "failed": 0, "percent": 100}
+    assert experiment.progress == {"done": 2, "total": 2, "failed": 0, "percent": 100}
+    assert Scenario.objects.filter(origin=Origin.GENERATED).count() == 2
+    assert Label.objects.count() == 0
+    assert len(_client.calls) == 2
+
+
+@pytest.mark.django_db
+def test_a_failed_generation_only_run_rolls_up_failed(_client, experiment):
+    experiment.phases = [2]
+    experiment.variants = ["A"]
+    experiment.save()
+    _client.fail_next("boom")
+    run = launch(experiment, n_repetitions=1)[0]
+
+    execute_pipeline_run(run)
+    run.refresh_from_db()
+
+    assert run.status == PipelineRun.Status.FAILED
+
+
+@pytest.mark.django_db
 def test_launch_honours_a_single_variant(experiment):
     experiment.variants = ["A"]
     experiment.save()

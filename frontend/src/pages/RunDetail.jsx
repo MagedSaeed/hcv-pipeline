@@ -17,6 +17,7 @@ import {
 import CodeBlock from '../components/CodeBlock';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
+import PhasesLabel from '../components/PhasesLabel';
 import ProgressBar from '../components/ProgressBar';
 import StatusBadge from '../components/StatusBadge';
 
@@ -72,12 +73,16 @@ function titleLookup(rows, key = 'title') {
   return (id) => (id == null ? null : (map.get(id) ?? `#${id}`));
 }
 
-function ConfigSummary({ testId, label, note, systems, fewshotNames, targetTitle, generateSystems, generateScenarios, nSystems, nScenariosPerSystem }) {
+function ConfigSummary({ testId, label, note, phases, systems, fewshotNames, targetTitle, generateSystems, generateScenarios, nSystems, nScenariosPerSystem }) {
   return (
     <div data-testid={testId} className="space-y-2 rounded-md border border-gray-200 bg-white p-3">
       <p className="text-sm font-semibold text-gray-900">{label}</p>
       {note && <p className="text-xs text-gray-500">{note}</p>}
       <dl className="grid grid-cols-1 gap-2 text-xs text-gray-700 sm:grid-cols-2">
+        <div>
+          <dt className="font-medium text-gray-500">Phases</dt>
+          <dd>{phases === null ? '—' : <PhasesLabel phases={phases} />}</dd>
+        </div>
         <div>
           <dt className="font-medium text-gray-500">Seed systems</dt>
           <dd>{systems.length > 0 ? systems.join(', ') : '(none)'}</dd>
@@ -411,6 +416,7 @@ export default function RunDetail() {
           testId="pinned-config"
           label="Pinned to this repetition"
           note="What repetition actually used, snapshotted once at launch — never re-read from the experiment afterward."
+          phases={pinned.phases}
           systems={pinnedSystems}
           fewshotNames={pinnedFewshots}
           targetTitle={pinnedTarget}
@@ -423,6 +429,7 @@ export default function RunDetail() {
           testId="current-config"
           label="Experiment's current configuration"
           note="May have changed since this repetition launched — this is NOT what this repetition used."
+          phases={experiment ? experiment.phases : null}
           systems={currentSystems}
           fewshotNames={currentFewshots}
           targetTitle={currentTarget}

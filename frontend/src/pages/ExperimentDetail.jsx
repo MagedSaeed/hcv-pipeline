@@ -15,6 +15,7 @@ import {
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
 import Modal from '../components/Modal';
+import PhasesLabel from '../components/PhasesLabel';
 import ProgressBar from '../components/ProgressBar';
 import StatusBadge from '../components/StatusBadge';
 
@@ -185,6 +186,7 @@ export default function ExperimentDetail() {
   const phase2PromptLabel = templateLookup(phase2Templates);
   const phase3PromptLabel = templateLookup(phase3Templates);
   const taxonomyLabel = taxonomyLookup(taxonomies);
+  const runsPhase3 = (experiment.phases ?? [2, 3]).includes(3);
 
   // The backend's own launch-time dry render (spec §10.4) refuses a
   // template that fails as its own variant with a standard DRF field
@@ -282,6 +284,12 @@ export default function ExperimentDetail() {
         </p>
         <dl className="grid grid-cols-1 gap-3 text-sm text-gray-700 sm:grid-cols-2">
           <div>
+            <dt className="font-medium text-gray-500">Phases</dt>
+            <dd>
+              <PhasesLabel phases={experiment.phases} />
+            </dd>
+          </div>
+          <div>
             <dt className="font-medium text-gray-500">Taxonomy</dt>
             <dd>{taxonomyLabel(experiment.taxonomy)}</dd>
           </div>
@@ -295,12 +303,14 @@ export default function ExperimentDetail() {
               {experiment.phase2_model} · {experiment.phase2_temperature}
             </dd>
           </div>
-          <div>
-            <dt className="font-medium text-gray-500">Phase 3 model / temperature</dt>
-            <dd>
-              {experiment.phase3_model} · {experiment.phase3_temperature}
-            </dd>
-          </div>
+          {runsPhase3 && (
+            <div>
+              <dt className="font-medium text-gray-500">Phase 3 model / temperature</dt>
+              <dd>
+                {experiment.phase3_model} · {experiment.phase3_temperature}
+              </dd>
+            </div>
+          )}
           <div>
             <dt className="font-medium text-gray-500">Phase 2 prompt — Variant A</dt>
             <dd>{phase2PromptLabel(experiment.phase2_prompt_a) ?? '(none)'}</dd>
@@ -311,10 +321,12 @@ export default function ExperimentDetail() {
             <dd>{phase2PromptLabel(experiment.phase2_prompt_b) ?? '(none)'}</dd>
             <FieldNote message={launchFieldErrors.phase2_prompt_b} />
           </div>
-          <div>
-            <dt className="font-medium text-gray-500">Phase 3 prompt</dt>
-            <dd>{phase3PromptLabel(experiment.phase3_prompt) ?? '(none)'}</dd>
-          </div>
+          {runsPhase3 && (
+            <div>
+              <dt className="font-medium text-gray-500">Phase 3 prompt</dt>
+              <dd>{phase3PromptLabel(experiment.phase3_prompt) ?? '(none)'}</dd>
+            </div>
+          )}
           <div>
             <dt className="font-medium text-gray-500">Seed systems</dt>
             <dd>{(experiment.seed_systems ?? []).map(systemTitle).join(', ') || '(none)'}</dd>

@@ -546,6 +546,65 @@ def test_a_variant_missing_its_template_is_refused_even_with_the_other_set(taxon
 
 
 @pytest.mark.django_db
+def test_an_experiment_runs_both_phases_by_default(experiment):
+    assert experiment.phases == [2, 3]
+    assert Experiment().phases == [2, 3]
+
+
+@pytest.mark.django_db
+def test_phase_three_alone_is_refused_because_it_needs_phase_two(experiment):
+    experiment.phases = [3]
+    with pytest.raises(ValidationError) as caught:
+        experiment.full_clean()
+    assert caught.value.message_dict["phases"] == [
+        "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("phases", [[], [2, 2], [2, 4], [1, 2, 3], "2,3", [True], None])
+def test_a_malformed_phases_list_is_refused(experiment, phases):
+    experiment.phases = phases
+    with pytest.raises(ValidationError) as caught:
+        experiment.full_clean()
+    assert "phases" in caught.value.message_dict
+
+
+@pytest.mark.django_db
+def test_a_generation_only_experiment_needs_no_phase_three_fields(taxonomy, templates):
+    gen, _ = templates
+    experiment = Experiment(
+        name="generation-only",
+        taxonomy=taxonomy,
+        phase2_model="m",
+        phase2_prompt_a=gen,
+        phase2_prompt_b=gen,
+        variants=["A", "B"],
+        phases=[2],
+    )
+    experiment.full_clean()  # must not raise: no phase-3 model or prompt needed
+    experiment.save()
+    assert Experiment.objects.get(pk=experiment.pk).phases == [2]
+
+
+@pytest.mark.django_db
+def test_an_experiment_running_phase_three_needs_its_model_and_prompt(taxonomy, templates):
+    gen, _ = templates
+    experiment = Experiment(
+        name="labelling-without-fields",
+        taxonomy=taxonomy,
+        phase2_model="m",
+        phase2_prompt_a=gen,
+        phase2_prompt_b=gen,
+        phases=[2, 3],
+    )
+    with pytest.raises(ValidationError) as caught:
+        experiment.full_clean()
+    assert "phase3_model" in caught.value.message_dict
+    assert "phase3_prompt" in caught.value.message_dict
+
+
+@pytest.mark.django_db
 def test_a_label_records_the_call_that_produced_it(experiment, taxonomy, templates, seed):
     """I6: spec §9 requires the export to carry the call behind each label. The
     (phase_run, scenario) join that derives it today stops being unique the

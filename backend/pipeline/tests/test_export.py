@@ -140,6 +140,7 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
         "id",
         "name",
         "description",
+        "phases",
         "phase2_model",
         "phase2_temperature",
         "phase3_model",
@@ -770,6 +771,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "id",
         "name",
         "description",
+        "phases",
         "phase2_model",
         "phase2_temperature",
         "phase3_model",
@@ -833,6 +835,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
     ]
     assert header("run_configs") == [
         "pipeline_run",
+        "phases",
         "seed_systems",
         "fewshots",
         "target_system",
@@ -917,6 +920,26 @@ def test_a_run_export_writes_a_single_inputs_csv_row(experiment):
     text = archive.read("inputs.csv").decode("utf-8")
     assert "Oldsmar" in text
     assert "ex" in text
+
+
+@pytest.mark.django_db
+def test_a_generation_only_run_exports_without_labelling_rows(experiment):
+    experiment.phases = [2]
+    experiment.save()
+    fake = FakeLLMClient()
+    fake.queue(GENERATED)
+    set_llm_client(fake)
+    run = launch(experiment, n_repetitions=1)[0]
+    execute_pipeline_run(run)
+    run.refresh_from_db()
+
+    bundle = build_run_bundle(run)
+    assert bundle["inputs"]["phases"] == [2]
+    assert {row["phase"] for row in bundle["runs"]} == {2}
+    assert bundle["labels"] == []
+    assert build_bundle(experiment)["experiment_current"]["phases"] == [2]
+    archive = zipfile.ZipFile(io.BytesIO(write_csv_zip(bundle)))
+    assert "[2]" in archive.read("inputs.csv").decode("utf-8")
 
 
 @pytest.mark.django_db
@@ -1270,6 +1293,7 @@ def test_a_run_export_carries_its_own_pinned_inputs_with_every_nested_field_popu
     assert bundle["inputs"] == run.config
     config = bundle["inputs"]
     assert set(config) == {
+        "phases",
         "seed_systems",
         "fewshots",
         "target_system",

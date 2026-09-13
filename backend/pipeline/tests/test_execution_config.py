@@ -40,6 +40,7 @@ _VALID_FEWSHOT = {
     "output_resource_kind": None,
 }
 _VALID_CONFIG = {
+    "phases": [2, 3],
     "seed_systems": [_VALID_SYSTEM],
     "fewshots": [_VALID_FEWSHOT],
     "target_system": None,
@@ -143,6 +144,30 @@ def test_a_target_system_missing_a_key_is_malformed():
     config = copy.deepcopy(_VALID_CONFIG)
     config["target_system"] = {"id": 2, "title": "Target", "body": "b"}  # missing slug, scenarios
     with pytest.raises(MalformedSnapshot):
+        validate_snapshot(config)
+
+
+def test_a_generation_only_snapshot_validates_cleanly():
+    config = copy.deepcopy(_VALID_CONFIG)
+    config["phases"] = [2]
+    validate_snapshot(config)  # must not raise
+
+
+def test_a_snapshot_missing_phases_is_malformed():
+    config = copy.deepcopy(_VALID_CONFIG)
+    del config["phases"]
+    with pytest.raises(MalformedSnapshot):
+        validate_snapshot(config)
+
+
+@pytest.mark.parametrize(
+    "phases", [[3], [], [3, 2], [2, 2], [2, 3, 4], ["2", "3"], [True], (2, 3), "2,3", None]
+)
+def test_a_lying_phases_value_is_malformed(phases):
+    """Only the two shapes launch can pin — [2] and [2, 3] — are accepted."""
+    config = copy.deepcopy(_VALID_CONFIG)
+    config["phases"] = phases
+    with pytest.raises(MalformedSnapshot, match="phases"):
         validate_snapshot(config)
 
 
@@ -378,6 +403,26 @@ def test_resolve_labelling_fewshots_fails_closed_on_a_malformed_snapshot():
     phase_run = PhaseRun(pipeline_run=pipeline_run, phase=3)  # unsaved: nothing else reads it
 
     with pytest.raises(MalformedSnapshot):
+        resolve_labelling_fewshots(phase_run)
+
+
+@pytest.mark.django_db
+def test_a_labelling_run_under_a_generation_only_snapshot_is_refused():
+    """A phase-3 row under a run pinned to phases [2] contradicts its own
+    record, so it fails closed rather than labelling anything."""
+    tax = Taxonomy.objects.create(vocabulary_id="HCV-P2", version="1.0", is_active=True)
+    gen = PromptTemplate.objects.create_version(phase=2, name="g", user_prompt="g")
+    experiment = Experiment.objects.create(
+        name="gen-only", taxonomy=tax, phase2_model="m2", phase2_prompt_a=gen, phases=[2]
+    )
+    config = copy.deepcopy(_VALID_CONFIG)
+    config["phases"] = [2]
+    pipeline_run = PipelineRun.objects.create(
+        experiment=experiment, repetition_index=1, config=config
+    )
+    phase_run = PhaseRun(pipeline_run=pipeline_run, phase=3)
+
+    with pytest.raises(MalformedSnapshot, match="phases"):
         resolve_labelling_fewshots(phase_run)
 
 
