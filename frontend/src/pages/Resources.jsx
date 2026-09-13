@@ -43,9 +43,9 @@ const PHASE_OPTIONS = [
 ];
 
 const TABS = [
-  { value: 'resources', label: 'Text resources' },
-  { value: 'fewshots', label: 'Few-shot examples' },
   { value: 'corpus', label: 'Systems & scenarios' },
+  { value: 'fewshots', label: 'Few-shot examples' },
+  { value: 'resources', label: 'Text resources' },
 ];
 
 function ResourceKindBadge({ kind }) {
@@ -734,17 +734,18 @@ function FewShotsTab() {
 export default function Resources() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
-  const activeTab = TABS.some((tab) => tab.value === requestedTab) ? requestedTab : 'resources';
+  const activeTab = TABS.some((tab) => tab.value === requestedTab) ? requestedTab : 'corpus';
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Resources</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Text resources are documents a prompt template pulls in with <code>resource(&quot;name&quot;)</code> or a
-          few-shot uses. Few-shots are example input/output pairs for phase 2 and phase 3 prompts. Systems &amp;
-          scenarios are the structured corpus rows used as seed/target systems and as the scenarios phase 3 labels —
-          seed and manual rows are editable, generated rows are read-only.
+          Systems &amp; scenarios are the structured corpus: seed and target systems for generation, and the
+          scenarios phase 3 labels (seed and manual rows are editable, generated rows are read-only). Few-shots are
+          example input/output pairs for phase 2 and phase 3 prompts. Text resources are the source documents,
+          which a prompt can pull in with <code>resource(&quot;name&quot;)</code> and a few-shot can use as its
+          input or output.
         </p>
       </div>
 

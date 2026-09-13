@@ -204,7 +204,7 @@ describe('Resources', () => {
   it('uploads a text file and shows its extracted text', async () => {
     stubFormDataForFileUploads();
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('hcv-table');
@@ -224,7 +224,7 @@ describe('Resources', () => {
 
   it('pastes text instead of uploading a file when adding a resource', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('hcv-table');
@@ -243,7 +243,7 @@ describe('Resources', () => {
   });
 
   it('visibly marks a taxonomy-kind resource with a note that it will be refused for variant A', async () => {
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('hcv-table');
@@ -261,7 +261,7 @@ describe('Resources', () => {
 
   it('edits a resource through the Edit modal', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('oldsmar-system');
@@ -391,7 +391,7 @@ describe('Resources', () => {
       is_active: true,
     });
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     await within(resourceListEl).findByText('oldsmar-scenarios');
@@ -408,7 +408,7 @@ describe('Resources', () => {
 
   it('switches between the Text resources and Few-shot examples tabs, keeping the choice in the URL', async () => {
     const user = userEvent.setup();
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     await resourceList();
     expect(screen.getByRole('button', { name: /^add resource$/i })).toBeInTheDocument();
@@ -434,7 +434,7 @@ describe('Resources', () => {
     }));
     server.use(http.get('/api/resources/', ({ request }) => HttpResponse.json(paginate(fillerResources, request))));
 
-    renderApp({ initialEntries: ['/resources'] });
+    renderApp({ initialEntries: ['/resources?tab=resources'] });
 
     const resourceListEl = await resourceList();
     expect(await within(resourceListEl).findByText('filler-resource-55')).toBeInTheDocument();
