@@ -674,6 +674,17 @@ class PhaseRunViewSet(
             queryset = queryset.filter(variant=variant)
         if state := params.get("status"):
             queryset = queryset.filter(status=state)
+        # Every run of a prompt, across its versions: `?prompt_name=` (with `?phase=`).
+        if prompt_name := params.get("prompt_name"):
+            queryset = queryset.filter(prompt_template__name=prompt_name)
+        if (prompt := integer_param(params, "prompt")) is not None:
+            queryset = queryset.filter(prompt_template_id=prompt)
+        # `?kind=test` for prompt test runs, `?kind=experiment` for repetitions' runs.
+        kind = params.get("kind")
+        if kind == "test":
+            queryset = queryset.filter(pipeline_run__isnull=True)
+        elif kind == "experiment":
+            queryset = queryset.filter(pipeline_run__isnull=False)
         return queryset
 
     def create(self, request, *args, **kwargs):

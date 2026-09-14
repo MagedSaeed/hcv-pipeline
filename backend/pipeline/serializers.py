@@ -224,6 +224,8 @@ class PhaseRunSerializer(serializers.ModelSerializer):
     leak_scan_ran = serializers.SerializerMethodField()
     guarded_by = serializers.SerializerMethodField()
     scenarios = serializers.JSONField(source="scenario_ids", read_only=True)
+    # Summed from the prefetched calls; None until a call reports a cost.
+    total_cost = serializers.SerializerMethodField()
 
     class Meta:
         model = PhaseRun
@@ -257,7 +259,12 @@ class PhaseRunSerializer(serializers.ModelSerializer):
             "guarded_by",
             "started_at",
             "finished_at",
+            "total_cost",
         ]
+
+    def get_total_cost(self, obj):
+        costs = [call.cost for call in obj.calls.all() if call.cost is not None]
+        return round(sum(costs), 6) if costs else None
 
     def get_leak_scan_ran(self, obj):
         """Whether the Run A isolation backstop ran for EVERY archived call.

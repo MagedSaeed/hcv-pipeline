@@ -83,7 +83,10 @@ function renderPreview(template, body) {
   });
 }
 
+let viewRunsFixture = [];
+
 beforeEach(() => {
+  viewRunsFixture = [];
   authState.currentUserEmail = 'admin@example.com'; // staff - see server.js SEED_USERS
   resetFixtures();
 
@@ -111,7 +114,8 @@ beforeEach(() => {
       const rows = phaseParam ? FEWSHOTS_SEED.filter((f) => f.phase === Number(phaseParam)) : FEWSHOTS_SEED;
       return HttpResponse.json(paginated(rows));
     }),
-    http.get('/api/scenarios/', () => HttpResponse.json(paginated([])))
+    http.get('/api/scenarios/', () => HttpResponse.json(paginated([]))),
+    http.get('/api/phase-runs/', () => HttpResponse.json(paginated(viewRunsFixture)))
   );
 });
 
@@ -157,6 +161,17 @@ describe('PromptView', () => {
 
     await user.click(screen.getByRole('tab', { name: /^rendered$/i }));
     expect(screen.getByText(/only staff may render this prompt/i)).toBeInTheDocument();
+  });
+
+  it('lists the prompt\'s runs: tests open in the editor panel, experiment runs link to their repetition', async () => {
+    viewRunsFixture = [
+      { id: 71, pipeline_run: null, phase: 2, variant: 'A', model: 'm-test', prompt_template: 1, status: 'completed', total_cost: null, finished_at: '2026-09-11T00:00:00Z' },
+      { id: 72, pipeline_run: 900, phase: 2, variant: 'B', model: 'm-exp', prompt_template: 1, status: 'completed', total_cost: 0.5, finished_at: '2026-09-11T01:00:00Z' },
+    ];
+    renderApp({ initialEntries: ['/prompts/1'] });
+
+    expect(await screen.findByRole('link', { name: /^open$/i })).toHaveAttribute('href', '/prompts/1/edit?testRun=71');
+    expect(screen.getByRole('link', { name: /open run/i })).toHaveAttribute('href', '/pipeline-runs/900');
   });
 
   it('an unknown id shows an error banner', async () => {

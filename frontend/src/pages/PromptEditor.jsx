@@ -19,6 +19,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
 import ParsedOutput from '../components/ParsedOutput';
+import PromptRuns from '../components/PromptRuns';
 import SidePanel from '../components/SidePanel';
 import ScenarioPicker, { NoScenariosNotice, useScenarioGroups } from '../components/ScenarioPicker';
 import StatusBadge from '../components/StatusBadge';
@@ -34,8 +35,8 @@ const VARIANT_COPY = {
 };
 
 const SCRATCH_NOTICE =
-  'Test runs are scratch: they are never archived or exported. Even a successful run leaves ' +
-  'no trace beyond what you see here.';
+  'Test runs are saved (their output appears under Resources and in Previous runs below), but ' +
+  'they are never part of an experiment’s results or exports. Delete them when you no longer need them.';
 
 const DELETE_TEST_RUN_MESSAGE =
   'Everything it generated (systems and scenarios) is deleted with it. This cannot be undone.';
@@ -172,7 +173,8 @@ export default function PromptEditor() {
   const [newName, setNewName] = useState('');
   const [draft, setDraft] = useState(emptyDraft);
   const [schemaError, setSchemaError] = useState(null);
-  const [testOpen, setTestOpen] = useState(false);
+  // `?testRun=<id>` (from a prompt's View page) opens the panel on that run.
+  const [testOpen, setTestOpen] = useState(() => searchParams.has('testRun'));
 
   // Preview/save context - the same fields PreviewSerializer accepts.
   // previewTaxonomyId is an explicit OVERRIDE; when blank the active
@@ -197,7 +199,8 @@ export default function PromptEditor() {
   const [iterateNSystems, setIterateNSystems] = useState('1');
   const [iterateNScenarios, setIterateNScenarios] = useState('3');
   const [iterateScenarioIds, setIterateScenarioIds] = useState([]);
-  const [iterateRunId, setIterateRunId] = useState(null);
+  const [iterateRunId, setIterateRunId] = useState(() => Number(searchParams.get('testRun')) || null);
+  const [previousRunsOpen, setPreviousRunsOpen] = useState(false);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
 
   // Fetch-all rather than phase-filtered: an edit route only carries an id,
@@ -941,6 +944,31 @@ export default function PromptEditor() {
                   {createPhaseRun.isError && <ErrorBanner error={createPhaseRun.error} />}
                 </div>
               </form>
+            )}
+
+            {currentTemplate && (
+              <div className="space-y-2 border-t border-gray-200 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setPreviousRunsOpen((current) => !current)}
+                  aria-expanded={previousRunsOpen}
+                  className="flex w-full items-center justify-between text-left text-sm font-semibold text-gray-900"
+                >
+                  <span>Previous runs of this prompt</span>
+                  <span className="text-xs font-normal text-gray-400">{previousRunsOpen ? 'Hide' : 'Show'}</span>
+                </button>
+                {previousRunsOpen && (
+                  <PromptRuns
+                    promptName={currentTemplate.name}
+                    phase={currentTemplate.phase}
+                    selectedRunId={iterateRunId}
+                    onOpenTestRun={(runId) => {
+                      setConfirmingDeleteIterateRun(false);
+                      setIterateRunId(runId);
+                    }}
+                  />
+                )}
+              </div>
             )}
 
             {iterateRunId != null && (

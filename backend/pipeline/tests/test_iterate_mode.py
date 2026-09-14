@@ -1454,3 +1454,29 @@ def test_experiment_filter_finds_an_adhoc_run_borrowing_it(
     body = response.json()
     assert body["count"] == 1
     assert body["results"][0]["id"] == borrowed.pk
+
+
+@pytest.mark.django_db
+def test_phase_runs_filter_by_prompt_name_and_kind(api_client, staff, taxonomy, phase2_template):
+    from prompts.models import PromptTemplate
+
+    newer = phase2_template.new_version(user_prompt=phase2_template.user_prompt + " ")
+    other = PromptTemplate.objects.create_version(
+        phase=2, name="another", user_prompt="x", variant="A"
+    )
+    runs = [
+        PhaseRun.objects.create(
+            phase=2, variant="A", model="m", prompt_template=template, taxonomy=taxonomy
+        )
+        for template in (phase2_template, newer, other)
+    ]
+    api_client.force_authenticate(user=staff)
+
+    body = api_client.get(
+        f"/api/phase-runs/?prompt_name={phase2_template.name}&phase=2&kind=test"
+    ).json()
+    assert sorted(row["id"] for row in body["results"]) == sorted([runs[0].id, runs[1].id])
+    assert body["results"][0]["total_cost"] is None
+    assert (
+        api_client.get(f"/api/phase-runs/?prompt={other.id}&kind=experiment").json()["count"] == 0
+    )

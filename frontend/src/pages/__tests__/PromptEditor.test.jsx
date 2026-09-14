@@ -293,9 +293,11 @@ function nextVersionFor(name, phase) {
 }
 
 let labellableRunsFixture = [];
+let previousRunsFixture = [];
 let scenariosFixture = SCENARIOS_SEED;
 
 beforeEach(() => {
+  previousRunsFixture = [];
   labellableRunsFixture = [
     { id: 500, pipeline_run: null, phase: 2, variant: 'A', model: 'openai/gpt-4o-mini', temperature: 0, prompt_template: 1, taxonomy: 2, source_phase_run: null, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [2], started_at: null, finished_at: '2026-09-10T00:05:00Z' },
   ];
@@ -435,7 +437,13 @@ beforeEach(() => {
     ),
 
     // Finished generation runs a labelling test can pick from; 500 saved `scratch_01`.
-    http.get('/api/phase-runs/', ({ request }) => HttpResponse.json(paginate(labellableRunsFixture, request))),
+    http.get('/api/phase-runs/', ({ request }) => {
+      // `?prompt_name=` is the Previous runs list; empty unless a test sets it.
+      if (new URL(request.url).searchParams.get('prompt_name')) {
+        return HttpResponse.json(paginate(previousRunsFixture, request));
+      }
+      return HttpResponse.json(paginate(labellableRunsFixture, request));
+    }),
 
     http.post('/api/phase-runs/', async ({ request }) => {
       const staffRefusal = requireStaff(currentUser());
@@ -714,7 +722,7 @@ describe('PromptEditor', () => {
 
     await openTestPanel(user);
     expect(panel).toBeVisible();
-    expect(await screen.findByText(/never archived/i)).toBeInTheDocument();
+    expect(await screen.findByText(/never part of an experiment/i)).toBeInTheDocument();
     // Nothing about the editor itself became unusable - no backdrop, no
     // focus trap.
     expect(screen.getByRole('button', { name: /^preview$/i })).toBeVisible();
@@ -723,7 +731,7 @@ describe('PromptEditor', () => {
     await user.click(screen.getByRole('button', { name: /^close$/i }));
     expect(panel).not.toBeVisible();
     // Hidden, not unmounted - its own content is still in the DOM.
-    expect(screen.getByText(/never archived/i)).toBeInTheDocument();
+    expect(screen.getByText(/never part of an experiment/i)).toBeInTheDocument();
   });
 
   it('with unsaved changes the button reads "Save & test", saves a new version, then runs it', async () => {
@@ -735,7 +743,7 @@ describe('PromptEditor', () => {
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
 
     await openTestPanel(user);
-    expect(await screen.findByText(/never archived/i)).toBeInTheDocument();
+    expect(await screen.findByText(/never part of an experiment/i)).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText(/borrow inputs from experiment/i), 'Baseline HCV-21 comparison');
     await pickModel(user, 'openai/gpt-4o-mini');
 
@@ -771,6 +779,21 @@ describe('PromptEditor', () => {
     expect(screen.getByText(/isolation verified/i)).toBeInTheDocument();
     expect(screen.getByText(/checked against hcv-21 v2/i)).toBeInTheDocument();
   }, 15000);
+
+  it('lists previous runs of the prompt and shows one when picked', async () => {
+    const user = userEvent.setup();
+    previousRunsFixture = [
+      { ...labellableRunsFixture[0], id: 501, prompt_template: 2, total_cost: 0.0123, finished_at: '2026-09-11T00:00:00Z' },
+    ];
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    const panel = screen.getByTestId('side-panel');
+    await user.click(await within(panel).findByRole('button', { name: /previous runs of this prompt/i }));
+    expect(await within(panel).findByText(/\$0\.0123/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole('button', { name: /^show$/i }));
+    expect(await within(panel).findByRole('button', { name: /^showing$/i })).toBeDisabled();
+  });
 
   it('shows the parsed output of a successful call: the generated system beside its scenarios as tabs', async () => {
     const user = userEvent.setup();

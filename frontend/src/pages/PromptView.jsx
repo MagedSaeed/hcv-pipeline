@@ -10,6 +10,7 @@ import {
   useTaxonomies,
 } from '../api/queries';
 import CodeBlock from '../components/CodeBlock';
+import PromptRuns from '../components/PromptRuns';
 import ErrorBanner from '../components/ErrorBanner';
 
 const PHASE_LABELS = { 2: 'Phase 2 — generation', 3: 'Phase 3 — labelling' };
@@ -448,6 +449,15 @@ export default function PromptView() {
           )}
         </div>
       )}
+
+      <section className="space-y-2">
+        <h2 className="text-lg font-medium text-gray-900">Runs</h2>
+        <p className="text-xs text-gray-500">
+          Every run of this prompt, across its versions. Prompt tests open in the test panel; experiment runs open
+          their repetition.
+        </p>
+        <PromptRuns promptName={current.name} phase={current.phase} editId={current.id} />
+      </section>
 
       <Link to="/prompts" className="text-sm font-medium text-brand-700 hover:text-brand-800">
         ← Back to prompts
