@@ -517,8 +517,8 @@ class Experiment(models.Model):
         related_name="targeted_by",
         on_delete=models.PROTECT,
     )
-    n_systems = models.PositiveIntegerField(default=3)
-    n_scenarios_per_system = models.PositiveIntegerField(default=5)
+    n_systems = models.PositiveIntegerField(default=1)
+    n_scenarios_per_system = models.PositiveIntegerField(default=3)
     variants = models.JSONField(default=list)
 
     created_by = models.ForeignKey("core.User", null=True, blank=True, on_delete=models.SET_NULL)

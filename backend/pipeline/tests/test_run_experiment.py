@@ -366,13 +366,12 @@ def test_repetitions_help_text_explains_why_the_number_exists_and_stays_defaulte
 
     assert action.default == 1
     help_text = action.help.lower()
-    assert "1.61" in action.help
-    assert "23 minutes" in action.help
+    assert "cost of one repetition" in help_text
     assert "queued together" in help_text
     assert "workers" in help_text
     assert "inline" in help_text
     assert "one after another" not in help_text
     assert "not in parallel" not in help_text
-    assert "1 repetition still takes about 23 minutes" in help_text
+    assert "1 repetition takes as long as one run" in help_text
     assert "divided by 2" not in help_text
     assert "noise" in help_text or "stochastic" in help_text
