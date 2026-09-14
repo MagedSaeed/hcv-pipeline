@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
-import { useDeletePromptTemplate, usePromptTemplates } from '../api/queries';
+import { useActivatePromptTemplate, useDeletePromptTemplate, usePromptTemplates } from '../api/queries';
 import { extractErrorMessage } from '../api/errors';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
@@ -32,6 +32,7 @@ function PromptGroupRow({ phase, name, versions, isStaff }) {
   const [keptVersions, setKeptVersions] = useState([]);
   const [confirmingVersionId, setConfirmingVersionId] = useState(null);
   const deleteTemplate = useDeletePromptTemplate();
+  const activateTemplate = useActivatePromptTemplate();
 
   const latest = versions[0];
   const activeVersion = versions.find((version) => version.is_active) ?? null;
@@ -154,6 +155,16 @@ function PromptGroupRow({ phase, name, versions, isStaff }) {
                   >
                     View
                   </Link>
+                  {isStaff && !version.is_active && (
+                    <button
+                      type="button"
+                      onClick={() => activateTemplate.mutate(version.id)}
+                      disabled={activateTemplate.isPending}
+                      className="rounded-md border border-brand-600 px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-60"
+                    >
+                      Make active
+                    </button>
+                  )}
                   {isStaff && confirmingVersionId !== version.id && (
                     <button
                       type="button"

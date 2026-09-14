@@ -878,6 +878,21 @@ export function useCreatePromptTemplate() {
   });
 }
 
+// POST /prompts/{id}/activate/ - staff; makes this the version new experiments
+// preselect, and unmarks the others of the same prompt.
+export function useActivatePromptTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id) => {
+      const { data } = await apiClient.post(`/prompts/${id}/activate/`);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.prompts.all });
+    },
+  });
+}
+
 // DELETE /prompts/{id}/ - refused with a 400 `{detail}` while an experiment
 // or a run still uses that version.
 export function useDeletePromptTemplate() {

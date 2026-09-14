@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import {
+  useActivatePromptTemplate,
   useFewShots,
   usePreviewPromptTemplate,
   usePromptTemplates,
@@ -221,6 +222,7 @@ export default function PromptView() {
   const templatesQuery = usePromptTemplates({});
   const templates = templatesQuery.data?.results ?? [];
   const current = templates.find((template) => String(template.id) === id);
+  const activateTemplate = useActivatePromptTemplate();
 
   // Every hook below must run every render (rules of hooks) - the
   // "not loaded yet"/"not found" returns happen further down instead.
@@ -365,6 +367,20 @@ export default function PromptView() {
             </option>
           ))}
         </select>
+        {isStaff && !current.is_active && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => activateTemplate.mutate(current.id)}
+              disabled={activateTemplate.isPending}
+              className="rounded-md border border-brand-600 px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-60"
+            >
+              {activateTemplate.isPending ? 'Marking…' : 'Make this version active'}
+            </button>
+            <span className="text-xs text-gray-500">New experiments preselect the active version.</span>
+          </div>
+        )}
+        {activateTemplate.isError && <ErrorBanner error={activateTemplate.error} />}
       </div>
 
       <div className="inline-flex rounded-md border border-gray-300 p-0.5" role="tablist" aria-label="Prompt display mode">

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
-import { paginated, requireStaff } from '../../test/mockApi';
+import { paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 
 // Two versions of one name (a variant-A prompt that genuinely leaks
 // taxonomy - used to prove the Rendered tab surfaces a real refusal), plus
@@ -172,6 +172,28 @@ describe('PromptView', () => {
 
     expect(await screen.findByRole('link', { name: /^open$/i })).toHaveAttribute('href', '/prompts/1/edit?testRun=71');
     expect(screen.getByRole('link', { name: /open run/i })).toHaveAttribute('href', '/pipeline-runs/900');
+  });
+
+  it('a staff user can make a non-active version active', async () => {
+    const user = userEvent.setup();
+    let activated = null;
+    server.use(
+      http.post('/api/prompts/:id/activate/', ({ params, request }) => {
+        const refusal = requireCsrf(request);
+        if (refusal) return refusal;
+        activated = Number(params.id);
+        templates.forEach((t) => {
+          if (t.name === 'generation-baseline') t.is_active = t.id === activated;
+        });
+        return HttpResponse.json(templates.find((t) => t.id === activated));
+      })
+    );
+    const inactive = templates.find((t) => t.name === 'generation-baseline' && !t.is_active);
+    renderApp({ initialEntries: [`/prompts/${inactive.id}`] });
+
+    await user.click(await screen.findByRole('button', { name: /make this version active/i }));
+    await waitFor(() => expect(activated).toBe(inactive.id));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /make this version active/i })).not.toBeInTheDocument());
   });
 
   it('an unknown id shows an error banner', async () => {
