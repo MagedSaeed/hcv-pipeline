@@ -83,11 +83,12 @@ been bitten by twice — fails closed here instead of being taken on faith.
 import copy
 from types import SimpleNamespace
 
-from corpus.models import ResourceKind, SystemDescription
+from corpus.models import FewShotExample, ResourceKind, SystemDescription
 from pipeline.models import (
     ALLOWED_PHASES,
     PHASE_LABELLING,
     Experiment,
+    chosen_fewshots_error,
     generated_target_system_error,
     generation_config_errors,
     unbound_guard_taxonomy_error,
@@ -147,6 +148,16 @@ class BorrowedExperimentMisconfigured(RuntimeError):
     provider call before failing on response validation — see those two
     functions' own docstrings.
     """
+
+
+class ChosenInputUnavailable(RuntimeError):
+    """A prompt test's own chosen seed system, few-shot or target system can't
+    be used: deleted since, or refused by the rules an experiment's inputs obey.
+    `field` names the create-request field it came from."""
+
+    def __init__(self, field, message):
+        super().__init__(message)
+        self.field = field
 
 
 class UnboundGuardTaxonomy(RuntimeError):
@@ -225,8 +236,8 @@ def _raise_config_errors(config):
 
 
 # Matches build_phase2_context's own defaults for an ad-hoc run that borrows
-# NO Experiment at all (`PhaseRun.experiment_id` is null — see generation.py,
-# pre-existing behaviour, unchanged). An ad-hoc run that DOES borrow one gets
+# NO Experiment at all (`PhaseRun.experiment_id` is null) and leaves an input
+# unchosen — see `chosen_generation_config`. An ad-hoc run that DOES borrow one gets
 # `_adhoc_generation_config`'s live-read branch below instead.
 # `copy.deepcopy`d wherever this is handed out (never the module global
 # itself) — `seed_systems`/`fewshots` are mutable lists, and every ad-hoc
@@ -245,9 +256,82 @@ _ADHOC_GENERATION_CONFIG = {
 }
 
 
+def _chosen_rows(queryset, ids, field, what):
+    rows = list(queryset.filter(pk__in=ids))
+    missing = len(set(ids)) - len(rows)
+    if missing:
+        raise ChosenInputUnavailable(
+            field,
+            f"{missing} of the chosen {what} no longer exist (deleted after they were "
+            "chosen). Refresh the list and choose again.",
+        )
+    return rows
+
+
+def chosen_generation_config(
+    *,
+    variant,
+    seed_system_ids=None,
+    fewshot_ids=None,
+    target_system_pk=None,
+    generate_systems=None,
+    generate_scenarios=None,
+    n_systems=None,
+    n_scenarios_per_system=None,
+):
+    """The generation config of a prompt test that borrows no experiment: the
+    built-in defaults, with every input the test chose (anything not `None`)
+    resolved to real rows. An empty list is a real choice: no examples at all.
+
+    Used at create time (`PhaseRunCreateSerializer`) AND at execution time
+    (`_adhoc_generation_config`), so the two cannot disagree. Raises
+    `ChosenInputUnavailable` for a deleted row or an unusable few-shot — never
+    drops it. Config-shaped rules (generated seeds/target, the toggles) are the
+    caller's to check via `generation_config_errors`, as for any other config.
+    """
+    config = copy.deepcopy(_ADHOC_GENERATION_CONFIG)
+    if seed_system_ids is not None:
+        config["seed_systems"] = _chosen_rows(
+            SystemDescription.objects.all(), seed_system_ids, "seed_systems", "seed systems"
+        )
+    if fewshot_ids is not None:
+        fewshots = _chosen_rows(
+            FewShotExample.objects.select_related("input_file", "output_file").order_by(
+                "phase", "order", "name"
+            ),
+            fewshot_ids,
+            "fewshots",
+            "few-shot examples",
+        )
+        error = chosen_fewshots_error(fewshots, variant)
+        if error:
+            raise ChosenInputUnavailable("fewshots", error)
+        config["fewshots"] = fewshots
+    if target_system_pk is not None:
+        target = SystemDescription.objects.filter(pk=target_system_pk).first()
+        if target is None:
+            raise ChosenInputUnavailable(
+                "target_system",
+                "The chosen target system no longer exists (deleted after it was "
+                "chosen). Choose another one.",
+            )
+        config["target_system"] = target
+        config["target_system_id"] = target.pk
+    for key, value in (
+        ("generate_systems", generate_systems),
+        ("generate_scenarios", generate_scenarios),
+        ("n_systems", n_systems),
+        ("n_scenarios_per_system", n_scenarios_per_system),
+    ):
+        if value is not None:
+            config[key] = value
+    return config
+
+
 def _adhoc_generation_config(phase_run):
-    """The ad-hoc (iterate-mode) generation config for `phase_run`: the bare
-    built-in defaults above if it borrows no `Experiment`, or that
+    """The ad-hoc (iterate-mode) generation config for `phase_run`: the built-in
+    defaults above plus the test's own chosen inputs (`chosen_generation_config`)
+    if it borrows no `Experiment`, or that
     experiment's CURRENT, LIVE fields — plus this run's own
     `n_systems`/`n_scenarios_per_system` overrides, if set — if it does.
 
@@ -306,7 +390,18 @@ def _adhoc_generation_config(phase_run):
     """
     if phase_run.experiment_id is None:
         _check_adhoc_taxonomy_binding(phase_run, None)
-        config = copy.deepcopy(_ADHOC_GENERATION_CONFIG)
+        # The test's own chosen inputs, re-resolved live: a row deleted or
+        # changed since creation fails the run here rather than being dropped.
+        config = chosen_generation_config(
+            variant=phase_run.variant,
+            seed_system_ids=phase_run.seed_system_ids,
+            fewshot_ids=phase_run.fewshot_ids,
+            target_system_pk=phase_run.target_system_pk,
+            generate_systems=phase_run.generate_systems,
+            generate_scenarios=phase_run.generate_scenarios,
+            n_systems=phase_run.n_systems,
+            n_scenarios_per_system=phase_run.n_scenarios_per_system,
+        )
         # The bare defaults are checked too, not waved through — see
         # `_raise_config_errors`. Cheap (they contain no rows), and it means
         # the ONE configuration in this codebase nobody validates because

@@ -69,6 +69,8 @@ _ADHOC_PATH = (
     ("pipeline/serializers.py", "PhaseRunCreateSerializer.validate"),
     ("pipeline/execution_config.py", "_raise_config_errors"),
     ("pipeline/execution_config.py", "_adhoc_generation_config"),
+    # A prompt test's own chosen inputs, resolved at create AND execution time.
+    ("pipeline/execution_config.py", "chosen_generation_config"),
     ("pipeline/execution_config.py", "_adhoc_labelling_fewshots"),
     ("pipeline/execution_config.py", "_check_adhoc_taxonomy_binding"),
 )

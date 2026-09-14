@@ -125,7 +125,9 @@ beforeEach(() => {
     // both of these regardless of phase - trivial empty handlers so that
     // one test doesn't trip the suite's strict "no unhandled request" mode.
     http.get('/api/models/', () => HttpResponse.json({ count: 0, results: [] })),
-    http.get('/api/scenarios/', () => HttpResponse.json({ count: 0, next: null, previous: null, results: [] }))
+    http.get('/api/scenarios/', () => HttpResponse.json({ count: 0, next: null, previous: null, results: [] })),
+    http.get('/api/system-descriptions/', () => HttpResponse.json({ count: 0, next: null, previous: null, results: [] })),
+    http.get('/api/phase-runs/', () => HttpResponse.json({ count: 0, next: null, previous: null, results: [] }))
   );
 });
 

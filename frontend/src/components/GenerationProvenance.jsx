@@ -5,9 +5,11 @@ import { apiClient } from '../api/client';
 import {
   queryKeys,
   useExperiment,
+  useFewShots,
   usePhaseRun,
   usePhaseRunCalls,
   usePipelineRun,
+  useSystemDescriptions,
   useTaxonomies,
 } from '../api/queries';
 import CodeBlock from './CodeBlock';
@@ -50,6 +52,14 @@ function Disclosure({ title, children }) {
   );
 }
 
+// Titles/names for a prompt test's stored ids; a row deleted since reads as such.
+function namesFor(ids, query, field, deleted) {
+  if (ids.length === 0) return '(none)';
+  if (!query.isSuccess) return '…';
+  const rows = query.data.results;
+  return ids.map((id) => rows.find((row) => row.id === id)?.[field] ?? deleted).join(', ');
+}
+
 function ProvenanceDetails({ phaseRunId }) {
   const phaseRunQuery = usePhaseRun(phaseRunId);
   const phaseRun = phaseRunQuery.data;
@@ -60,6 +70,10 @@ function ProvenanceDetails({ phaseRunId }) {
   const experimentQuery = useExperiment(experimentId, { enabled: experimentId != null });
   const taxonomiesQuery = useTaxonomies();
   const callsQuery = usePhaseRunCalls(phaseRunId);
+  // A prompt test that chose its own inputs stores their ids.
+  const choseInputs = phaseRun?.seed_systems != null || phaseRun?.fewshots != null || phaseRun?.target_system != null;
+  const systemsQuery = useSystemDescriptions({}, { enabled: choseInputs });
+  const fewshotsQuery = useFewShots({}, { enabled: choseInputs });
 
   if (phaseRunQuery.isLoading) return <p className="text-sm text-gray-500">Loading…</p>;
   if (phaseRunQuery.isError) return <ErrorBanner error={phaseRunQuery.error} />;
@@ -138,6 +152,21 @@ function ProvenanceDetails({ phaseRunId }) {
         <Row label="Counts requested">
           {counts[0] != null && counts[1] != null ? `${counts[0]} × ${counts[1]}` : 'built-in defaults'}
         </Row>
+        {!pinned && choseInputs && (
+          <>
+            <Row label="Seed systems">
+              {namesFor(phaseRun.seed_systems ?? [], systemsQuery, 'title', 'a deleted system')}
+            </Row>
+            <Row label="Few-shots">
+              {namesFor(phaseRun.fewshots ?? [], fewshotsQuery, 'name', 'a deleted few-shot')}
+            </Row>
+            {phaseRun.target_system != null && (
+              <Row label="Target system">
+                {namesFor([phaseRun.target_system], systemsQuery, 'title', 'a deleted system')}
+              </Row>
+            )}
+          </>
+        )}
         {pinned && (
           <>
             <Row label="Seed systems">

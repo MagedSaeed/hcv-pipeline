@@ -680,7 +680,7 @@ def test_a_fewshot_referencing_a_taxonomy_resource_still_leaks_via_the_snapshot_
 
     assert result.status == PhaseRun.Status.FAILED
     assert "leaky" in result.error
-    assert "TaxonomyLeak" in result.error
+    assert "Taxonomy check:" in result.error
     # Refused before any provider call was ever made.
     assert _client.calls == []
 
@@ -721,7 +721,7 @@ def test_a_snapshot_missing_a_guard_relevant_field_fails_the_run_not_renders(
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "MalformedSnapshot" in result.error
+    assert "Saved run settings are invalid:" in result.error
     # The leak this exact defect used to allow: refused before any provider
     # call was made, so a taxonomy-kind resource's text never reached a
     # rendered prompt at all, let alone the model.
@@ -765,7 +765,7 @@ def test_a_snapshot_with_a_lying_resource_kind_fails_the_run_not_renders(
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "MalformedSnapshot" in result.error
+    assert "Saved run settings are invalid:" in result.error
     # The leak this exact defect used to allow: refused before any provider
     # call was made, so a taxonomy-kind resource's text never reached a
     # rendered prompt at all, let alone the model.
@@ -811,7 +811,7 @@ def test_a_file_backed_fewshot_with_its_kind_nulled_fails_the_run_not_renders(
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "MalformedSnapshot" in result.error
+    assert "Saved run settings are invalid:" in result.error
     assert _client.calls == []
     assert result.calls.count() == 0
 
@@ -841,7 +841,7 @@ def test_a_bare_empty_config_refuses_to_execute_rather_than_using_adhoc_defaults
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "MalformedSnapshot" in result.error
+    assert "Saved run settings are invalid:" in result.error
     assert "predates the config-snapshot feature" in result.error
     assert _client.calls == []
 
@@ -874,7 +874,7 @@ def test_a_deleted_target_system_fails_cleanly_before_any_provider_call(
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "ReferencedRowMissing" in result.error
+    assert "Missing input:" in result.error
     assert "Oldsmar" in result.error
     assert str(target_id) in result.error
     assert _client.calls == []

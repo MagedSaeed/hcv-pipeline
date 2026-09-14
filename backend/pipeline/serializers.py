@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from corpus.models import Scenario
+from pipeline.execution_config import ChosenInputUnavailable, chosen_generation_config
 from pipeline.models import (
     VARIANTS,
     Experiment,
@@ -224,6 +225,10 @@ class PhaseRunSerializer(serializers.ModelSerializer):
     leak_scan_ran = serializers.SerializerMethodField()
     guarded_by = serializers.SerializerMethodField()
     scenarios = serializers.JSONField(source="scenario_ids", read_only=True)
+    # A prompt test's own chosen inputs (null when not chosen / borrowed / orchestrated).
+    seed_systems = serializers.JSONField(source="seed_system_ids", read_only=True)
+    fewshots = serializers.JSONField(source="fewshot_ids", read_only=True)
+    target_system = serializers.IntegerField(source="target_system_pk", read_only=True)
     # Summed from the prefetched calls; None until a call reports a cost.
     total_cost = serializers.SerializerMethodField()
 
@@ -249,6 +254,11 @@ class PhaseRunSerializer(serializers.ModelSerializer):
             "experiment",
             "n_systems",
             "n_scenarios_per_system",
+            "seed_systems",
+            "fewshots",
+            "target_system",
+            "generate_systems",
+            "generate_scenarios",
             "status",
             "error",
             "progress",
@@ -393,6 +403,19 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
     scenarios = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, allow_null=True
     )
+    # Phase 2 without a borrowed experiment only: the test's own inputs, checked
+    # by the same builder that resolves them at run time (`chosen_generation_config`).
+    # An empty list is valid and means "no examples". `default=None` keeps an
+    # omitted boolean None (not False) for form-encoded requests too.
+    seed_systems = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_null=True
+    )
+    fewshots = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_null=True
+    )
+    target_system = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    generate_systems = serializers.BooleanField(default=None, allow_null=True)
+    generate_scenarios = serializers.BooleanField(default=None, allow_null=True)
 
     class Meta:
         model = PhaseRun
@@ -409,6 +432,11 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
             "experiment",
             "n_systems",
             "n_scenarios_per_system",
+            "seed_systems",
+            "fewshots",
+            "target_system",
+            "generate_systems",
+            "generate_scenarios",
         ]
         read_only_fields = ["id"]
 
@@ -424,6 +452,7 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
             if scenario_error:
                 errors["scenarios"] = scenario_error
             attrs["scenario_ids"] = list(dict.fromkeys(chosen))
+        errors.update(self._chosen_inputs_errors(attrs, phase, variant, experiment))
 
         if phase == 2:
             if variant not in VARIANTS:
@@ -512,6 +541,53 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
+
+    @staticmethod
+    def _chosen_inputs_errors(attrs, phase, variant, experiment):
+        """Pop the chosen-input request fields into their stored names and check
+        them with the SAME rules an experiment's inputs obey. Mutates `attrs`."""
+        seed_ids = attrs.pop("seed_systems", None)
+        fewshot_ids = attrs.pop("fewshots", None)
+        target_pk = attrs.pop("target_system", None)
+        chosen = {
+            "seed_systems": seed_ids,
+            "fewshots": fewshot_ids,
+            "target_system": target_pk,
+            "generate_systems": attrs.get("generate_systems"),
+            "generate_scenarios": attrs.get("generate_scenarios"),
+        }
+        given = [field for field, value in chosen.items() if value is not None]
+        if given and phase != 2:
+            return dict.fromkeys(given, "Choosing these inputs applies only to a generation test.")
+        if given and experiment is not None:
+            message = (
+                "This test borrows an experiment's inputs, so it can't also choose its "
+                "own. Choose one or the other."
+            )
+            return dict.fromkeys(given, message)
+        if seed_ids is not None:
+            attrs["seed_system_ids"] = list(dict.fromkeys(seed_ids))
+        if fewshot_ids is not None:
+            attrs["fewshot_ids"] = list(dict.fromkeys(fewshot_ids))
+        attrs["target_system_pk"] = target_pk
+        if phase != 2 or experiment is not None:
+            return {}
+
+        try:
+            config = chosen_generation_config(
+                variant=variant,
+                seed_system_ids=seed_ids,
+                fewshot_ids=fewshot_ids,
+                target_system_pk=target_pk,
+                generate_systems=chosen["generate_systems"],
+                generate_scenarios=chosen["generate_scenarios"],
+                n_systems=attrs.get("n_systems"),
+                n_scenarios_per_system=attrs.get("n_scenarios_per_system"),
+            )
+        except ChosenInputUnavailable as error:
+            return {error.field: str(error)}
+        # Generated seeds/target and the toggles: the checker Experiment.clean() uses.
+        return generation_config_errors(config)
 
     @staticmethod
     def _chosen_scenarios_error(phase, chosen, source):

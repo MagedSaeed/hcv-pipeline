@@ -223,7 +223,7 @@ def test_the_render_time_scan_misses_a_post_render_injection_but_the_choke_point
     run = run_phase2(make_run(experiment, taxonomy, phase2_template, variant="A"))
 
     assert run.status == PhaseRun.Status.FAILED
-    assert "TaxonomyLeak" in run.error
+    assert "Taxonomy check:" in run.error
     assert "HCV-07" in run.error
     assert run.calls.count() == 0
     assert _client.calls == []
@@ -321,7 +321,7 @@ def test_the_choke_point_refuses_a_variant_a_call_when_the_taxonomy_cannot_be_re
     run = run_phase2(make_run(experiment, empty_taxonomy, phase2_template, variant="A"))
 
     assert run.status == PhaseRun.Status.FAILED
-    assert "TaxonomyLeak" in run.error
+    assert "Taxonomy check:" in run.error
     assert run.calls.count() == 0
     assert _client.calls == []
 
@@ -352,7 +352,7 @@ def test_a_variant_a_schema_naming_hcv_ids_only_as_keys_fails_with_zero_calls(
     run = run_phase2(make_run(experiment, taxonomy, key_only, variant="A"))
 
     assert run.status == PhaseRun.Status.FAILED
-    assert "TaxonomyLeak" in run.error
+    assert "Taxonomy check:" in run.error
     assert "HCV-07" in run.error
     assert _client.calls == []
     assert run.calls.count() == 0
@@ -384,7 +384,7 @@ def test_the_choke_point_alone_catches_a_key_only_id_injected_after_rendering(
     run = run_phase2(make_run(experiment, taxonomy, phase2_template, variant="A"))
 
     assert run.status == PhaseRun.Status.FAILED
-    assert "TaxonomyLeak" in run.error
+    assert "Taxonomy check:" in run.error
     assert "HCV-07" in run.error
     assert _client.calls == []
     assert LLMCall.objects.count() == 0

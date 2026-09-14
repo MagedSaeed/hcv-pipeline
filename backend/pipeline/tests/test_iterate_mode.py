@@ -8,13 +8,14 @@ single phase -> iterate mode"). Everything here is about the NEW `create`/
 untouched by this task.
 
 **Isolation is the point of this whole file, not one test in it.** A bare
-ad-hoc run (no `experiment` given) still resolves `seed_systems`/`fewshots`
-to `[]` (see `_ADHOC_GENERATION_CONFIG`) — a scratch run with genuinely
-nothing else to render against. But a coordinator review round found the
-ORIGINAL version of this file's own framing wrong: an ad-hoc run can now
-optionally BORROW an experiment's CURRENT, LIVE inputs (`experiment=` on the
-create payload — see `pipeline.execution_config._adhoc_generation_config`),
-which is the actual point of the feature ("if I am in phase 2, I can rerun
+ad-hoc run (no `experiment` given, no inputs chosen) still resolves
+`seed_systems`/`fewshots` to `[]` (see `_ADHOC_GENERATION_CONFIG`); a test's
+own chosen inputs are covered by `test_chosen_test_inputs.py`. But a
+coordinator review round found the ORIGINAL version of this file's own
+framing wrong: an ad-hoc run can now optionally BORROW an experiment's
+CURRENT, LIVE inputs (`experiment=` on the create payload — see
+`pipeline.execution_config._adhoc_generation_config`), which is the actual
+point of the feature ("if I am in phase 2, I can rerun
 manually until I am satisfied" means tuning against REAL seeds and
 few-shots, not bare defaults). That widens the isolation surface rather
 than narrowing it: a borrowed experiment's few-shots/seed_systems are real
@@ -771,14 +772,12 @@ def test_an_in_flight_ad_hoc_run_cannot_be_deleted(api_client, staff, taxonomy, 
 def test_an_adhoc_variant_a_run_with_a_taxonomy_kind_resource_fails_with_zero_calls(
     api_client, staff, taxonomy, _client
 ):
-    """An ad-hoc run has no `pipeline_run`, therefore no config snapshot —
-    `resolve_generation_config`'s ad-hoc branch always resolves
-    `seed_systems`/`fewshots` to `[]` (`_ADHOC_GENERATION_CONFIG`), so there
-    is no slot through which an ad-hoc run's own few-shot list could ever
-    carry a TAXONOMY-kind file — unlike an orchestrated run's pinned
-    snapshot (see `test_generation
+    """An ad-hoc run has no `pipeline_run`, therefore no config snapshot. With
+    no inputs chosen its `seed_systems`/`fewshots` resolve to `[]`
+    (`_ADHOC_GENERATION_CONFIG`); a chosen TAXONOMY-kind few-shot is refused
+    separately (see `test_chosen_test_inputs.py`, and `test_generation
     .test_a_fewshot_referencing_a_taxonomy_resource_still_leaks_via_the_snapshot_path`
-    for that equivalent, experiment-backed proof). What still applies,
+    for the experiment-backed proof). What still applies,
     unconditionally, regardless of `pipeline_run`/config, is
     `prompts.rendering._make_resource`'s `resource()` template global —
     reachable from ANY phase-2 template. This proves that guard fires
@@ -814,7 +813,7 @@ def test_an_adhoc_variant_a_run_with_a_taxonomy_kind_resource_fails_with_zero_ca
     assert result_status == PhaseRun.Status.FAILED
     phase_run = PhaseRun.objects.get(pk=phase_run_id)
     assert phase_run.status == PhaseRun.Status.FAILED
-    assert "TaxonomyLeak" in phase_run.error
+    assert "Taxonomy check:" in phase_run.error
     assert phase_run.calls.count() == 0
     assert LLMCall.objects.filter(phase_run_id=phase_run_id).count() == 0
     assert _client.calls == []
@@ -1097,7 +1096,6 @@ def test_a_generated_seed_system_added_after_creation_still_fails_closed_at_exec
 
     assert result_status == PhaseRun.Status.FAILED
     phase_run = PhaseRun.objects.get(pk=queued_pk)
-    assert "BorrowedExperimentContaminated" in phase_run.error
     assert "From a model" in phase_run.error
     assert phase_run.calls.count() == 0
     assert LLMCall.objects.filter(phase_run_id=queued_pk).count() == 0
@@ -1216,7 +1214,6 @@ def test_the_reviewers_exact_probe_a_generated_target_system_no_longer_reaches_t
 
     assert result_status == PhaseRun.Status.FAILED
     phase_run = PhaseRun.objects.get(pk=phase_run_id)
-    assert "BorrowedExperimentContaminated" in phase_run.error
     assert "Riverbend Plant" in phase_run.error
     assert phase_run.calls.count() == 0
     assert LLMCall.objects.filter(phase_run_id=phase_run_id).count() == 0
@@ -1278,7 +1275,7 @@ def test_the_reviewers_exact_probe_a_decoy_taxonomy_no_longer_reaches_the_prompt
     result = run_phase2(phase_run)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert "UnboundGuardTaxonomy" in result.error
+    assert "Taxonomy mismatch:" in result.error
     assert result.calls.count() == 0
     assert LLMCall.objects.filter(phase_run_id=phase_run.pk).count() == 0
     assert _client.calls == []
@@ -1329,7 +1326,7 @@ def test_borrowing_an_experiment_with_a_taxonomy_kind_fewshot_fails_with_zero_ca
     assert result_status == PhaseRun.Status.FAILED
     phase_run = PhaseRun.objects.get(pk=queued_pk)
     assert "leaky-borrowed" in phase_run.error
-    assert "TaxonomyLeak" in phase_run.error
+    assert "Taxonomy check:" in phase_run.error
     assert phase_run.calls.count() == 0
     assert LLMCall.objects.filter(phase_run_id=queued_pk).count() == 0
     assert _client.calls == []

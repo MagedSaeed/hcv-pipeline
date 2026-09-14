@@ -14,6 +14,7 @@ from django_q.tasks import async_task
 
 from core.keys import resolve_openrouter_key
 from pipeline.execution_config import config_snapshot, generation_config_from_snapshot
+from pipeline.failures import describe_failure
 from pipeline.generation import render_generation_prompt, run_phase2
 from pipeline.labelling import failed_calls, finish_labelling_run, label_scenario, scenarios_for
 from pipeline.models import PHASE_LABELLING, LLMCall, PhaseRun, PipelineRun
@@ -113,7 +114,7 @@ def _refuse_templates_that_fail_as_their_own_variant(experiment, config):
                 f"{probe.prompt_template} does not render as variant {variant} "
                 f"({context}) against this experiment's inputs, so nothing was "
                 "launched and no provider call was made. "
-                f"{type(error).__name__}: {error}"
+                f"{describe_failure(error)}"
             )
     if errors:
         raise ValidationError(errors)

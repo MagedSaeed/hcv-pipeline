@@ -177,7 +177,7 @@ def test_a_blank_row_taxonomy_cannot_guard_a_variant_a_run(_client, leaky_templa
     result = run_phase2(phase_run)
 
     assert_refused_with_nothing_spent(result, _client)
-    assert "TaxonomyLeak" in result.error
+    assert "Taxonomy check:" in result.error
     # The leak was real and would have been visible: this is not a test that
     # passes because there was nothing to catch.
     assert "HCV-07" in leaky_resource.text
@@ -428,7 +428,7 @@ def test_the_admin_cannot_repoint_a_pending_orchestrated_runs_taxonomy(
     result = run_phase2(phase_run)
 
     assert_refused_with_nothing_spent(result, _client)
-    assert "TaxonomyLeak" in result.error
+    assert "Taxonomy check:" in result.error
     assert "HCV-07" in result.error
 
     with pytest.raises(ValidationError):

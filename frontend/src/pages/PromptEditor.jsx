@@ -6,11 +6,13 @@ import {
   useCreatePromptTemplate,
   useDeletePhaseRun,
   useExperiments,
+  useFewShots,
   useModels,
   usePhaseRun,
   usePhaseRunCalls,
   usePreviewPromptTemplate,
   usePromptTemplates,
+  useSystemDescriptions,
   useTaxonomies,
   useUpdatePromptTemplate,
 } from '../api/queries';
@@ -40,6 +42,77 @@ const SCRATCH_NOTICE =
 
 const DELETE_TEST_RUN_MESSAGE =
   'Everything it generated (systems and scenarios) is deleted with it. This cannot be undone.';
+
+// PhaseRunCreateSerializer's cap on a test run's system/scenario counts.
+const TEST_COUNT_MAX = 50;
+
+function countLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function clampCount(value) {
+  return Math.min(TEST_COUNT_MAX, Math.max(1, Math.round(Number(value) || 1)));
+}
+
+function isValidCount(text) {
+  const value = Number(text);
+  return Number.isInteger(value) && value >= 1 && value <= TEST_COUNT_MAX;
+}
+
+// A checkbox list with Select all / Clear, capped in height. `selected` is null while loading.
+function InputChecklist({ legend, items, selected, onChange, emptyNote, noItemsNote }) {
+  const chosen = new Set(selected ?? []);
+  const chosenCount = items.filter((item) => chosen.has(item.id)).length;
+  function toggle(id) {
+    onChange(chosen.has(id) ? selected.filter((value) => value !== id) : [...selected, id]);
+  }
+  return (
+    <fieldset className="min-w-0 space-y-1">
+      <legend className="text-xs font-medium text-gray-700">{legend}</legend>
+      <div className="flex flex-wrap items-center gap-x-3 text-xs text-gray-500">
+        <span>
+          {chosenCount} of {items.length} selected
+        </span>
+        <button
+          type="button"
+          onClick={() => onChange(items.map((item) => item.id))}
+          disabled={selected === null}
+          className="font-medium text-brand-700 hover:underline disabled:opacity-60"
+        >
+          Select all
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange([])}
+          disabled={selected === null}
+          className="font-medium text-brand-700 hover:underline disabled:opacity-60"
+        >
+          Clear
+        </button>
+      </div>
+      <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-gray-200 bg-white p-2">
+        {selected === null && <p className="text-xs text-gray-500">Loading…</p>}
+        {selected !== null && items.length === 0 && <p className="text-xs text-gray-500">{noItemsNote}</p>}
+        {selected !== null &&
+          items.map((item) => (
+            <label key={item.id} className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={chosen.has(item.id)}
+                onChange={() => toggle(item.id)}
+                className="mt-1"
+              />
+              <span>
+                {item.label}
+                {item.detail && <span className="text-xs text-gray-500"> ({item.detail})</span>}
+              </span>
+            </label>
+          ))}
+      </div>
+      {selected !== null && chosenCount === 0 && <p className="text-xs text-gray-500">{emptyNote}</p>}
+    </fieldset>
+  );
+}
 
 function taxonomyName(taxonomies, id) {
   const taxonomy = taxonomies.find((row) => row.id === Number(id));
@@ -193,12 +266,20 @@ export default function PromptEditor() {
   const [previewedKey, setPreviewedKey] = useState(null);
 
   // Iterate ("Test this prompt") panel - POST /api/phase-runs/.
-  const [iterateExperimentId, setIterateExperimentId] = useState('');
   const [iterateModel, setIterateModel] = useState('');
   const [iterateTemperature, setIterateTemperature] = useState('0');
   const [iterateNSystems, setIterateNSystems] = useState('1');
   const [iterateNScenarios, setIterateNScenarios] = useState('3');
   const [iterateScenarioIds, setIterateScenarioIds] = useState([]);
+  // Phase 2 "Inputs for this test". The lists stay null until their choices
+  // first load, then start with everything selected.
+  const [inputSeedIds, setInputSeedIds] = useState(null);
+  const [inputFewshotIds, setInputFewshotIds] = useState(null);
+  const [inputGenerateSystems, setInputGenerateSystems] = useState(true);
+  const [inputGenerateScenarios, setInputGenerateScenarios] = useState(true);
+  const [inputTargetId, setInputTargetId] = useState('');
+  const [copyExperimentId, setCopyExperimentId] = useState('');
+  const [copiedFrom, setCopiedFrom] = useState(null);
   const [iterateRunId, setIterateRunId] = useState(() => Number(searchParams.get('testRun')) || null);
   const [previousRunsOpen, setPreviousRunsOpen] = useState(false);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
@@ -208,7 +289,6 @@ export default function PromptEditor() {
   // which phase this is.
   const templatesQuery = usePromptTemplates({});
   const taxonomiesQuery = useTaxonomies();
-  const experimentsQuery = useExperiments();
   const modelsQuery = useModels({ enabled: isStaff });
 
   const previewMutation = usePreviewPromptTemplate();
@@ -234,6 +314,20 @@ export default function PromptEditor() {
   const scenarioGroups = useScenarioGroups({ enabled: phase === 3 });
   const noScenarios =
     phase === 3 && !scenarioGroups.isLoading && !scenarioGroups.error && scenarioGroups.total === 0;
+  // Only a phase-2 test (panel open) needs the example lists and experiments to copy from.
+  const wantsTestInputs = isStaff && phase === 2 && testOpen;
+  const systemsQuery = useSystemDescriptions({}, { enabled: wantsTestInputs });
+  const fewshotsQuery = useFewShots({ phase: 2 }, { enabled: wantsTestInputs });
+  const experimentsQuery = useExperiments({}, { enabled: wantsTestInputs });
+  // Generated systems can't be seeds or targets (the backend refuses them).
+  const exampleSystems = (systemsQuery.data?.results ?? []).filter((system) => system.origin !== 'generated');
+  const activeFewshots = (fewshotsQuery.data?.results ?? []).filter(
+    (fewshot) => fewshot.phase === 2 && fewshot.is_active
+  );
+  if (inputSeedIds === null && systemsQuery.isSuccess) setInputSeedIds(exampleSystems.map((system) => system.id));
+  if (inputFewshotIds === null && fewshotsQuery.isSuccess) {
+    setInputFewshotIds(activeFewshots.map((fewshot) => fewshot.id));
+  }
 
   // React's own "adjust state when a prop changes" pattern (same as
   // ExperimentBuilder.jsx): once the addressed version has loaded, seed the
@@ -262,7 +356,11 @@ export default function PromptEditor() {
   const previewTaxonomyValue = previewTaxonomyId || (activeTaxonomy ? String(activeTaxonomy.id) : '');
 
   const experiments = experimentsQuery.data?.results ?? [];
-  const chosenExperiment = experiments.find((experiment) => experiment.id === Number(iterateExperimentId)) ?? null;
+  // Only ids still offered are sent, so a row deleted meanwhile is not a stale choice.
+  const chosenSeedIds = (inputSeedIds ?? []).filter((id) => exampleSystems.some((system) => system.id === id));
+  const chosenFewshotIds = (inputFewshotIds ?? []).filter((id) => activeFewshots.some((fewshot) => fewshot.id === id));
+  const chosenTarget = exampleSystems.find((system) => String(system.id) === inputTargetId) ?? null;
+  const inputListsLoaded = inputSeedIds !== null && inputFewshotIds !== null;
 
   if (!isEditing && phaseParam !== 2 && phaseParam !== 3) {
     return (
@@ -450,24 +548,43 @@ export default function PromptEditor() {
     if (saved) navigate(`/prompts/${saved.id}/edit`, { replace: true });
   }
 
+  // Fills the inputs ONCE from an experiment's current inputs; the test run is not linked to it.
+  function copyInputsFromExperiment() {
+    const experiment = experiments.find((row) => row.id === Number(copyExperimentId));
+    if (!experiment) return;
+    const offeredSystemIds = new Set(exampleSystems.map((system) => system.id));
+    const offeredFewshotIds = new Set(activeFewshots.map((fewshot) => fewshot.id));
+    setInputSeedIds((experiment.seed_systems ?? []).filter((id) => offeredSystemIds.has(id)));
+    setInputFewshotIds((experiment.fewshots ?? []).filter((id) => offeredFewshotIds.has(id)));
+    setInputGenerateSystems(Boolean(experiment.generate_systems));
+    setInputGenerateScenarios(Boolean(experiment.generate_scenarios));
+    setInputTargetId(offeredSystemIds.has(experiment.target_system) ? String(experiment.target_system) : '');
+    setIterateNSystems(String(clampCount(experiment.n_systems)));
+    setIterateNScenarios(String(clampCount(experiment.n_scenarios_per_system)));
+    setCopiedFrom(experiment.name);
+  }
+
   async function runIterate(templateId) {
-    const derivedTaxonomyId = chosenExperiment ? chosenExperiment.taxonomy : activeTaxonomy?.id;
     const body = {
       phase,
       model: iterateModel.trim(),
       temperature: Number(iterateTemperature || 0),
       prompt_template: templateId,
-      taxonomy: derivedTaxonomyId,
+      taxonomy: activeTaxonomy?.id,
     };
-    if (phase === 2) body.variant = variant;
-    if (phase === 3) body.scenarios = iterateScenarioIds;
-    if (iterateExperimentId) {
-      body.experiment = Number(iterateExperimentId);
-      if (phase === 2) {
-        body.n_systems = Number(iterateNSystems || 1);
-        body.n_scenarios_per_system = Number(iterateNScenarios || 3);
-      }
+    if (phase === 2) {
+      Object.assign(body, {
+        variant,
+        seed_systems: chosenSeedIds,
+        fewshots: chosenFewshotIds,
+        generate_systems: inputGenerateSystems,
+        generate_scenarios: inputGenerateScenarios,
+        target_system: inputGenerateSystems ? null : chosenTarget.id,
+        n_systems: Number(iterateNSystems),
+        n_scenarios_per_system: Number(iterateNScenarios),
+      });
     }
+    if (phase === 3) body.scenarios = iterateScenarioIds;
     try {
       const created = await createPhaseRun.mutateAsync(body);
       setIterateRunId(created.id);
@@ -497,8 +614,17 @@ export default function PromptEditor() {
   function testBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
     if (phase === 2 && variant === '') return 'Choose Variant A or Variant B above before testing.';
-    if (!chosenExperiment && !activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen, or borrow an experiment instead.';
+    if (!activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen first.';
     if (noScenarios) return 'There are no scenarios to label yet.';
+    if (phase === 2) {
+      if (systemsQuery.isError || fewshotsQuery.isError) return 'The example lists could not be loaded, so this test can’t run.';
+      if (!inputListsLoaded) return 'Loading the example systems and few-shot examples…';
+      if (!inputGenerateSystems && !inputGenerateScenarios) return 'Turn on generating new systems, scenarios, or both.';
+      if (!inputGenerateSystems && !chosenTarget) return 'Choose a target system to write the scenarios for.';
+      if (!isValidCount(iterateNSystems) || !isValidCount(iterateNScenarios)) {
+        return `Counts must be whole numbers from 1 to ${TEST_COUNT_MAX}.`;
+      }
+    }
     if (phase === 3 && iterateScenarioIds.length === 0) return 'Choose at least one scenario to label.';
     if (iterateModel.trim() === '') return 'Choose a model to run.';
     if (hasUnsavedChanges) return saveBlockedReason();
@@ -826,25 +952,6 @@ export default function PromptEditor() {
 
           {isStaff && !noScenarios && (
             <form onSubmit={handleTestPrompt} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label htmlFor="iterate-experiment" className="block text-xs font-medium text-gray-700">
-                    Borrow inputs from experiment (optional)
-                  </label>
-                  <select
-                    id="iterate-experiment"
-                    value={iterateExperimentId}
-                    onChange={(event) => setIterateExperimentId(event.target.value)}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                  >
-                    <option value="">None — built-in defaults</option>
-                    {experiments.map((experiment) => (
-                      <option key={experiment.id} value={experiment.id}>
-                        {experiment.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
                 <ModelPicker
                   id="iterate-model"
                   label="Model"
@@ -879,44 +986,166 @@ export default function PromptEditor() {
                   </div>
                 )}
 
-                {phase === 2 && iterateExperimentId && (
-                  <>
-                    <div>
-                      <label htmlFor="iterate-n-systems" className="block text-xs font-medium text-gray-700">
-                        Number of systems (try 1 for a quick test)
-                      </label>
-                      <input
-                        id="iterate-n-systems"
-                        type="number"
-                        min="1"
-                        value={iterateNSystems}
-                        onChange={(event) => setIterateNSystems(event.target.value)}
-                        className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                      />
+                {phase === 2 && (
+                  <section
+                    aria-labelledby="test-inputs-heading"
+                    className="space-y-3 rounded-md border border-gray-200 bg-gray-50 p-3 sm:col-span-2"
+                  >
+                    <div className="flex flex-wrap items-end justify-between gap-2">
+                      <div>
+                        <h3 id="test-inputs-heading" className="text-sm font-semibold text-gray-900">
+                          Inputs for this test
+                        </h3>
+                        <p className="text-xs text-gray-500">
+                          These fill in the prompt: example systems, few-shot examples, what to generate and how much.
+                        </p>
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <div>
+                          <label htmlFor="copy-experiment" className="block text-xs font-medium text-gray-700">
+                            Copy inputs from an experiment…
+                          </label>
+                          <select
+                            id="copy-experiment"
+                            value={copyExperimentId}
+                            onChange={(event) => setCopyExperimentId(event.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                          >
+                            <option value="">Choose an experiment…</option>
+                            {experiments.map((experiment) => (
+                              <option key={experiment.id} value={experiment.id}>
+                                {experiment.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={copyInputsFromExperiment}
+                          disabled={!copyExperimentId || !inputListsLoaded}
+                          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Copy
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <label htmlFor="iterate-n-scenarios" className="block text-xs font-medium text-gray-700">
-                        Scenarios per system (try 1 for a quick test)
-                      </label>
-                      <input
-                        id="iterate-n-scenarios"
-                        type="number"
-                        min="1"
-                        value={iterateNScenarios}
-                        onChange={(event) => setIterateNScenarios(event.target.value)}
-                        className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                    {copiedFrom && (
+                      <p className="text-xs text-gray-500">
+                        Copied from “{copiedFrom}”. Change anything below; the test is not linked to that experiment.
+                      </p>
+                    )}
+                    {(systemsQuery.isError || fewshotsQuery.isError) && (
+                      <ErrorBanner error={systemsQuery.error ?? fewshotsQuery.error} />
+                    )}
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <InputChecklist
+                        legend="Seed systems"
+                        items={exampleSystems.map((system) => ({
+                          id: system.id,
+                          label: system.title,
+                          detail: system.origin === 'manual' ? 'hand-written' : 'seed',
+                        }))}
+                        selected={inputSeedIds === null ? null : chosenSeedIds}
+                        onChange={setInputSeedIds}
+                        emptyNote="No example systems will be included."
+                        noItemsNote="There are no seed or hand-written systems yet."
                       />
+                      <InputChecklist
+                        legend="Few-shot examples"
+                        items={activeFewshots.map((fewshot) => ({ id: fewshot.id, label: fewshot.name }))}
+                        selected={inputFewshotIds === null ? null : chosenFewshotIds}
+                        onChange={setInputFewshotIds}
+                        emptyNote="No few-shots will be included."
+                        noItemsNote="There are no active phase 2 few-shot examples yet."
+                      />
+
+                      <fieldset className="space-y-1">
+                        <legend className="text-xs font-medium text-gray-700">What to generate</legend>
+                        <label className="flex items-center gap-2 text-sm text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={inputGenerateSystems}
+                            onChange={(event) => setInputGenerateSystems(event.target.checked)}
+                          />
+                          New systems
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={inputGenerateScenarios}
+                            onChange={(event) => setInputGenerateScenarios(event.target.checked)}
+                          />
+                          Scenarios
+                        </label>
+                      </fieldset>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="iterate-n-systems" className="block text-xs font-medium text-gray-700">
+                            Systems to generate
+                          </label>
+                          <input
+                            id="iterate-n-systems"
+                            type="number"
+                            min="1"
+                            max={TEST_COUNT_MAX}
+                            value={iterateNSystems}
+                            onChange={(event) => setIterateNSystems(event.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="iterate-n-scenarios" className="block text-xs font-medium text-gray-700">
+                            Scenarios per system
+                          </label>
+                          <input
+                            id="iterate-n-scenarios"
+                            type="number"
+                            min="1"
+                            max={TEST_COUNT_MAX}
+                            value={iterateNScenarios}
+                            onChange={(event) => setIterateNScenarios(event.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                          />
+                        </div>
+                      </div>
+
+                      {!inputGenerateSystems && (
+                        <div className="sm:col-span-2">
+                          <label htmlFor="iterate-target-system" className="block text-xs font-medium text-gray-700">
+                            Target system (the scenarios are written for it)
+                          </label>
+                          <select
+                            id="iterate-target-system"
+                            value={chosenTarget ? String(chosenTarget.id) : ''}
+                            onChange={(event) => setInputTargetId(event.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                          >
+                            <option value="">Choose a system…</option>
+                            {exampleSystems.map((system) => (
+                              <option key={system.id} value={system.id}>
+                                {system.title}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                     </div>
-                  </>
+                  </section>
                 )}
 
                 <p className="text-xs text-gray-600 sm:col-span-2">
                   Taxonomy:{' '}
-                  {chosenExperiment
-                    ? `the one used by “${chosenExperiment.name}”`
-                    : activeTaxonomy
-                      ? `${activeTaxonomy.vocabulary_id} v${activeTaxonomy.version} (currently active)`
-                      : 'no taxonomy is currently active'}
+                  {activeTaxonomy
+                    ? `${activeTaxonomy.vocabulary_id} v${activeTaxonomy.version} (currently active)`
+                    : 'no taxonomy is currently active'}
+                  {phase === 2 && inputListsLoaded && (
+                    <>
+                      . Examples: {countLabel(chosenSeedIds.length, 'seed system')} and{' '}
+                      {countLabel(chosenFewshotIds.length, 'few-shot example')}
+                    </>
+                  )}
                   . Prompt:{' '}
                   {isEditing
                     ? `“${currentTemplate.name}” v${currentTemplate.version}${hasUnsavedChanges ? ' (edited, not yet saved)' : ''}`
@@ -977,7 +1206,9 @@ export default function PromptEditor() {
                   {iterateRun && <StatusBadge status={iterateRun.status} />}
                   <span className="text-sm text-gray-600">
                     {iterateRun?.phase === 3 ? 'Labelling test run' : 'Generation test run'}
-                    {iterateRun?.scenarios ? ` · ${iterateRun.scenarios.length} ${iterateRun.scenarios.length === 1 ? 'scenario' : 'scenarios'}` : ''}
+                    {iterateRun?.scenarios ? ` · ${countLabel(iterateRun.scenarios.length, 'scenario')}` : ''}
+                    {iterateRun?.seed_systems ? ` · ${countLabel(iterateRun.seed_systems.length, 'seed system')}` : ''}
+                    {iterateRun?.fewshots ? ` · ${countLabel(iterateRun.fewshots.length, 'few-shot example')}` : ''}
                   </span>
                   {isStaff && !confirmingDeleteIterateRun && (
                     <button

@@ -190,7 +190,7 @@ def test_a_malformed_snapshot_fails_the_run_instead_of_stranding_it(experiment):
         assert phase_run.is_terminal
     generation = run.phase_runs.get(phase=2)
     assert generation.status == PhaseRun.Status.FAILED
-    assert "MalformedSnapshot" in generation.error
+    assert "Saved run settings are invalid:" in generation.error
 
 
 @pytest.mark.django_db
@@ -801,7 +801,6 @@ def test_a_taxonomy_resource_still_fails_the_run_as_a_taxonomy_leak_not_a_render
     result = run_phase2(adhoc)
 
     assert result.status == PhaseRun.Status.FAILED
-    assert result.error.startswith("TaxonomyLeak: ")
     assert "taxonomy resource" in result.error
     assert result.calls.count() == 0
     assert _client.calls == []

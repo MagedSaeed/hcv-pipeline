@@ -31,6 +31,7 @@ from llm.schemas import (
 )
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_generation_config
+from pipeline.failures import describe_failure
 from pipeline.models import LLMCall, PhaseRun
 from prompts.rendering import (
     VARIANT_UNBIASED,
@@ -373,7 +374,7 @@ def run_phase2(phase_run):
     try:
         config = resolve_generation_config(phase_run)
     except Exception as error:  # noqa: BLE001 — see docstring: must not strand the run
-        return _fail(phase_run, f"{type(error).__name__}: {error}")
+        return _fail(phase_run, describe_failure(error))
 
     phase_run.status = PhaseRun.Status.RUNNING
     phase_run.started_at = timezone.now()
@@ -386,7 +387,7 @@ def run_phase2(phase_run):
     try:
         rendered = render_generation_prompt(phase_run, config)
     except (TaxonomyLeak, PromptRenderError) as error:
-        return _fail(phase_run, f"{type(error).__name__}: {error}")
+        return _fail(phase_run, describe_failure(error))
 
     try:
         return _call_and_persist(phase_run, rendered, config)
@@ -403,7 +404,7 @@ def run_phase2(phase_run):
         # re-rolls it up, so the repetition can never be re-driven at all. A
         # run that dies mid-flight leaves no evidence of what went wrong;
         # every exit from here leaves a terminal status and a message.
-        return _fail(phase_run, f"{type(error).__name__}: {error}")
+        return _fail(phase_run, describe_failure(error))
 
 
 def _call_and_persist(phase_run, rendered, config):

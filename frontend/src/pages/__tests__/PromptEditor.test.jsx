@@ -292,6 +292,13 @@ function nextVersionFor(name, phase) {
   return Math.max(...existingVersions) + 1;
 }
 
+// Phase 2 few-shots: only the active phase-2 one is offered to a generation test.
+const FEWSHOTS_SEED = [
+  { id: 21, phase: 2, name: 'oldsmar', input_text: 'in', input_file: null, output_text: 'out', output_file: null, order: 0, is_active: true },
+  { id: 22, phase: 2, name: 'retired-example', input_text: 'in', input_file: null, output_text: 'out', output_file: null, order: 1, is_active: false },
+  { id: 23, phase: 3, name: 'oldsmar-sc_01', input_text: 'in', input_file: null, output_text: 'out', output_file: null, order: 0, is_active: true },
+];
+
 let labellableRunsFixture = [];
 let previousRunsFixture = [];
 let scenariosFixture = SCENARIOS_SEED;
@@ -428,6 +435,7 @@ beforeEach(() => {
         paginate(
           [
             { ...generatedSystem(0), id: 1, title: 'Oldsmar water plant', origin: 'seed', generation_run: null, is_scratch: false },
+            { ...generatedSystem(0), id: 2, title: 'Hand-written tram depot', origin: 'manual', generation_run: null, is_scratch: false },
             { ...generatedSystem(0), id: 5, title: 'Scratch parking system', generation_run: 500 },
             ...phaseRuns.map((run) => generatedSystem(run.id)),
           ],
@@ -435,6 +443,12 @@ beforeEach(() => {
         )
       )
     ),
+
+    http.get('/api/fewshots/', ({ request }) => {
+      const phaseParam = new URL(request.url).searchParams.get('phase');
+      const rows = phaseParam ? FEWSHOTS_SEED.filter((row) => row.phase === Number(phaseParam)) : FEWSHOTS_SEED;
+      return HttpResponse.json(paginate(rows, request));
+    }),
 
     // Finished generation runs a labelling test can pick from; 500 saved `scratch_01`.
     http.get('/api/phase-runs/', ({ request }) => {
@@ -468,6 +482,11 @@ beforeEach(() => {
         experiment: body.experiment ?? null,
         n_systems: body.n_systems ?? null,
         n_scenarios_per_system: body.n_scenarios_per_system ?? null,
+        seed_systems: body.seed_systems ?? null,
+        fewshots: body.fewshots ?? null,
+        target_system: body.target_system ?? null,
+        generate_systems: body.generate_systems ?? null,
+        generate_scenarios: body.generate_scenarios ?? null,
         status: 'queued',
         error: '',
         progress: { done: 0, total: 1, failed: 0, percent: 0 },
@@ -744,7 +763,8 @@ describe('PromptEditor', () => {
 
     await openTestPanel(user);
     expect(await screen.findByText(/never part of an experiment/i)).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText(/borrow inputs from experiment/i), 'Baseline HCV-21 comparison');
+    const seeds = screen.getByRole('group', { name: 'Seed systems' });
+    await user.click(await within(seeds).findByRole('checkbox', { name: /hand-written tram depot/i }));
     await pickModel(user, 'openai/gpt-4o-mini');
 
     const button = screen.getByRole('button', { name: /^save & test$/i });
@@ -757,7 +777,8 @@ describe('PromptEditor', () => {
     const newVersion = templates.find((t) => t.name === 'phase2-variant-b' && t.version === 2);
     expect(newVersion).toBeTruthy();
     expect(phaseRuns[0].prompt_template).toBe(newVersion.id);
-    expect(phaseRuns[0].experiment).toBe(1);
+    expect(phaseRuns[0].experiment).toBeNull();
+    expect(phaseRuns[0]).toMatchObject({ seed_systems: [1], fewshots: [21] });
   }, 15000);
 
   it('with no unsaved changes the button reads "Run test" and runs the version being edited without saving', async () => {
@@ -779,6 +800,79 @@ describe('PromptEditor', () => {
     expect(screen.getByText(/isolation verified/i)).toBeInTheDocument();
     expect(screen.getByText(/checked against hcv-21 v2/i)).toBeInTheDocument();
   }, 15000);
+
+  it('a generation test preselects every example, allows none, and sends every input', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    const panel = screen.getByTestId('side-panel');
+    const seeds = within(panel).getByRole('group', { name: 'Seed systems' });
+    const fewshots = within(panel).getByRole('group', { name: 'Few-shot examples' });
+    expect(await within(seeds).findByText('2 of 2 selected')).toBeInTheDocument();
+    expect(await within(fewshots).findByText('1 of 1 selected')).toBeInTheDocument();
+    // Generated systems, inactive and phase 3 few-shots are never offered.
+    expect(within(seeds).queryByText(/scratch parking system/i)).not.toBeInTheDocument();
+    expect(within(fewshots).queryByText(/retired-example|oldsmar-sc_01/)).not.toBeInTheDocument();
+    expect(within(panel).getByText(/examples: 2 seed systems and 1 few-shot example/i)).toBeInTheDocument();
+
+    await user.click(within(fewshots).getByRole('button', { name: /^clear$/i }));
+    expect(within(fewshots).getByText(/no few-shots will be included/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/2 seed systems and 0 few-shot examples/i)).toBeInTheDocument();
+
+    await user.click(within(panel).getByRole('checkbox', { name: /new systems/i }));
+    expect(within(panel).getByText(/choose a target system/i)).toBeInTheDocument();
+    await user.selectOptions(within(panel).getByLabelText(/target system/i), 'Oldsmar water plant');
+    await pickModel(user, 'openai/gpt-4o-mini');
+    await user.click(within(panel).getByRole('button', { name: /^run test$/i }));
+
+    expect(await within(panel).findByText(/generation test run · 2 seed systems · 0 few-shot examples/i)).toBeInTheDocument();
+    expect(phaseRuns[0]).toMatchObject({
+      experiment: null,
+      seed_systems: [1, 2],
+      fewshots: [],
+      generate_systems: false,
+      generate_scenarios: true,
+      target_system: 1,
+      n_systems: 1,
+      n_scenarios_per_system: 3,
+    });
+  });
+
+  it('copies an experiment’s inputs into the form once, without linking the run to it', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/experiments/', ({ request }) =>
+        HttpResponse.json(
+          paginate(
+            [{ id: 7, name: 'Targeted pilot', taxonomy: 2, seed_systems: [2, 5], fewshots: [22, 21], generate_systems: false, generate_scenarios: true, target_system: 2, n_systems: 80, n_scenarios_per_system: 5 }],
+            request
+          )
+        )
+      )
+    );
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    const panel = screen.getByTestId('side-panel');
+    const seeds = within(panel).getByRole('group', { name: 'Seed systems' });
+    expect(await within(seeds).findByText('2 of 2 selected')).toBeInTheDocument();
+    await user.selectOptions(await within(panel).findByLabelText(/copy inputs from an experiment/i), 'Targeted pilot');
+    await user.click(within(panel).getByRole('button', { name: /^copy$/i }));
+
+    // The generated seed and the inactive few-shot are dropped; counts clamp to the test cap.
+    expect(within(seeds).getByText('1 of 2 selected')).toBeInTheDocument();
+    expect(within(panel).getByRole('checkbox', { name: /new systems/i })).not.toBeChecked();
+    expect(within(panel).getByLabelText(/target system/i)).toHaveValue('2');
+    expect(within(panel).getByLabelText(/systems to generate/i)).toHaveValue(50);
+    expect(within(panel).getByLabelText(/scenarios per system/i)).toHaveValue(5);
+    expect(within(panel).getByText(/copied from “targeted pilot”/i)).toBeInTheDocument();
+
+    await pickModel(user, 'openai/gpt-4o-mini');
+    await user.click(within(panel).getByRole('button', { name: /^run test$/i }));
+    await waitFor(() => expect(phaseRuns).toHaveLength(1));
+    expect(phaseRuns[0]).toMatchObject({ experiment: null, seed_systems: [2], fewshots: [21], target_system: 2, n_systems: 50 });
+  });
 
   it('lists previous runs of the prompt and shows one when picked', async () => {
     const user = userEvent.setup();

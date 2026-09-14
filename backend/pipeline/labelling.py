@@ -21,6 +21,7 @@ from llm.schemas import (
 )
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_labelling_fewshots
+from pipeline.failures import describe_failure
 from pipeline.models import Label, LLMCall, PhaseRun
 from prompts.rendering import (
     PromptRenderError,
@@ -103,7 +104,7 @@ def label_scenario(phase_run, scenario, sequence=1):
             phase_run=phase_run,
             sequence=sequence,
             scenario=scenario,
-            parse_error=f"{type(error).__name__}: {error}",
+            parse_error=describe_failure(error),
         )
 
     result = get_llm_client().complete(

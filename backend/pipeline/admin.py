@@ -94,7 +94,19 @@ class PhaseRunAdmin(admin.ModelAdmin):
     # have turned "add a PhaseRun" into "create a row with no phase, no
     # model, no template and no taxonomy". The two must be applied
     # together.
-    readonly_fields = ("phase", "variant", "model", "prompt_template", "taxonomy")
+    readonly_fields = (
+        "phase",
+        "variant",
+        "model",
+        "prompt_template",
+        "taxonomy",
+        # A prompt test's chosen inputs: only the API's validated create sets them.
+        "seed_system_ids",
+        "fewshot_ids",
+        "target_system_pk",
+        "generate_systems",
+        "generate_scenarios",
+    )
 
     def has_add_permission(self, request):
         """A `PhaseRun` is created by `launch()` (orchestrated) or by
