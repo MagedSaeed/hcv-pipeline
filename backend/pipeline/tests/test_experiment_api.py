@@ -606,14 +606,12 @@ def test_n_repetitions_help_text_explains_why_the_number_exists_and_stays_defaul
 
     assert field.default == 1
     help_text = field.help_text.lower()
-    assert "cost of one repetition" in help_text
-    assert "queued together" in help_text
-    assert "workers" in help_text
     assert "one after another" not in help_text
     assert "not in parallel" not in help_text
-    assert "1 repetition takes as long as one run" in help_text
     assert "divided by 2" not in help_text
-    assert "noise" in help_text or "stochastic" in help_text
+    assert "noise" in help_text
+    assert "cost grows with this number" in help_text
+    assert "up to 2 repetitions run at once" in help_text
 
 
 @pytest.mark.django_db

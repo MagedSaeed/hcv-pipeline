@@ -31,18 +31,10 @@ class Command(BaseCommand):
             type=int,
             default=1,
             help=(
-                "How many times to repeat this exact configuration (default: 1). "
-                "LLM output is stochastic, so a single repetition's difference "
-                "between variant A (taxonomy withheld) and variant B (taxonomy "
-                "supplied) could just be sampling noise; repeating the same "
-                "configuration is what turns a one-off difference into a finding "
-                "you can trust. Total cost is this number times the cost of one "
-                "repetition, which depends on the models, prompts and counts. On "
-                "the default (queued) path all repetitions are queued together and "
-                "run as workers become free (2 at a time by default), so 1 "
-                "repetition takes as long as one run, 2 finish in about that same "
-                "time, and each further pair adds about one run's time. --inline "
-                "runs repetitions one at a time in this process instead."
+                "How many times to repeat this configuration (default: 1). Model "
+                "output varies between runs, so one repetition's A-vs-B difference "
+                "may be noise. Cost grows with this number; up to 2 repetitions run "
+                "at once (--inline runs them one at a time)."
             ),
         )
         parser.add_argument(

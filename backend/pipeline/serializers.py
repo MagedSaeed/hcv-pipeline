@@ -176,19 +176,10 @@ class RunRequestSerializer(serializers.Serializer):
         min_value=1,
         max_value=100,
         help_text=(
-            "How many times to repeat this exact configuration. LLM output is "
-            "stochastic, so a single repetition's difference between variant A "
-            "(taxonomy withheld) and variant B (taxonomy supplied) could just be "
-            "sampling noise. Repeating the same configuration several times is "
-            "what turns a one-off difference into a finding you can trust. Each "
-            "repetition makes the same model calls again, so the total cost is "
-            "this number times the cost of one repetition, which depends on the "
-            "models, prompts and counts you chose (each run page shows what a "
-            "repetition actually cost). Time is different: all repetitions are "
-            "queued together and run as workers become free (2 at a time by "
-            "default), so 1 repetition takes as long as one run, 2 finish in about "
-            "that same time, and each further pair adds about one run's time. "
-            "Start with 1, and raise it once a one-off run looks promising."
+            "Model output varies between runs, so one repetition's difference between "
+            "variants A and B may be noise; more repetitions give a result you can trust. "
+            "Cost grows with this number (each run page shows what it cost), and up to 2 "
+            "repetitions run at once. Start with 1."
         ),
     )
 
