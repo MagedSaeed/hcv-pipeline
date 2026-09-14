@@ -262,8 +262,8 @@ export default function PromptView() {
     }
     setGenerateSystems(true);
     setGenerateScenarios(true);
-    setNSystems('3');
-    setNScenariosPerSystem('5');
+    setNSystems('1');
+    setNScenariosPerSystem('3');
     setDefaultsForId(current.id);
   }
 
