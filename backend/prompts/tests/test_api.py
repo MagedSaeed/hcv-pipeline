@@ -230,20 +230,22 @@ def test_post_ignores_version_and_created_by_from_the_payload(api_client, staff,
 
 
 @pytest.mark.django_db
-def test_is_active_is_read_only_on_both_create_and_patch(api_client, staff, template):
+def test_a_newly_saved_version_becomes_the_active_one(api_client, staff, template):
     api_client.force_authenticate(user=staff)
 
     created = api_client.post(
         "/api/prompts/",
-        {"phase": 2, "name": "fresh", "user_prompt": "y", "is_active": True},
+        {"phase": 2, "name": "fresh", "user_prompt": "y", "is_active": False},
         format="json",
     )
     assert created.status_code == 201
-    assert created.json()["is_active"] is False
+    assert created.json()["is_active"] is True
 
-    patched = api_client.patch(f"/api/prompts/{template.id}/", {"is_active": True}, format="json")
+    patched = api_client.patch(f"/api/prompts/{template.id}/", {"user_prompt": "z"}, format="json")
     assert patched.status_code == 201
-    assert patched.json()["is_active"] is False
+    assert patched.json()["is_active"] is True
+    template.refresh_from_db()
+    assert template.is_active is False
 
 
 @pytest.mark.django_db

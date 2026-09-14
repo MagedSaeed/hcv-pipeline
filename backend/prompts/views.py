@@ -23,6 +23,16 @@ from prompts.serializers import PreviewSerializer, PromptTemplateSerializer
 from taxonomy.models import Taxonomy
 
 
+def _make_active(template):
+    """A newly saved version becomes the active one: the latest edit is what new
+    experiments use unless someone deliberately makes an older version active."""
+    PromptTemplate.objects.filter(phase=template.phase, name=template.name).exclude(
+        pk=template.pk
+    ).update(is_active=False)
+    template.is_active = True
+    template.save(update_fields=["is_active"])
+
+
 class StaffWrites(BaseStaffWrites):
     """Anyone signed in may read a prompt; only staff may author one."""
 
@@ -61,9 +71,12 @@ class PromptTemplateViewSet(
         data = dict(serializer.validated_data)
         phase = data.pop("phase")
         name = data.pop("name")
-        serializer.instance = PromptTemplate.objects.create_version(
-            phase=phase, name=name, created_by=self.request.user, **data
-        )
+        with transaction.atomic():
+            created = PromptTemplate.objects.create_version(
+                phase=phase, name=name, created_by=self.request.user, **data
+            )
+            _make_active(created)
+        serializer.instance = created
 
     def perform_destroy(self, instance):
         try:
@@ -92,7 +105,9 @@ class PromptTemplateViewSet(
             for field, value in serializer.validated_data.items()
             if field in PromptTemplate.COPIED_FIELDS
         }
-        created = template.new_version(created_by=request.user, **changes)
+        with transaction.atomic():
+            created = template.new_version(created_by=request.user, **changes)
+            _make_active(created)
         return Response(self.get_serializer(created).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
