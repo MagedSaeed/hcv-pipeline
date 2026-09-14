@@ -84,8 +84,9 @@ def loads_response(raw):
     """Decode a model's JSON reply, accepting one surrounding Markdown code fence.
 
     Models that ignore `response_format` often wrap otherwise valid JSON in
-    ```json ... ```; that is formatting, not a schema failure. Anything else that
-    is not JSON still raises ValueError.
+    ```json ... ``` and put raw line breaks inside string values; both are
+    formatting, not a schema failure (`strict=False` allows control characters
+    inside strings). Anything else that is not JSON still raises ValueError.
     """
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -94,7 +95,7 @@ def loads_response(raw):
         text = body.rstrip()
         if text.endswith("```"):
             text = text[:-3]
-    return json.loads(text)
+    return json.loads(text, strict=False)
 
 
 def parse_failure_message(error, finish_reason, completion_tokens):

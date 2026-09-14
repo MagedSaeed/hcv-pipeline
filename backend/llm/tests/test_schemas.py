@@ -135,3 +135,10 @@ def test_parse_failure_message_explains_a_truncated_reply():
 
     assert "output limit (4096" in parse_failure_message(ValueError("x"), "length", 4096)
     assert parse_failure_message(ValueError("x"), "stop", 10) == "x"
+
+
+def test_loads_response_accepts_raw_line_breaks_inside_strings():
+    from llm.schemas import loads_response
+
+    raw = '```json\n{"system_descriptions": [{"title": "P", "body": "Line one\n\nLine two"}]}\n```'
+    assert loads_response(raw)["system_descriptions"][0]["body"] == "Line one\n\nLine two"
