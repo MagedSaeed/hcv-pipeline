@@ -280,7 +280,7 @@ def test_a_run_in_flight_cannot_be_deleted(api_client, staff, executed):
         response = api_client.delete(f"/api/pipeline-runs/{executed.pk}/")
         assert response.status_code == 409
         assert response.json()["code"] == "run_in_flight"
-        assert f"/api/pipeline-runs/{executed.pk}/cancel/" in str(response.json())
+        assert "cancel it first" in str(response.json())
         assert PipelineRun.objects.filter(pk=executed.pk).exists()
 
 

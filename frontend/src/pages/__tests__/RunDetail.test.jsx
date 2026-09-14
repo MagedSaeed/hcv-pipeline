@@ -362,8 +362,8 @@ describe('RunDetail', () => {
 
     const cancelButton = await screen.findByRole('button', { name: /cancel run/i });
     expect(cancelButton).toBeInTheDocument();
-    expect(screen.getByText(/does not interrupt a worker/i)).toBeInTheDocument();
-    expect(screen.getByText(/marks.*dead so it can be deleted/i)).toBeInTheDocument();
+    expect(screen.getByText(/does not interrupt a model call/i)).toBeInTheDocument();
+    expect(screen.getByText(/lets you delete it/i)).toBeInTheDocument();
     unmount();
 
     const completed = pipelineRun({ status: 'completed', finished_at: '2026-09-10T01:00:00Z' });

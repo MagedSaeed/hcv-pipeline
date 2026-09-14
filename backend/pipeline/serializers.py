@@ -420,11 +420,7 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
 
         if phase == 2:
             if variant not in VARIANTS:
-                errors["variant"] = (
-                    f"variant must be one of {list(VARIANTS)} for a phase 2 "
-                    f"(generation) run, got {variant!r}. There is no unmarked "
-                    "generation — see PhaseRun.is_unbiased."
-                )
+                errors["variant"] = "Choose variant A or variant B for a generation run."
         elif phase == 3:
             if source is None and chosen is None:
                 errors["source_phase_run"] = (

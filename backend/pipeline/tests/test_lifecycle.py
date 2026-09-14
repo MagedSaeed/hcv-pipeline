@@ -87,7 +87,7 @@ def test_the_launch_response_carries_the_cancel_caveat(api_client, staff, experi
     assert "detail" in body
     assert "cancel" in body["detail"].lower()
     assert "does not" in body["detail"].lower() or "does not interrupt" in body["detail"].lower()
-    assert "/api/pipeline-runs/{id}/cancel/" in body["detail"]
+    assert "cancel a repetition from its run page" in body["detail"]
 
 
 # --- Cancel: allowed from any non-terminal state ---------------------------

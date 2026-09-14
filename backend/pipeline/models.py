@@ -393,16 +393,14 @@ def unbound_guard_taxonomy_error(taxonomy, experiment):
     active = Taxonomy.active()
     if active is None:
         return (
-            "An ad-hoc run with no borrowed experiment must be pinned to "
-            "the active taxonomy, but no taxonomy is currently active. "
-            "Activate one, or borrow an experiment instead."
+            "A prompt test without a borrowed experiment uses the active taxonomy, "
+            "but no taxonomy is active. Activate one, or borrow an experiment."
         )
     if taxonomy is None or taxonomy.pk != active.pk:
         return (
-            f"taxonomy must be the active taxonomy ({active!r}), not a "
-            "free choice, when no experiment is borrowed. Activate a "
-            "different taxonomy first if you meant a different one, or "
-            "borrow an experiment instead."
+            f"A prompt test without a borrowed experiment uses the active taxonomy "
+            f"({active}). Activate a different one first if you meant another, or "
+            "borrow an experiment."
         )
     return None
 

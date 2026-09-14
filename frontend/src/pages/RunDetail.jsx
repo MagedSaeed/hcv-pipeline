@@ -34,7 +34,7 @@ const CANCELLABLE_STATUSES = new Set(['pending', 'queued', 'running']);
 // Kept as one string (not split across elements) so it reads as a single
 // node to both a screen reader and to a query that matches its full text.
 const CANCEL_CAVEAT_TEXT =
-  'Cancelling marks this run dead so it can be deleted; it does NOT interrupt a worker that may already be executing it — any write that worker is mid-way through (an LLMCall save, a status roll-up) may still land after cancel returns.';
+  'Cancelling stops this run and lets you delete it. It does not interrupt a model call already in progress, which may still finish and be recorded.';
 
 const DELETE_CONFIRM_MESSAGE =
   'Deleting this run also deletes its generated material — every system description, scenario, LLM call and label produced by it — along with it. There is no per-row undo: deletion is per run, never per row.';

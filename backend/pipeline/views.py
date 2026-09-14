@@ -43,10 +43,9 @@ from pipeline.serializers import (
 # NOT reach into a worker already executing; it only marks the run (and its
 # still-open phase runs) dead so it becomes deletable.
 CANCEL_CAVEAT = (
-    "Each of these can be cancelled with POST /api/pipeline-runs/{id}/cancel/ "
-    "while it is pending, queued or running. Cancelling marks a run dead so it "
-    "can be deleted; it does NOT interrupt a worker that may already be "
-    "executing it — any write that worker is mid-way through may still land."
+    "You can cancel a repetition from its run page while it is pending, queued or "
+    "running. Cancelling stops it and lets you delete it, but it does not interrupt "
+    "a model call already in progress, which may still finish and be recorded."
 )
 
 # A PipelineRun may be cancelled from any of these — PENDING, QUEUED or
@@ -460,8 +459,8 @@ class PipelineRunViewSet(
         ):
             raise Conflict(
                 f"Repetition {instance.repetition_index} is {instance.status} and "
-                "cannot be deleted while a worker may still hold it. Wait for it "
-                f"to finish, or POST /api/pipeline-runs/{instance.pk}/cancel/ first.",
+                "cannot be deleted while it may still be running. Wait for it to "
+                "finish, or cancel it first.",
                 code="run_in_flight",
             )
         instance.delete()
