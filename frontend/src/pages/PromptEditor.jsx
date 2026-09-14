@@ -19,6 +19,7 @@ import CodeBlock from '../components/CodeBlock';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
+import ParsedOutput from '../components/ParsedOutput';
 import SidePanel from '../components/SidePanel';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
@@ -91,12 +92,10 @@ function CallSection({ title, defaultOpen = false, children }) {
   );
 }
 
-// One LLMCall row (pipeline.serializers.PhaseRunCallSerializer) - a compact
-// header of what happened, then every raw artifact behind its own
-// disclosure so a long response/request never dominates the screen. "Raw
-// response" opens by default exactly when parsing failed - that is the one
-// case a researcher reads it first, not last.
-function PhaseRunCallCard({ call }) {
+// One LLMCall row: a compact header, then each artifact behind its own
+// disclosure, in the order the call happened. "Parsed output" opens by default
+// on success, "Raw response" on a parse failure.
+function PhaseRunCallCard({ call, phase, phaseRunId }) {
   return (
     <div className="space-y-2 rounded-md border border-gray-200 p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
@@ -122,12 +121,6 @@ function PhaseRunCallCard({ call }) {
         </p>
       )}
       <div className="space-y-2">
-        <CallSection title="Raw response" defaultOpen={!call.parsed_ok}>
-          <CodeBlock title="Raw response" code={call.raw_response} />
-        </CallSection>
-        <CallSection title="Full response JSON">
-          <CodeBlock title="Full response JSON" code={JSON.stringify(call.response_json ?? {}, null, 2)} />
-        </CallSection>
         <CallSection title="Request sent">
           <CodeBlock title="Request sent" code={JSON.stringify(call.request_json ?? {}, null, 2)} />
         </CallSection>
@@ -136,6 +129,15 @@ function PhaseRunCallCard({ call }) {
             <CodeBlock title="Rendered system prompt" code={call.rendered_system_prompt} />
             <CodeBlock title="Rendered user prompt" code={call.rendered_user_prompt} />
           </div>
+        </CallSection>
+        <CallSection title="Parsed output" defaultOpen={call.parsed_ok}>
+          <ParsedOutput phase={phase} phaseRunId={phaseRunId} call={call} />
+        </CallSection>
+        <CallSection title="Full response JSON">
+          <CodeBlock title="Full response JSON" code={JSON.stringify(call.response_json ?? {}, null, 2)} />
+        </CallSection>
+        <CallSection title="Raw response" defaultOpen={!call.parsed_ok}>
+          <CodeBlock title="Raw response" code={call.raw_response} />
         </CallSection>
       </div>
     </div>
@@ -993,7 +995,7 @@ export default function PromptEditor() {
                     {iterateCallsQuery.isLoading && <p className="text-sm text-gray-500">Loading the calls…</p>}
                     {iterateCallsQuery.isError && <ErrorBanner error={iterateCallsQuery.error} />}
                     {iterateCalls.map((call) => (
-                      <PhaseRunCallCard key={call.id} call={call} />
+                      <PhaseRunCallCard key={call.id} call={call} phase={iterateRun.phase} phaseRunId={iterateRun.id} />
                     ))}
                   </div>
                 )}

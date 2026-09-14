@@ -82,6 +82,32 @@ const TEMPLATES_SEED = [
   },
 ];
 
+function generatedSystem(phaseRunId) {
+  return { id: 5000 + phaseRunId, title: `Generated parking system ${phaseRunId}`, slug: `gen-${phaseRunId}`, body: 'A generated body.', origin: 'generated', generation_run: phaseRunId, is_scratch: true, is_editable: false, created_by: null, created_at: '2026-09-10T00:05:00Z', updated_at: '2026-09-10T00:05:00Z' };
+}
+
+function generatedScenarios(phaseRunId) {
+  return ['sc_01', 'sc_02'].map((scenarioId, index) => ({
+    id: 6000 + phaseRunId * 10 + index,
+    system_description: 5000 + phaseRunId,
+    scenario_id: scenarioId,
+    actor: `Actor of ${scenarioId}`,
+    trigger: '',
+    standing_state: '',
+    asset: '',
+    threat: 'Spoofing',
+    outcome: '',
+    narrative: `Narrative of ${scenarioId}`,
+    intended_hcvs: [],
+    abox: null,
+    origin: 'generated',
+    generation_run: phaseRunId,
+    is_scratch: true,
+    is_editable: false,
+    order: index,
+  }));
+}
+
 const SCENARIOS_SEED = [
   {
     id: 10,
@@ -361,7 +387,15 @@ beforeEach(() => {
       });
     }),
 
-    http.get('/api/scenarios/', ({ request }) => HttpResponse.json(paginate(SCENARIOS_SEED, request))),
+    // `?phase_run=` asks for what an iterate run saved (the Parsed output view).
+    http.get('/api/scenarios/', ({ request }) => {
+      const phaseRun = new URL(request.url).searchParams.get('phase_run');
+      if (phaseRun) return HttpResponse.json(paginate(generatedScenarios(Number(phaseRun)), request));
+      return HttpResponse.json(paginate(SCENARIOS_SEED, request));
+    }),
+    http.get('/api/system-descriptions/', ({ request }) =>
+      HttpResponse.json(paginate(phaseRuns.map((run) => generatedSystem(run.id)), request))
+    ),
 
     http.post('/api/phase-runs/', async ({ request }) => {
       const staffRefusal = requireStaff(currentUser());
@@ -695,6 +729,24 @@ describe('PromptEditor', () => {
     expect(phaseRuns[0].prompt_template).toBe(2);
     expect(screen.getByText(/isolation verified/i)).toBeInTheDocument();
     expect(screen.getByText(/guarded by taxonomy #2/i)).toBeInTheDocument();
+  }, 15000);
+
+  it('shows the parsed output of a successful call: the generated system beside its scenarios as tabs', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/2/edit'] });
+
+    await openTestPanel(user);
+    await pickModel(user, 'openai/gpt-4o-mini');
+    await user.click(screen.getByRole('button', { name: /^run test$/i }));
+    expect(await screen.findByText('Completed', {}, { timeout: RUN_POLL_INTERVAL_MS + 2000 })).toBeInTheDocument();
+
+    const panel = screen.getByTestId('side-panel');
+    expect(await within(panel).findByText(/generated parking system/i)).toBeInTheDocument();
+    expect(within(panel).getByText('Actor of sc_01')).toBeInTheDocument();
+    await user.click(within(panel).getByRole('tab', { name: 'sc_02' }));
+    expect(within(panel).getByText('Actor of sc_02')).toBeInTheDocument();
+    // Parsed output opens by default on success; Raw response stays closed.
+    expect(within(panel).queryByText('RAW MODEL RESPONSE TEXT')).not.toBeInTheDocument();
   }, 15000);
 
   it('shows per-call detail: header, parse failure, the output-limit note, and Raw response open by default', async () => {
