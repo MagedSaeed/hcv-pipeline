@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { configure, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated } from '../../test/mockApi';
+
+// The new "Experiment run" select renders "<experiment> · repetition N" as
+// <option> text, so its options never collide with a row's own text here -
+// but keep this file-scoped `configure` matching Corpus.test.jsx's own
+// reasoning anyway, in case a future fixture's system/scenario title ever
+// does.
+configure({ defaultIgnore: 'script, style, option' });
 
 // `/api/labels/` is the one endpoint whose OWN fixture here (PAGINATION_
 // LABELS below) actually exceeds PAGE_SIZE=50 - `useAllLabels` (unchanged
@@ -179,6 +186,19 @@ const LABELS = [
   ...PAGINATION_LABELS,
 ];
 
+// Feeds the new "Experiment run" select (live-filters round) - Labels.jsx
+// now reads usePipelineRuns/useExperiments to label its run options, so
+// every run id any test below picks (101, 102, 601, 602, 603) must appear
+// here or the suite errors on an unhandled request.
+const PIPELINE_RUNS = [
+  { id: 101, experiment: 5, repetition_index: 1, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:05:00Z' },
+  { id: 102, experiment: 5, repetition_index: 2, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-02T00:00:00Z', finished_at: '2026-01-02T00:05:00Z' },
+  { id: 601, experiment: 5, repetition_index: 3, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-03T00:00:00Z', finished_at: '2026-01-03T00:05:00Z' },
+  { id: 602, experiment: 5, repetition_index: 4, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-04T00:00:00Z', finished_at: '2026-01-04T00:05:00Z' },
+  { id: 603, experiment: 5, repetition_index: 5, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-05T00:00:00Z', finished_at: '2026-01-05T00:05:00Z' },
+];
+const EXPERIMENTS = [{ id: 5, name: 'Oldsmar pilot' }];
+
 function toScenarioWire(row) {
   // eslint-disable-next-line no-unused-vars
   const { _variant, _pipelineRunId, ...wire } = row;
@@ -271,19 +291,25 @@ beforeEach(() => {
         return HttpResponse.json({ run: ['A valid integer is required.'] }, { status: 400 });
       }
       return HttpResponse.json(paginate(applyLabelFilters(LABELS, url), url));
-    })
+    }),
+    // Backs the "Experiment run" select.
+    http.get('/api/pipeline-runs/', () => HttpResponse.json(paginated(PIPELINE_RUNS))),
+    http.get('/api/experiments/', () => HttpResponse.json(paginated(EXPERIMENTS)))
   );
 });
 
+// Every control below applies on the fly (no Apply button any more). The
+// run select populates from its own query (pipeline runs) - wait for the
+// target option to actually be there before picking it.
 async function applyRunFilter(user, { run, variant, hcv } = {}) {
   if (run !== undefined) {
-    const field = await screen.findByLabelText(/run \(repetition id\)/i);
-    await user.clear(field);
-    if (run !== '') await user.type(field, String(run));
+    const field = await screen.findByLabelText(/experiment run/i);
+    const value = run === '' ? '' : String(run);
+    if (value) await waitFor(() => expect(field.querySelector(`option[value="${value}"]`)).toBeTruthy());
+    await user.selectOptions(field, value);
   }
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
   if (hcv !== undefined) await user.selectOptions(screen.getByLabelText(/^hcv$/i), hcv);
-  await user.click(screen.getByRole('button', { name: /^apply$/i }));
 }
 
 describe('Labels', () => {
@@ -497,7 +523,19 @@ describe('Labels', () => {
 
     // No "Apply filters" click needed - the matrices render straight away.
     expect(await screen.findByRole('rowheader', { name: /System Alpha \/ sc_01/ })).toBeInTheDocument();
-    expect(screen.getByLabelText(/run \(repetition id\)/i)).toHaveValue(101);
+    expect(screen.getByLabelText(/experiment run/i)).toHaveValue('101');
+  });
+
+  it('selecting an experiment run applies immediately, with no Apply button anywhere on the page', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/labels'] });
+
+    expect(screen.queryByRole('button', { name: /^apply$/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('variant-A-matrix')).not.toBeInTheDocument();
+
+    await applyRunFilter(user, { run: 101 });
+
+    expect(await screen.findByTestId('variant-A-matrix')).toBeInTheDocument();
   });
 
   it("uses each variant's own PINNED taxonomy for its columns, not the currently active one", async () => {

@@ -1,8 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/auth-context';
 import {
   useDeletePhaseRun,
+  useExperiments,
   usePhaseRun,
+  usePhaseRuns,
+  usePipelineRuns,
+  usePromptTemplates,
   useScenarios,
   useSystemDescriptions,
   useUpdateScenario,
@@ -104,6 +108,16 @@ function buildParams(filters, { includeSystem }) {
   if (filters.phaseRun) params.phase_run = filters.phaseRun;
   if (includeSystem && filters.system) params.system = filters.system;
   return params;
+}
+
+function byId(data) {
+  return new Map((data?.results ?? []).map((row) => [row.id, row]));
+}
+
+// Newest-first: finished (falling back to started) timestamp, then id as a
+// stable tiebreak for rows sharing a timestamp.
+function byRecency(a, b) {
+  return (b.finished_at ?? b.started_at ?? '').localeCompare(a.finished_at ?? a.started_at ?? '') || b.id - a.id;
 }
 
 // Scratch output goes by deleting the whole test run that produced it, never
@@ -371,26 +385,69 @@ function ScenarioRow({ scenario, systemTitle }) {
 
 export default function Corpus() {
   const { isStaff } = useAuth();
-  const [form, setForm] = useState(emptyFilters);
-  const [applied, setApplied] = useState(emptyFilters);
+  const [filters, setFilters] = useState(emptyFilters);
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
   const [confirmingDeletePhaseRun, setConfirmingDeletePhaseRun] = useState(false);
   const deletePhaseRun = useDeletePhaseRun();
 
-  function handleApply(event) {
-    event.preventDefault();
-    setApplied(form);
-  }
+  // The only debounced control - the selects below apply on the fly, but a
+  // keystroke in the search box shouldn't re-filter on every character.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   function handleClear() {
-    setForm(emptyFilters);
-    setApplied(emptyFilters);
+    setFilters(emptyFilters);
+    setSearchInput('');
+    setSearch('');
   }
 
-  const systemsQuery = useSystemDescriptions(buildParams(applied, { includeSystem: false }));
-  const scenariosQuery = useScenarios(buildParams(applied, { includeSystem: true }));
+  const systemsQuery = useSystemDescriptions(buildParams(filters, { includeSystem: false }));
+  const scenariosQuery = useScenarios(buildParams(filters, { includeSystem: true }));
+  // Unfiltered - the "System" picker offers every system regardless of what
+  // else is selected, so picking one never depends on the other filters.
+  const systemOptionsQuery = useSystemDescriptions();
 
-  const phaseRunId = applied.phaseRun ? Number(applied.phaseRun) : null;
+  const phaseRunId = filters.phaseRun ? Number(filters.phaseRun) : null;
   const phaseRunQuery = usePhaseRun(phaseRunId);
+
+  // Options for the "Experiment run" and "Generation run" selects.
+  const pipelineRunsQuery = usePipelineRuns();
+  const experimentsQuery = useExperiments();
+  const generationRunsQuery = usePhaseRuns({ phase: 2 });
+  const promptsQuery = usePromptTemplates({ phase: 2 });
+  const pipelineRunsById = byId(pipelineRunsQuery.data);
+  const experimentsById = byId(experimentsQuery.data);
+  const promptsById = byId(promptsQuery.data);
+
+  const experimentRunOptions = [...(pipelineRunsQuery.data?.results ?? [])].sort(byRecency).map((run) => ({
+    value: String(run.id),
+    label: `${experimentsById.get(run.experiment)?.name ?? 'Experiment'} · repetition ${run.repetition_index}`,
+  }));
+
+  // Same label shape as ScenarioPicker's own run groups (components/
+  // ScenarioPicker.jsx's useScenarioGroups): "<experiment> · repetition N"
+  // for an experiment-launched run, "Prompt test" for an ad-hoc one, then
+  // variant/prompt/model/finished-date as further detail.
+  const generationRunOptions = [...(generationRunsQuery.data?.results ?? [])].sort(byRecency).map((run) => {
+    const prompt = promptsById.get(run.prompt_template);
+    const repetition = run.pipeline_run ? pipelineRunsById.get(run.pipeline_run) : null;
+    const experiment = repetition ? experimentsById.get(repetition.experiment) : null;
+    const head = run.pipeline_run
+      ? `${experiment?.name ?? 'Experiment'} · repetition ${repetition?.repetition_index ?? '…'}`
+      : 'Prompt test';
+    const details = [
+      run.variant ? `Variant ${run.variant}` : '',
+      prompt ? `${prompt.name} v${prompt.version}` : '',
+      run.model,
+      run.finished_at ? new Date(run.finished_at).toLocaleString() : '',
+    ].filter(Boolean);
+    return { value: String(run.id), label: [head, ...details].join(' · ') };
+  });
+
+  const systemOptions = [...(systemOptionsQuery.data?.results ?? [])].sort((a, b) => a.title.localeCompare(b.title));
 
   // Iterate-mode phase runs are ad-hoc: `pipeline_run` is null (spec §5.4).
   // Corpus rows now carry their own `is_scratch` directly (task 10.5, see
@@ -402,20 +459,32 @@ export default function Corpus() {
   // and it is what backs the delete-this-run action below.
   const isScratch = phaseRunId != null && phaseRunQuery.isSuccess && phaseRunQuery.data.pipeline_run == null;
 
-  const scratchOnly = { 'generated-scratch': true, 'generated-experiment': false }[applied.origin];
+  const scratchOnly = { 'generated-scratch': true, 'generated-experiment': false }[filters.origin];
   const matchesScratch = (row) => scratchOnly === undefined || row.is_scratch === scratchOnly;
-  const systems = (systemsQuery.data?.results ?? []).filter(matchesScratch);
-  const scenarios = (scenariosQuery.data?.results ?? []).filter(matchesScratch);
-  const systemTitleById = new Map(systems.map((system) => [system.id, system.title]));
+  const searchWords = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const matchesSearch = (text) => searchWords.every((word) => text.includes(word));
+
+  const allSystems = (systemsQuery.data?.results ?? []).filter(matchesScratch);
+  const allScenarios = (scenariosQuery.data?.results ?? []).filter(matchesScratch);
+  const systemTitleById = new Map(allSystems.map((system) => [system.id, system.title]));
+
+  const systems = allSystems.filter((system) => matchesSearch(`${system.title} ${system.body}`.toLowerCase()));
+  const scenarios = allScenarios.filter((scenario) => {
+    const systemTitle = systemTitleById.get(scenario.system_description) ?? '';
+    const text = [systemTitle, scenario.scenario_id, ...SCENARIO_FIELDS.map(([key]) => scenario[key])]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    return matchesSearch(text);
+  });
 
   async function handleDeletePhaseRunConfirmed() {
     try {
       await deletePhaseRun.mutateAsync(phaseRunId);
       setConfirmingDeletePhaseRun(false);
       // The filter named a phase run that no longer exists - clear it
-      // rather than leave the form pointed at a dangling id.
-      setForm((current) => ({ ...current, phaseRun: '' }));
-      setApplied((current) => ({ ...current, phaseRun: '' }));
+      // rather than leave the filter pointed at a dangling id.
+      setFilters((current) => ({ ...current, phaseRun: '' }));
     } catch {
       // Surfaced below via deletePhaseRun.isError/error - dialog stays open
       // so the API's own 409 message (e.g. "run_in_flight") is visible.
@@ -424,10 +493,10 @@ export default function Corpus() {
 
   return (
     <div className="space-y-8">
-      <form
-        onSubmit={handleApply}
+      <div
+        role="group"
         aria-label="Corpus filters"
-        className="grid grid-cols-2 gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-3 lg:grid-cols-6"
+        className="grid grid-cols-2 gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7"
       >
         <div>
           <label htmlFor="filter-origin" className="block text-xs font-medium text-gray-700">
@@ -435,8 +504,8 @@ export default function Corpus() {
           </label>
           <select
             id="filter-origin"
-            value={form.origin}
-            onChange={(event) => setForm((current) => ({ ...current, origin: event.target.value }))}
+            value={filters.origin}
+            onChange={(event) => setFilters((current) => ({ ...current, origin: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
           >
             <option value="">All origins</option>
@@ -449,15 +518,39 @@ export default function Corpus() {
         </div>
         <div>
           <label htmlFor="filter-run" className="block text-xs font-medium text-gray-700">
-            Run (repetition id)
+            Experiment run
           </label>
-          <input
+          <select
             id="filter-run"
-            type="number"
-            value={form.run}
-            onChange={(event) => setForm((current) => ({ ...current, run: event.target.value }))}
+            value={filters.run}
+            onChange={(event) => setFilters((current) => ({ ...current, run: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          />
+          >
+            <option value="">All experiment runs</option>
+            {experimentRunOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor="filter-phase-run" className="block text-xs font-medium text-gray-700">
+            Generation run
+          </label>
+          <select
+            id="filter-phase-run"
+            value={filters.phaseRun}
+            onChange={(event) => setFilters((current) => ({ ...current, phaseRun: event.target.value }))}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+          >
+            <option value="">All generation runs</option>
+            {generationRunOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <label htmlFor="filter-variant" className="block text-xs font-medium text-gray-700">
@@ -465,8 +558,8 @@ export default function Corpus() {
           </label>
           <select
             id="filter-variant"
-            value={form.variant}
-            onChange={(event) => setForm((current) => ({ ...current, variant: event.target.value }))}
+            value={filters.variant}
+            onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
           >
             <option value="">All variants</option>
@@ -475,36 +568,37 @@ export default function Corpus() {
           </select>
         </div>
         <div>
-          <label htmlFor="filter-phase-run" className="block text-xs font-medium text-gray-700">
-            Phase run id
+          <label htmlFor="filter-system" className="block text-xs font-medium text-gray-700">
+            System (scenarios)
           </label>
-          <input
-            id="filter-phase-run"
-            type="number"
-            value={form.phaseRun}
-            onChange={(event) => setForm((current) => ({ ...current, phaseRun: event.target.value }))}
+          <select
+            id="filter-system"
+            value={filters.system}
+            onChange={(event) => setFilters((current) => ({ ...current, system: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          />
+          >
+            <option value="">All systems</option>
+            {systemOptions.map((system) => (
+              <option key={system.id} value={system.id}>
+                {system.title}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
-          <label htmlFor="filter-system" className="block text-xs font-medium text-gray-700">
-            System id (scenarios)
+          <label htmlFor="filter-search" className="block text-xs font-medium text-gray-700">
+            Search
           </label>
           <input
-            id="filter-system"
-            type="number"
-            value={form.system}
-            onChange={(event) => setForm((current) => ({ ...current, system: event.target.value }))}
+            id="filter-search"
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Title, body, scenario text…"
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
           />
         </div>
-        <div className="flex items-end gap-2">
-          <button
-            type="submit"
-            className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Apply
-          </button>
+        <div className="flex items-end">
           <button
             type="button"
             onClick={handleClear}
@@ -513,9 +607,14 @@ export default function Corpus() {
             Clear
           </button>
         </div>
-      </form>
+      </div>
 
       {phaseRunId != null && phaseRunQuery.isError && <ErrorBanner error={phaseRunQuery.error} />}
+      {(pipelineRunsQuery.isError || experimentsQuery.isError || generationRunsQuery.isError || promptsQuery.isError) && (
+        <ErrorBanner
+          error={pipelineRunsQuery.error || experimentsQuery.error || generationRunsQuery.error || promptsQuery.error}
+        />
+      )}
       {isScratch && (
         <div className="space-y-3">
           <div role="status" className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">

@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   useAllLabels,
+  useExperiments,
   usePhaseRuns,
+  usePipelineRuns,
   useScenarios,
   useSystemDescriptions,
   useTaxonomies,
@@ -29,6 +31,13 @@ function scenarioLabel(scenario, systemTitleById) {
 
 function taxonomyLabel(taxonomy) {
   return taxonomy ? `${taxonomy.vocabulary_id} v${taxonomy.version}` : null;
+}
+
+// Newest-first: finished (falling back to started) timestamp, then id as a
+// stable tiebreak for rows sharing a timestamp - same convention Corpus.jsx
+// uses for its own run selects.
+function byRecency(a, b) {
+  return (b.finished_at ?? b.started_at ?? '').localeCompare(a.finished_at ?? a.started_at ?? '') || b.id - a.id;
 }
 
 // task 10.2: this screen used to build its column set from the ACTIVE
@@ -266,18 +275,20 @@ export default function Labels() {
   const [searchParams] = useSearchParams();
   const presetFilters = { ...emptyFilters, run: searchParams.get('run') ?? '' };
 
-  const [form, setForm] = useState(presetFilters);
-  const [applied, setApplied] = useState(presetFilters);
-
-  function handleApply(event) {
-    event.preventDefault();
-    setApplied(form);
-  }
+  const [filters, setFilters] = useState(presetFilters);
 
   function handleClear() {
-    setForm(emptyFilters);
-    setApplied(emptyFilters);
+    setFilters(emptyFilters);
   }
+
+  // Options for the "Experiment run" select - same label shape as Corpus.jsx's.
+  const pipelineRunsQuery = usePipelineRuns();
+  const experimentsQuery = useExperiments();
+  const experimentsById = new Map((experimentsQuery.data?.results ?? []).map((experiment) => [experiment.id, experiment]));
+  const runOptions = [...(pipelineRunsQuery.data?.results ?? [])].sort(byRecency).map((run) => ({
+    value: String(run.id),
+    label: `${experimentsById.get(run.experiment)?.name ?? 'Experiment'} · repetition ${run.repetition_index}`,
+  }));
 
   const taxonomiesQuery = useTaxonomies();
   const taxonomies = taxonomiesQuery.data?.results ?? [];
@@ -296,8 +307,8 @@ export default function Labels() {
   const systems = systemsQuery.data?.results ?? [];
   const systemTitleById = new Map(systems.map((system) => [system.id, system.title]));
 
-  const runId = applied.run !== '' ? Number(applied.run) : null;
-  const variantsToShow = applied.variant ? [applied.variant] : VARIANTS;
+  const runId = filters.run !== '' ? Number(filters.run) : null;
+  const variantsToShow = filters.variant ? [filters.variant] : VARIANTS;
 
   return (
     <div data-testid="labels-page" className="space-y-8">
@@ -311,22 +322,28 @@ export default function Labels() {
         </p>
       </div>
 
-      <form
-        onSubmit={handleApply}
+      <div
+        role="group"
         aria-label="Labels filters"
         className="grid grid-cols-1 gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-4"
       >
         <div>
           <label htmlFor="labels-filter-run" className="block text-xs font-medium text-gray-700">
-            Run (repetition id)
+            Experiment run
           </label>
-          <input
+          <select
             id="labels-filter-run"
-            type="number"
-            value={form.run}
-            onChange={(event) => setForm((current) => ({ ...current, run: event.target.value }))}
+            value={filters.run}
+            onChange={(event) => setFilters((current) => ({ ...current, run: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          />
+          >
+            <option value="">Choose a run…</option>
+            {runOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <label htmlFor="labels-filter-variant" className="block text-xs font-medium text-gray-700">
@@ -334,8 +351,8 @@ export default function Labels() {
           </label>
           <select
             id="labels-filter-variant"
-            value={form.variant}
-            onChange={(event) => setForm((current) => ({ ...current, variant: event.target.value }))}
+            value={filters.variant}
+            onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
           >
             <option value="">All variants</option>
@@ -349,8 +366,8 @@ export default function Labels() {
           </label>
           <select
             id="labels-filter-hcv"
-            value={form.hcv}
-            onChange={(event) => setForm((current) => ({ ...current, hcv: event.target.value }))}
+            value={filters.hcv}
+            onChange={(event) => setFilters((current) => ({ ...current, hcv: event.target.value }))}
             className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
           >
             <option value="">All HCVs</option>
@@ -361,13 +378,7 @@ export default function Labels() {
             ))}
           </select>
         </div>
-        <div className="flex items-end gap-2">
-          <button
-            type="submit"
-            className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Apply
-          </button>
+        <div className="flex items-end">
           <button
             type="button"
             onClick={handleClear}
@@ -376,10 +387,13 @@ export default function Labels() {
             Clear
           </button>
         </div>
-      </form>
+      </div>
 
       {taxonomiesQuery.isError && <ErrorBanner error={taxonomiesQuery.error} />}
       {systemsQuery.isError && <ErrorBanner error={systemsQuery.error} />}
+      {(pipelineRunsQuery.isError || experimentsQuery.isError) && (
+        <ErrorBanner error={pipelineRunsQuery.error || experimentsQuery.error} />
+      )}
 
       {/* A run stays required even though `/api/labels/` can now filter by
           `?variant=` alone. This is not about bounding a request fan-out
@@ -393,7 +407,7 @@ export default function Labels() {
       {runId == null && (
         <EmptyState
           title="Select a run"
-          message="Enter a repetition (run) id above and click Apply to see its labels. A scenario x HCV matrix reads one repetition's variant A against its variant B; without a run to scope it, the matrix would mix scenarios from every repetition ever run into one table."
+          message="Choose an experiment run above to see its labels. A scenario x HCV matrix reads one repetition's variant A against its variant B; without a run to scope it, the matrix would mix scenarios from every repetition ever run into one table."
         />
       )}
 
@@ -404,7 +418,7 @@ export default function Labels() {
               key={variant}
               variant={variant}
               runId={runId}
-              hcvFilter={applied.hcv}
+              hcvFilter={filters.hcv}
               taxonomies={taxonomies}
               activeTaxonomy={activeTaxonomy}
               systemTitleById={systemTitleById}

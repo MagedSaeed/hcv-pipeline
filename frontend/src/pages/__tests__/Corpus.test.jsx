@@ -1,10 +1,18 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { configure, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
+
+// The new "System (scenarios)" select renders every system's TITLE as an
+// <option> - the same text a system's own row heading shows. Left at the
+// default ignore list ('script, style'), an unscoped `getByText`/`findByText`
+// for a row's title becomes ambiguous the moment that title's <option> is
+// also on the page. Excluding 'option' here (file-scoped, not setup.js)
+// restores every existing unscoped text query without touching each one.
+configure({ defaultIgnore: 'script, style, option' });
 
 // Mirrors backend/corpus/tests/test_corpus_filters.py's own `corpus_runs`
 // fixture shape: two repetitions (pipeline runs 101/102, behind phase runs
@@ -99,6 +107,19 @@ const PHASE_RUNS_SEED = {
   204: { id: 204, pipeline_run: null, phase: 2, variant: 'A', model: 'm', temperature: 0, prompt_template: 1, taxonomy: 1, source_phase_run: null, experiment: null, n_systems: 1, n_scenarios_per_system: 1, status: 'queued', error: '', progress: { done: 0, total: 1, failed: 0, percent: 0 }, total_children: 1, completed_children: 0, failed_children: 0, leak_scan_ran: false, guarded_by: [], started_at: null, finished_at: null },
 };
 
+// Feeds the new "Experiment run"/"Generation run" selects (live-filters
+// round) - Corpus.jsx now reads usePipelineRuns/useExperiments/
+// usePhaseRuns({phase:2})/usePromptTemplates({phase:2}) to label those
+// options, so this suite errors on an unhandled request without them.
+const PIPELINE_RUNS = [
+  { id: 101, experiment: 7, repetition_index: 1, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:05:00Z' },
+  { id: 102, experiment: 7, repetition_index: 2, status: 'completed', config: {}, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: '2026-01-02T00:00:00Z', finished_at: '2026-01-02T00:05:00Z' },
+];
+const EXPERIMENTS = [{ id: 7, name: 'Oldsmar pilot' }];
+const PROMPTS = [
+  { id: 1, phase: 2, name: 'default-generation-variant-a', version: 1, variant: 'A', system_prompt: '', user_prompt: '', output_schema: {}, is_active: true, created_by: null, created_at: '2026-01-01T00:00:00Z' },
+];
+
 let systems;
 let scenarios;
 let phaseRuns;
@@ -183,6 +204,23 @@ beforeEach(() => {
       if (!run) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 });
       return HttpResponse.json(run);
     }),
+    // Backs the "Generation run" select - every phase-2 run, live off the
+    // same mutable `phaseRuns` fixture the detail/delete handlers use.
+    http.get('/api/phase-runs/', ({ request }) => {
+      const url = new URL(request.url);
+      const phase = url.searchParams.get('phase');
+      const rows = Object.values(phaseRuns).filter((run) => (phase ? String(run.phase) === phase : true));
+      return HttpResponse.json(paginate(rows, request));
+    }),
+    // Backs the "Experiment run" select.
+    http.get('/api/pipeline-runs/', ({ request }) => HttpResponse.json(paginate(PIPELINE_RUNS, request))),
+    http.get('/api/experiments/', ({ request }) => HttpResponse.json(paginate(EXPERIMENTS, request))),
+    http.get('/api/prompts/', ({ request }) => {
+      const url = new URL(request.url);
+      const phase = url.searchParams.get('phase');
+      const rows = PROMPTS.filter((prompt) => (phase ? String(prompt.phase) === phase : true));
+      return HttpResponse.json(paginate(rows, request));
+    }),
     // Staff-only (pipeline/views.py::PhaseRunViewSet's StaffWrites) - task
     // 10.5's "allow deleting an iterate run". Refuses with the real 409
     // shape while QUEUED/RUNNING (`code: "run_in_flight"`), and otherwise
@@ -210,18 +248,23 @@ beforeEach(() => {
   );
 });
 
-async function setNumberField(user, field, value) {
-  await user.clear(field);
-  await user.type(field, String(value));
+// The run/generation-run/system selects populate from their own queries
+// (pipeline runs, phase-2 runs, systems) - wait for the target option to
+// actually be there before picking it, rather than racing the fetch.
+async function selectWhenReady(user, field, value) {
+  await waitFor(() => expect(field.querySelector(`option[value="${value}"]`)).toBeTruthy());
+  await user.selectOptions(field, value);
 }
 
+// Every control below applies on the fly (no Apply button any more) - each
+// select is driven by its option VALUE (a numeric id), never its visible
+// label text, so these calls stay agnostic to the exact label wording.
 async function applyFilterForm(user, { origin, run, variant, phaseRun, system } = {}) {
   if (origin !== undefined) await user.selectOptions(screen.getByLabelText(/^origin$/i), origin);
-  if (run !== undefined) await setNumberField(user, screen.getByLabelText(/run \(repetition id\)/i), run);
+  if (run !== undefined) await selectWhenReady(user, await screen.findByLabelText(/experiment run/i), String(run));
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
-  if (phaseRun !== undefined) await setNumberField(user, screen.getByLabelText(/phase run id/i), phaseRun);
-  if (system !== undefined) await setNumberField(user, screen.getByLabelText(/system id \(scenarios\)/i), system);
-  await user.click(screen.getByRole('button', { name: /^apply$/i }));
+  if (phaseRun !== undefined) await selectWhenReady(user, await screen.findByLabelText(/generation run/i), String(phaseRun));
+  if (system !== undefined) await selectWhenReady(user, await screen.findByLabelText(/^system \(scenarios\)$/i), String(system));
 }
 
 describe('Corpus', () => {
@@ -411,7 +454,6 @@ describe('Corpus', () => {
     // Adding variant=A on top must narrow further, not replace the origin
     // filter - System B (variant B) must now disappear too.
     await user.selectOptions(screen.getByLabelText(/^variant$/i), 'A');
-    await user.click(screen.getByRole('button', { name: /^apply$/i }));
 
     expect(await screen.findByText('System A')).toBeInTheDocument();
     expect(screen.getByText('System adhoc')).toBeInTheDocument();
@@ -433,10 +475,33 @@ describe('Corpus', () => {
     // Same system, wrong variant - must exclude it, proving `variant`
     // narrows rather than being ignored once `system` is also present.
     await user.selectOptions(screen.getByLabelText(/^variant$/i), 'B');
-    await user.click(screen.getByRole('button', { name: /^apply$/i }));
 
-    expect(screen.queryByText('Generated narrative A')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Generated narrative A')).not.toBeInTheDocument());
     expect(screen.queryByText('Generated narrative B')).not.toBeInTheDocument();
+  });
+
+  it('applies a filter selection immediately, with no Apply button anywhere on the page', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
+
+    await screen.findByText('Seed system');
+    expect(screen.queryByRole('button', { name: /^apply$/i })).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText(/^origin$/i), 'seed');
+
+    expect(await screen.findByText('Seed system')).toBeInTheDocument();
+    expect(screen.queryByText('Manual system')).not.toBeInTheDocument();
+  });
+
+  it('the search box narrows results after a short pause, with no Apply needed', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
+
+    await screen.findByText('Seed system');
+    await user.type(screen.getByLabelText(/^search$/i), 'typed in by hand');
+
+    await waitFor(() => expect(screen.queryByText('Seed system')).not.toBeInTheDocument());
+    expect(screen.getByText('Manual system')).toBeInTheDocument();
   });
 
   it('fetches every page of the unfiltered corpus, not just the first 50 (fails if only page 1 is read)', async () => {
@@ -516,7 +581,6 @@ describe('Scratch rows', () => {
 
     expect(await screen.findByText('Experiment grid')).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText(/^origin$/i), 'generated-scratch');
-    await user.click(screen.getByRole('button', { name: /^apply$/i }));
     await waitFor(() => expect(screen.queryByText('Experiment grid')).not.toBeInTheDocument());
     expect(screen.getByText('Scratch grid')).toBeInTheDocument();
 
