@@ -21,6 +21,7 @@ import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
 import ParsedOutput from '../components/ParsedOutput';
 import SidePanel from '../components/SidePanel';
+import SourceRunPicker, { NoLabellableRunsNotice, useLabellableRuns } from '../components/SourceRunPicker';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
 
@@ -197,6 +198,7 @@ export default function PromptEditor() {
   const [iterateNSystems, setIterateNSystems] = useState('1');
   const [iterateNScenarios, setIterateNScenarios] = useState('3');
   const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
+  const labellableRuns = useLabellableRuns();
   const [iterateRunId, setIterateRunId] = useState(null);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
 
@@ -494,7 +496,8 @@ export default function PromptEditor() {
     if (!isStaff) return null; // covered by its own notice below
     if (phase === 2 && variant === '') return 'Choose Variant A or Variant B above before testing.';
     if (!chosenExperiment && !activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen, or borrow an experiment instead.';
-    if (phase === 3 && iterateSourcePhaseRunId === '') return 'A phase 3 run needs the id of the phase 2 run whose scenarios it will label.';
+    if (phase === 3 && !labellableRuns.isLoading && labellableRuns.rows.length === 0) return 'There are no generated scenarios to label yet.';
+    if (phase === 3 && iterateSourcePhaseRunId === '') return 'Choose the generation run whose scenarios to label.';
     if (iterateModel.trim() === '') return 'Enter a model id to run.';
     if (hasUnsavedChanges) return saveBlockedReason();
     return null;
@@ -829,7 +832,11 @@ export default function PromptEditor() {
             </p>
           )}
 
-          {isStaff && (
+          {isStaff && phase === 3 && !labellableRuns.isLoading && !labellableRuns.error && labellableRuns.rows.length === 0 && (
+            <NoLabellableRunsNotice />
+          )}
+
+          {isStaff && !(phase === 3 && !labellableRuns.isLoading && labellableRuns.rows.length === 0) && (
             <form onSubmit={handleTestPrompt} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label htmlFor="iterate-experiment" className="block text-xs font-medium text-gray-700">
@@ -873,17 +880,14 @@ export default function PromptEditor() {
                   />
                 </div>
 
-                {phase === 3 && (
-                  <div>
-                    <label htmlFor="iterate-source" className="block text-xs font-medium text-gray-700">
-                      Source phase run id (a phase 2 run to label)
-                    </label>
-                    <input
-                      id="iterate-source"
-                      type="number"
+                {phase === 3 && labellableRuns.rows.length > 0 && (
+                  <div className="sm:col-span-2">
+                    <SourceRunPicker
+                      rows={labellableRuns.rows}
+                      isLoading={labellableRuns.isLoading}
+                      error={labellableRuns.error}
                       value={iterateSourcePhaseRunId}
-                      onChange={(event) => setIterateSourcePhaseRunId(event.target.value)}
-                      className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                      onChange={setIterateSourcePhaseRunId}
                     />
                   </div>
                 )}

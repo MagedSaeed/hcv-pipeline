@@ -271,7 +271,12 @@ function nextVersionFor(name, phase) {
   return Math.max(...existingVersions) + 1;
 }
 
+let labellableRunsFixture = [];
+
 beforeEach(() => {
+  labellableRunsFixture = [
+    { id: 500, pipeline_run: null, phase: 2, variant: 'A', model: 'openai/gpt-4o-mini', temperature: 0, prompt_template: 1, taxonomy: 2, source_phase_run: null, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: true, guarded_by: [2], started_at: null, finished_at: '2026-09-10T00:05:00Z' },
+  ];
   authState.currentUserEmail = 'admin@example.com'; // staff - see server.js SEED_USERS
   resetFixtures();
 
@@ -396,6 +401,9 @@ beforeEach(() => {
     http.get('/api/system-descriptions/', ({ request }) =>
       HttpResponse.json(paginate(phaseRuns.map((run) => generatedSystem(run.id)), request))
     ),
+
+    // Finished generation runs a labelling test can pick from; 500 saved `scratch_01`.
+    http.get('/api/phase-runs/', ({ request }) => HttpResponse.json(paginate(labellableRunsFixture, request))),
 
     http.post('/api/phase-runs/', async ({ request }) => {
       const staffRefusal = requireStaff(currentUser());
@@ -577,7 +585,7 @@ describe('PromptEditor', () => {
     renderApp({ initialEntries: ['/prompts/4/edit'] });
 
     expect(await screen.findByLabelText(/user prompt/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/variant a/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /^variant a/i, hidden: true })).not.toBeInTheDocument();
   });
 
   it('a variant-A template referencing taxonomy shows the render error, not a preview, and cannot be saved', async () => {
@@ -826,7 +834,19 @@ describe('PromptEditor', () => {
     expect(within(scenarioSelect).getByText(/sc_01/)).not.toHaveTextContent(/scratch/i);
 
     await openTestPanel(user);
-    expect(screen.getByRole('button', { name: /^run test$/i })).toBeDisabled();
-    expect(screen.getByText(/needs the id of the phase 2 run whose scenarios it will label/i)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^run test$/i })).toBeDisabled();
+    expect(screen.getByText(/choose the generation run whose scenarios to label/i)).toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /prompt test run · variant a/i })).toBeInTheDocument();
+  });
+
+  it('a labelling test with no generated scenarios anywhere explains what to do first', async () => {
+    const user = userEvent.setup();
+    labellableRunsFixture = [];
+    renderApp({ initialEntries: ['/prompts/4/edit'] });
+
+    await screen.findByLabelText(/^scenario$/i);
+    await openTestPanel(user);
+    expect(await screen.findByText(/no generated scenarios to label yet/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^run test$/i })).not.toBeInTheDocument();
   });
 });

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import CodeBlock, { formatJsonLike } from '../CodeBlock';
+import CodeBlock from '../CodeBlock';
+import { formatJsonLike } from '../../utils/json';
 
 describe('formatJsonLike', () => {
   it('indents compact JSON, fenced JSON, and JSON with raw line breaks inside strings', () => {
