@@ -81,6 +81,15 @@ Output:
 {% endif %}\
 """
 
+_VOCABULARY_BLOCK = """
+## Vocabulary
+
+Where a term below fits, use it the way the examples do: as an element's type, as \
+a relationship between two named things, or as a fixed value.
+
+{{ resource("hcv-vocabulary") }}
+"""
+
 _SCENARIO_RULES = """
 ## How to write a scenario
 
@@ -123,8 +132,10 @@ Each scenario is `{"scenario_id", "actor", "trigger", "standing_state", "asset",
 "threat", "outcome", "narrative_steps": [...]}`.
 """
 
-GENERATION_VARIANT_A = _GENERATION_TASK + _SCENARIO_RULES + _OUTPUT_RULES
-GENERATION_VARIANT_B = _GENERATION_TASK + _SCENARIO_RULES + _GUIDED_BLOCK + _OUTPUT_RULES
+GENERATION_VARIANT_A = _GENERATION_TASK + _VOCABULARY_BLOCK + _SCENARIO_RULES + _OUTPUT_RULES
+GENERATION_VARIANT_B = (
+    _GENERATION_TASK + _VOCABULARY_BLOCK + _SCENARIO_RULES + _GUIDED_BLOCK + _OUTPUT_RULES
+)
 
 LABELLING_SYSTEM_PROMPT = """\
 You label smart-city threat scenarios with human-centric vulnerabilities. You \
