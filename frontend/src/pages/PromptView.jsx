@@ -223,6 +223,7 @@ export default function PromptView() {
   const templates = templatesQuery.data?.results ?? [];
   const current = templates.find((template) => String(template.id) === id);
   const activateTemplate = useActivatePromptTemplate();
+  const [runsOpen, setRunsOpen] = useState(false);
 
   // Every hook below must run every render (rules of hooks) - the
   // "not loaded yet"/"not found" returns happen further down instead.
@@ -467,12 +468,24 @@ export default function PromptView() {
       )}
 
       <section className="space-y-2">
-        <h2 className="text-lg font-medium text-gray-900">Runs</h2>
-        <p className="text-xs text-gray-500">
-          Every run of this prompt, across its versions. Prompt tests open in the test panel; experiment runs open
-          their repetition.
-        </p>
-        <PromptRuns promptName={current.name} phase={current.phase} editId={current.id} />
+        <button
+          type="button"
+          onClick={() => setRunsOpen((open) => !open)}
+          aria-expanded={runsOpen}
+          className="flex w-full items-center justify-between text-left"
+        >
+          <h2 className="text-lg font-medium text-gray-900">Runs</h2>
+          <span className="text-xs text-gray-400">{runsOpen ? 'Hide' : 'Show'}</span>
+        </button>
+        {runsOpen && (
+          <>
+            <p className="text-xs text-gray-500">
+              Every run of this prompt, across its versions. Prompt tests open in the test panel; experiment runs
+              open their repetition.
+            </p>
+            <PromptRuns promptName={current.name} phase={current.phase} editId={current.id} />
+          </>
+        )}
       </section>
 
       <Link to="/prompts" className="text-sm font-medium text-brand-700 hover:text-brand-800">

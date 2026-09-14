@@ -168,8 +168,10 @@ describe('PromptView', () => {
       { id: 71, pipeline_run: null, phase: 2, variant: 'A', model: 'm-test', prompt_template: 1, status: 'completed', total_cost: null, finished_at: '2026-09-11T00:00:00Z' },
       { id: 72, pipeline_run: 900, phase: 2, variant: 'B', model: 'm-exp', prompt_template: 1, status: 'completed', total_cost: 0.5, finished_at: '2026-09-11T01:00:00Z' },
     ];
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/prompts/1'] });
 
+    await user.click(await screen.findByRole('button', { name: /^runs/i }));
     expect(await screen.findByRole('link', { name: /^open$/i })).toHaveAttribute('href', '/prompts/1/edit?testRun=71');
     expect(screen.getByRole('link', { name: /open run/i })).toHaveAttribute('href', '/pipeline-runs/900');
   });

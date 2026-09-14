@@ -648,24 +648,25 @@ describe('PromptEditor', () => {
     expect(screen.queryByRole('radio', { name: /^variant a/i, hidden: true })).not.toBeInTheDocument();
   });
 
-  it('a variant-A template referencing taxonomy shows the render error, not a preview, and cannot be saved', async () => {
+  it('a variant-A template referencing taxonomy shows the render error, and Save refuses to save it', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/prompts/1/edit'] });
 
     const previewButton = await screen.findByRole('button', { name: /^preview$/i });
     const saveButton = screen.getByRole('button', { name: /^save$/i });
-    expect(saveButton).toBeDisabled();
+    expect(saveButton).toBeDisabled(); // nothing changed yet
+    expect(screen.getByText(/no changes to save/i)).toBeInTheDocument();
 
     await user.click(previewButton);
-
     expect(await screen.findByText(/could not be rendered/i)).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent(/'taxonomy' is undefined/i);
     expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
-    expect(saveButton).toBeDisabled();
-    expect(promptWriteCount).toBe(0);
 
+    // An edit enables Save, but Save runs the same check first and saves nothing.
     await user.type(screen.getByLabelText(/user prompt/i), ' extra');
-    expect(saveButton).toBeDisabled();
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
+    expect(await screen.findByText(/could not be rendered/i)).toBeInTheDocument();
     expect(promptWriteCount).toBe(0);
   });
 
@@ -681,7 +682,7 @@ describe('PromptEditor', () => {
     await user.click(screen.getByRole('button', { name: /^preview$/i }));
 
     expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(saveButton).toBeEnabled();
+    expect(saveButton).toBeDisabled(); // still nothing to save
     expect(promptWriteCount).toBe(0);
   });
 
@@ -717,11 +718,10 @@ describe('PromptEditor', () => {
     expect(screen.getByLabelText(/variant a/i)).toBeEnabled(); // free choice - nothing stored yet
     await user.type(screen.getByLabelText(/user prompt/i), 'Make {{ n_systems }} systems.');
 
+    // Save works straight away: it renders the draft itself before saving.
     const saveButton = screen.getByRole('button', { name: /^save$/i });
-    expect(saveButton).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: /^preview$/i }));
-    expect(await screen.findByText(/preview ok/i)).toBeInTheDocument();
-    expect(promptWriteCount).toBe(0); // preview never persists, id-less route included
+    expect(saveButton).toBeEnabled();
+    expect(promptWriteCount).toBe(0);
 
     await user.click(saveButton);
 

@@ -424,7 +424,6 @@ export default function PromptEditor() {
   const isPreviewing = previewMutation.isPending;
   const isPersisting = createTemplate.isPending || updateTemplate.isPending;
   const canPreview = isStaff && !missingRequiredPreviewInputs && !isPreviewing;
-  const canSave = isStaff && !missingName && previewedCurrentDraft && !isPersisting;
 
   // Task D: an existing phase-2 prompt's variant is fixed once saved -
   // changing it means starting a new prompt from the list instead.
@@ -441,6 +440,9 @@ export default function PromptEditor() {
     draft.systemPrompt !== currentTemplate.system_prompt ||
     draft.userPrompt !== currentTemplate.user_prompt ||
     draft.outputSchemaText !== JSON.stringify(currentTemplate.output_schema ?? {}, null, 2);
+  // Save checks the draft renders cleanly (the same check as Preview) before saving.
+  const canSave =
+    isStaff && hasUnsavedChanges && !missingName && !missingRequiredPreviewInputs && !isPersisting && !isPreviewing;
 
   function previewBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
@@ -453,22 +455,28 @@ export default function PromptEditor() {
 
   function saveBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
+    if (!hasUnsavedChanges) return 'No changes to save.';
     if (missingName) return 'Name this prompt before saving.';
-    if (previewedCurrentDraft) return null;
-    if (previewError) return 'Fix the error above, then preview again before saving.';
-    return 'Preview this draft successfully before saving.';
+    return previewBlockedReason();
   }
 
   // Renders the current draft through the real backend renderer WITHOUT
   // persisting anything - never a client-side stand-in.
   async function handlePreview() {
+    await renderDraft();
+  }
+
+  // Renders the draft; true when it rendered cleanly. Skips the call when this
+  // exact draft already previewed cleanly.
+  async function renderDraft() {
+    if (previewedCurrentDraft) return true;
     let outputSchema;
     try {
       outputSchema = parseOutputSchema(draft.outputSchemaText);
       setSchemaError(null);
     } catch (error) {
       setSchemaError(error.message);
-      return;
+      return false;
     }
 
     const attemptKey = currentAttemptKey;
@@ -501,16 +509,17 @@ export default function PromptEditor() {
       });
       setPreviewResult(result);
       setPreviewedKey(attemptKey);
+      return true;
     } catch (error) {
       setPreviewError(error);
+      return false;
     }
   }
 
-  // Only reachable once `canSave` is true, i.e. once `handlePreview` has
-  // already rendered this EXACT draft cleanly. Returns the saved row (the
-  // NEW version, per useUpdatePromptTemplate's own comment) or null on
-  // failure - shared by the top Save button and "Save & test" below.
+  // Renders the draft first and saves only if that succeeds. Returns the saved
+  // row (the NEW version) or null - shared by Save and "Save & test".
   async function saveDraft() {
+    if (!(await renderDraft())) return null;
     let outputSchema;
     try {
       outputSchema = parseOutputSchema(draft.outputSchemaText);
@@ -894,13 +903,15 @@ export default function PromptEditor() {
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              Preview shows exactly what the model will receive and saves nothing. Save unlocks once
-              this exact draft previews without errors.
+              Preview shows exactly what the model will receive and saves nothing. Save checks the draft
+              the same way first and only saves it if it renders without errors.
             </p>
             {previewBlockedReason() && (
               <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
             )}
-            {saveBlockedReason() && <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>}
+            {saveBlockedReason() && saveBlockedReason() !== previewBlockedReason() && (
+              <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>
+            )}
             {createTemplate.isError && <ErrorBanner error={createTemplate.error} />}
             {updateTemplate.isError && <ErrorBanner error={updateTemplate.error} />}
           </div>
