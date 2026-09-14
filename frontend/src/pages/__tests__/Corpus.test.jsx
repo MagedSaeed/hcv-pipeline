@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
-import { paginate, requireCsrf, requireStaff } from '../../test/mockApi';
+import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
 
 // Mirrors backend/corpus/tests/test_corpus_filters.py's own `corpus_runs`
 // fixture shape: two repetitions (pipeline runs 101/102, behind phase runs
@@ -314,7 +314,7 @@ describe('Corpus', () => {
     // A phase run that DID launch under a real repetition gets no such label.
     await applyFilterForm(user, { phaseRun: 201 });
     await screen.findByText('System A');
-    expect(screen.queryByText(/scratch/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/scratch/i, { ignore: 'option, script, style' })).not.toBeInTheDocument();
   });
 
   // Task 10.5's own confirmed gap: before this, a scratch row read as an
@@ -448,5 +448,81 @@ describe('Corpus', () => {
     await screen.findByText('Seed system');
     expect(await screen.findByText('Filler system 60')).toBeInTheDocument();
     expect(await screen.findByText('Filler narrative 59')).toBeInTheDocument();
+  });
+});
+
+
+describe('Generated rows', () => {
+  it('open "How was this generated?" with the run, prompt, model and the exact prompt sent', async () => {
+    const user = userEvent.setup();
+    authState.currentUserEmail = 'admin@example.com';
+    server.use(
+      http.get('/api/system-descriptions/', () =>
+        HttpResponse.json(
+          paginated([
+            { id: 900, title: 'Generated grid', slug: 'generated-grid', body: 'Body.', origin: 'generated', generation_run: 77, is_scratch: false, is_editable: false, created_by: null, created_at: '2026-09-10T00:00:00Z', updated_at: '2026-09-10T00:00:00Z' },
+          ])
+        )
+      ),
+      http.get('/api/scenarios/', () => HttpResponse.json(paginated([]))),
+      http.get('/api/phase-runs/77/', () =>
+        HttpResponse.json({ id: 77, pipeline_run: 501, phase: 2, variant: 'B', model: 'google/gemini-2.5-flash', temperature: 1, prompt_template: 12, taxonomy: 2, source_phase_run: null, experiment: null, n_systems: null, n_scenarios_per_system: null, status: 'completed', error: '', progress: { done: 1, total: 1, failed: 0, percent: 100 }, total_children: 1, completed_children: 1, failed_children: 0, leak_scan_ran: false, guarded_by: [], started_at: null, finished_at: '2026-09-10T00:05:00Z' })
+      ),
+      http.get('/api/prompts/12/', () =>
+        HttpResponse.json({ id: 12, phase: 2, name: 'default-generation-variant-b', version: 3, variant: 'B', system_prompt: '', user_prompt: 'x', output_schema: {}, is_active: true, created_by: null, created_at: '2026-09-10T00:00:00Z' })
+      ),
+      http.get('/api/pipeline-runs/501/', () =>
+        HttpResponse.json({ id: 501, experiment: 4, repetition_index: 2, status: 'completed', config: { phases: [2, 3], seed_systems: [{ id: 1, title: 'Oldsmar' }], fewshots: [{ id: 3, name: 'oldsmar' }], n_systems: 1, n_scenarios_per_system: 3 }, progress: { done: 1, total: 1, failed: 0, percent: 100 }, started_at: null, finished_at: null })
+      ),
+      http.get('/api/experiments/4/', () => HttpResponse.json({ id: 4, name: 'Pilot' })),
+      http.get('/api/phase-runs/77/calls/', () =>
+        HttpResponse.json(paginated([{ id: 1, sequence: 1, rendered_system_prompt: 'SYS', rendered_user_prompt: 'THE EXACT USER PROMPT', raw_response: '{}', prompt_tokens: 1, completion_tokens: 2, cost: 0, finish_reason: 'stop' }]))
+      )
+    );
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
+
+    await user.click(await screen.findByRole('button', { name: /how was this generated/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByRole('link', { name: 'default-generation-variant-b v3' })).toHaveAttribute('href', '/prompts/12');
+    expect(await within(dialog).findByRole('link', { name: /repetition 2/i })).toHaveAttribute('href', '/pipeline-runs/501');
+    expect(within(dialog).getByText(/google\/gemini-2.5-flash/)).toBeInTheDocument();
+    expect(within(dialog).getByText('1 × 3')).toBeInTheDocument();
+    expect(within(dialog).getByText('Oldsmar')).toBeInTheDocument();
+    await user.click(await within(dialog).findByRole('button', { name: /exact prompt sent/i }));
+    expect(within(dialog).getByText('THE EXACT USER PROMPT')).toBeInTheDocument();
+  });
+});
+
+
+describe('Scratch rows', () => {
+  it('can be listed on their own and deleted by deleting their test run', async () => {
+    const user = userEvent.setup();
+    authState.currentUserEmail = 'admin@example.com';
+    let deletedRun = null;
+    const systems = [
+      { id: 901, title: 'Scratch grid', slug: 's', body: '', origin: 'generated', generation_run: 35, is_scratch: true, is_editable: false, created_by: null, created_at: '2026-09-10T00:00:00Z', updated_at: '2026-09-10T00:00:00Z' },
+      { id: 902, title: 'Experiment grid', slug: 'e', body: '', origin: 'generated', generation_run: 36, is_scratch: false, is_editable: false, created_by: null, created_at: '2026-09-10T00:00:00Z', updated_at: '2026-09-10T00:00:00Z' },
+    ];
+    server.use(
+      http.get('/api/system-descriptions/', () => HttpResponse.json(paginated(systems))),
+      http.get('/api/scenarios/', () => HttpResponse.json(paginated([]))),
+      http.delete('/api/phase-runs/:id/', ({ params, request }) => {
+        const refusal = requireCsrf(request);
+        if (refusal) return refusal;
+        deletedRun = Number(params.id);
+        return new HttpResponse(null, { status: 204 });
+      })
+    );
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
+
+    expect(await screen.findByText('Experiment grid')).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/^origin$/i), 'generated-scratch');
+    await user.click(screen.getByRole('button', { name: /^apply$/i }));
+    await waitFor(() => expect(screen.queryByText('Experiment grid')).not.toBeInTheDocument());
+    expect(screen.getByText('Scratch grid')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^delete$/i }));
+    await user.click(await screen.findByRole('button', { name: /delete test run/i }));
+    await waitFor(() => expect(deletedRun).toBe(35));
   });
 });

@@ -12,6 +12,8 @@ import CollapsibleText from '../components/CollapsibleText';
 import ConfirmDialog from '../components/ConfirmDialog';
 import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
+import GenerationProvenance from '../components/GenerationProvenance';
+import Modal from '../components/Modal';
 
 // corpus.models.Origin.choices.
 const ORIGIN_LABELS = { seed: 'Seed', generated: 'Generated', manual: 'Manual' };
@@ -95,12 +97,66 @@ const emptyFilters = { origin: '', run: '', variant: '', phaseRun: '', system: '
 // scenarios; `?system=` exists only on the scenarios endpoint (spec §9).
 function buildParams(filters, { includeSystem }) {
   const params = {};
-  if (filters.origin) params.origin = filters.origin;
+  // The two "generated — …" choices narrow further client-side, on `is_scratch`.
+  if (filters.origin) params.origin = filters.origin.startsWith('generated') ? 'generated' : filters.origin;
   if (filters.run) params.run = filters.run;
   if (filters.variant) params.variant = filters.variant;
   if (filters.phaseRun) params.phase_run = filters.phaseRun;
   if (includeSystem && filters.system) params.system = filters.system;
   return params;
+}
+
+// Scratch output goes by deleting the whole test run that produced it, never
+// row by row; the confirmation says so.
+function DeleteScratchRunButton({ phaseRunId }) {
+  const deletePhaseRun = useDeletePhaseRun();
+  const [confirming, setConfirming] = useState(false);
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+      >
+        Delete
+      </button>
+    );
+  }
+  return (
+    <Modal title={`Delete test run #${phaseRunId}?`} onClose={() => setConfirming(false)}>
+      <div className="space-y-3 text-sm text-gray-700">
+        <p>
+          This deletes the test run and <strong>every system and scenario it generated</strong>, not only this
+          row, plus its recorded model calls. It cannot be undone.
+        </p>
+        {deletePhaseRun.isError && <ErrorBanner error={deletePhaseRun.error} />}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={deletePhaseRun.isPending}
+            onClick={async () => {
+              try {
+                await deletePhaseRun.mutateAsync(phaseRunId);
+              } catch {
+                // Shown above via deletePhaseRun.error.
+              }
+            }}
+            className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
+          >
+            {deletePhaseRun.isPending ? 'Deleting…' : 'Delete test run'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 function SystemDescriptionRow({ system }) {
@@ -137,6 +193,8 @@ function SystemDescriptionRow({ system }) {
         <div className="flex shrink-0 items-center gap-2">
           <OriginBadge origin={system.origin} />
           {system.is_scratch && <ScratchBadge generationRun={system.generation_run} />}
+          {system.origin === 'generated' && <GenerationProvenance phaseRunId={system.generation_run} />}
+          {system.is_scratch && <DeleteScratchRunButton phaseRunId={system.generation_run} />}
           {system.is_editable && !editing && (
             <button
               type="button"
@@ -244,6 +302,8 @@ function ScenarioRow({ scenario, systemTitle }) {
         <div className="flex shrink-0 items-center gap-2">
           <OriginBadge origin={scenario.origin} />
           {scenario.is_scratch && <ScratchBadge generationRun={scenario.generation_run} />}
+          {scenario.origin === 'generated' && <GenerationProvenance phaseRunId={scenario.generation_run} />}
+          {scenario.is_scratch && <DeleteScratchRunButton phaseRunId={scenario.generation_run} />}
           {scenario.is_editable && !editing && (
             <button
               type="button"
@@ -342,8 +402,10 @@ export default function Corpus() {
   // and it is what backs the delete-this-run action below.
   const isScratch = phaseRunId != null && phaseRunQuery.isSuccess && phaseRunQuery.data.pipeline_run == null;
 
-  const systems = systemsQuery.data?.results ?? [];
-  const scenarios = scenariosQuery.data?.results ?? [];
+  const scratchOnly = { 'generated-scratch': true, 'generated-experiment': false }[applied.origin];
+  const matchesScratch = (row) => scratchOnly === undefined || row.is_scratch === scratchOnly;
+  const systems = (systemsQuery.data?.results ?? []).filter(matchesScratch);
+  const scenarios = (scenariosQuery.data?.results ?? []).filter(matchesScratch);
   const systemTitleById = new Map(systems.map((system) => [system.id, system.title]));
 
   async function handleDeletePhaseRunConfirmed() {
@@ -379,7 +441,9 @@ export default function Corpus() {
           >
             <option value="">All origins</option>
             <option value="seed">Seed</option>
-            <option value="generated">Generated</option>
+            <option value="generated">Generated — all</option>
+            <option value="generated-experiment">Generated — experiment runs</option>
+            <option value="generated-scratch">Generated — test runs (scratch)</option>
             <option value="manual">Manual</option>
           </select>
         </div>
@@ -485,6 +549,7 @@ export default function Corpus() {
       <section aria-labelledby="systems-heading" className="space-y-3">
         <h2 id="systems-heading" className="text-lg font-medium text-gray-900">
           System descriptions
+          {systemsQuery.isSuccess && <span aria-hidden="true" className="ml-2 text-sm font-normal text-gray-400">({systems.length})</span>}
         </h2>
 
         {systemsQuery.isLoading && <p className="text-sm text-gray-500">Loading system descriptions…</p>}
@@ -495,7 +560,7 @@ export default function Corpus() {
         )}
 
         {systemsQuery.isSuccess && systems.length > 0 && (
-          <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
+          <ul className="max-h-[36rem] overflow-y-auto divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
             {systems.map((system) => (
               <SystemDescriptionRow key={system.id} system={system} />
             ))}
@@ -506,6 +571,7 @@ export default function Corpus() {
       <section aria-labelledby="scenarios-heading" className="space-y-3">
         <h2 id="scenarios-heading" className="text-lg font-medium text-gray-900">
           Scenarios
+          {scenariosQuery.isSuccess && <span aria-hidden="true" className="ml-2 text-sm font-normal text-gray-400">({scenarios.length})</span>}
         </h2>
 
         {scenariosQuery.isLoading && <p className="text-sm text-gray-500">Loading scenarios…</p>}
@@ -516,7 +582,7 @@ export default function Corpus() {
         )}
 
         {scenariosQuery.isSuccess && scenarios.length > 0 && (
-          <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
+          <ul className="max-h-[36rem] overflow-y-auto divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white">
             {scenarios.map((scenario) => (
               <ScenarioRow
                 key={scenario.id}

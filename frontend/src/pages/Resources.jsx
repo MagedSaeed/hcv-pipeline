@@ -371,6 +371,7 @@ function TextResourcesTab() {
       <div className="flex items-center justify-between gap-3">
         <h2 id="resources-heading" className="text-lg font-medium text-gray-900">
           Text resources
+          {resourcesQuery.isSuccess && <span aria-hidden="true" className="ml-2 text-sm font-normal text-gray-400">({resources.length})</span>}
         </h2>
         <button
           type="button"
@@ -389,7 +390,7 @@ function TextResourcesTab() {
       )}
 
       {resourcesQuery.isSuccess && resources.length > 0 && (
-        <ul aria-label="Resources" className="space-y-3">
+        <ul aria-label="Resources" className="max-h-[36rem] overflow-y-auto space-y-3 pr-1">
           {resources.map((resource) => (
             <ResourceRow key={resource.id} resource={resource} />
           ))}
@@ -708,8 +709,11 @@ function FewShotsTab() {
           if (items.length === 0) return null;
           return (
             <div key={option.value}>
-              <h3 className="text-sm font-semibold text-gray-700">{option.label}</h3>
-              <ul aria-label={option.label} className="mt-2 space-y-3">
+              <h3 className="text-sm font-semibold text-gray-700">
+                {option.label}
+                <span aria-hidden="true" className="ml-2 font-normal text-gray-400">({items.length})</span>
+              </h3>
+              <ul aria-label={option.label} className="mt-2 max-h-[36rem] overflow-y-auto space-y-3 pr-1">
                 {items.map((fewshot) => (
                   <FewShotCard key={fewshot.id} fewshot={fewshot} onEdit={() => setModalState(fewshot)} />
                 ))}
