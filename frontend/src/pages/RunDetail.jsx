@@ -17,6 +17,8 @@ import {
 import CodeBlock from '../components/CodeBlock';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBanner from '../components/ErrorBanner';
+import Modal from '../components/Modal';
+import { PhaseRunOutput } from '../components/ParsedOutput';
 import PhasesLabel from '../components/PhasesLabel';
 import ProgressBar from '../components/ProgressBar';
 import StatusBadge from '../components/StatusBadge';
@@ -177,6 +179,7 @@ function CallInspector({ callRow, onClose }) {
 function PhaseRunRow({ phaseRunRow, isStaff, retryPhaseRun, onRetry }) {
   const [expanded, setExpanded] = useState(false);
   const [inspecting, setInspecting] = useState(null);
+  const [viewingOutput, setViewingOutput] = useState(false);
   const callsQuery = usePhaseRunCalls(phaseRunRow.id, { enabled: expanded });
   const calls = callsQuery.data?.results ?? [];
 
@@ -210,6 +213,15 @@ function PhaseRunRow({ phaseRunRow, isStaff, retryPhaseRun, onRetry }) {
         >
           {expanded ? 'Hide calls' : 'View calls'}
         </button>
+        {['completed', 'failed'].includes(phaseRunRow.status) && (
+          <button
+            type="button"
+            onClick={() => setViewingOutput(true)}
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+          >
+            View output
+          </button>
+        )}
         {canRetry && (
           <button
             type="button"
@@ -223,6 +235,16 @@ function PhaseRunRow({ phaseRunRow, isStaff, retryPhaseRun, onRetry }) {
       </div>
 
       {isRetryingThis && retryPhaseRun.isError && <ErrorBanner error={retryPhaseRun.error} />}
+
+      {viewingOutput && (
+        <Modal
+          title={`Phase ${phaseRunRow.phase} output — Variant ${phaseRunRow.variant || '—'}`}
+          onClose={() => setViewingOutput(false)}
+          wide
+        >
+          <PhaseRunOutput phase={phaseRunRow.phase} phaseRunId={phaseRunRow.id} />
+        </Modal>
+      )}
 
       {expanded && (
         <div className="space-y-2 border-t border-gray-200 pt-2">

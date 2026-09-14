@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useAllLabels, useScenarios, useSystemDescriptions } from '../api/queries';
+import { useAllLabels, usePhaseRunCalls, useScenarios, useSystemDescriptions } from '../api/queries';
 import CollapsibleText from './CollapsibleText';
 import ErrorBanner from './ErrorBanner';
 import Modal from './Modal';
@@ -151,6 +151,119 @@ function LabellingView({ phaseRunId, callId }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function LabelList({ labels }) {
+  if (labels.length === 0) {
+    return <p className="text-xs text-gray-500">No labels: the model found none of the vulnerabilities in this scenario.</p>;
+  }
+  return (
+    <ul className="space-y-2 text-xs">
+      {labels.map((label) => (
+        <li key={label.id} className="rounded-md border border-gray-200 p-2">
+          <p className="font-semibold text-gray-900">
+            {label.hcv_id} — {label.hcv_name}
+          </p>
+          <p className="mt-1 text-gray-700">
+            <span className="font-medium text-gray-500">Evidence: </span>
+            {label.evidence || '—'}
+          </p>
+          <p className="text-gray-700">
+            <span className="font-medium text-gray-500">Rationale: </span>
+            {label.rationale || '—'}
+          </p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// A whole labelling run: the labelled scenarios on the left, the selected one's
+// card and labels on the right.
+function LabellingRunView({ phaseRunId }) {
+  const callsQuery = usePhaseRunCalls(phaseRunId);
+  const labelsQuery = useAllLabels({ phase_run: phaseRunId });
+  const scenariosQuery = useScenarios();
+  const systemsQuery = useSystemDescriptions();
+  const [selectedId, setSelectedId] = useState(null);
+
+  const queries = [callsQuery, labelsQuery, scenariosQuery, systemsQuery];
+  if (queries.some((query) => query.isLoading)) return <p className="text-xs text-gray-500">Loading the saved labels…</p>;
+  const failed = queries.find((query) => query.isError);
+  if (failed) return <ErrorBanner error={failed.error} />;
+
+  const scenariosById = new Map((scenariosQuery.data?.results ?? []).map((row) => [row.id, row]));
+  const systemTitles = new Map((systemsQuery.data?.results ?? []).map((row) => [row.id, row.title]));
+  const labels = labelsQuery.data?.results ?? [];
+  const calls = callsQuery.data?.results ?? [];
+  const scenarioIds = [...new Set(calls.map((call) => call.scenario).filter((id) => id != null))];
+  if (scenarioIds.length === 0) return <p className="text-xs text-gray-500">This run labelled no scenarios.</p>;
+
+  const activeId = scenarioIds.includes(selectedId) ? selectedId : scenarioIds[0];
+  const active = scenariosById.get(activeId);
+  const failedCall = calls.find((call) => call.scenario === activeId && !call.parsed_ok);
+
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <ul className="max-h-[32rem] space-y-1 overflow-y-auto">
+        {scenarioIds.map((id) => {
+          const scenario = scenariosById.get(id);
+          const count = labels.filter((label) => label.scenario === id).length;
+          return (
+            <li key={id}>
+              <button
+                type="button"
+                aria-pressed={id === activeId}
+                onClick={() => setSelectedId(id)}
+                className={`w-full rounded-md border px-2 py-1.5 text-left text-xs ${
+                  id === activeId ? 'border-brand-600 bg-brand-50' : 'border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <span className="font-medium text-gray-900">{scenario?.scenario_id ?? `Scenario ${id}`}</span>
+                <span className="text-gray-500"> · {systemTitles.get(scenario?.system_description) ?? ''}</span>
+                <span className="block text-gray-500">
+                  {count} {count === 1 ? 'label' : 'labels'}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="space-y-3">
+        {active && (
+          <div className="rounded-md border border-gray-200 p-2">
+            <p className="text-sm font-semibold text-gray-900">
+              {active.scenario_id} · {systemTitles.get(active.system_description) ?? ''}
+            </p>
+            <div className="mt-1">
+              <CollapsibleText
+                text={[...CARD_FIELDS.map(([field, name]) => (active[field] ? `${name}: ${active[field]}` : null)), active.narrative]
+                  .filter(Boolean)
+                  .join('\n')}
+                empty="(empty scenario)"
+                mono={false}
+              />
+            </div>
+          </div>
+        )}
+        {failedCall ? (
+          <p className="text-xs text-red-700">The reply for this scenario could not be parsed: {failedCall.parse_error}</p>
+        ) : (
+          <LabelList labels={labels.filter((label) => label.scenario === activeId)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// "View output" for a whole phase run: the generated systems and their
+// scenarios (phase 2), or the labels per scenario (phase 3).
+export function PhaseRunOutput({ phase, phaseRunId }) {
+  return phase === 3 ? (
+    <LabellingRunView phaseRunId={phaseRunId} />
+  ) : (
+    <GenerationView phaseRunId={phaseRunId} wide />
   );
 }
 

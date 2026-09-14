@@ -300,6 +300,40 @@ describe('RunDetail', () => {
     expect(await within(currentPanel).findByText('3 systems × 5 scenarios')).toBeInTheDocument();
   });
 
+  it('"View output" opens the generated systems with their scenarios as tabs', async () => {
+    const user = userEvent.setup();
+    const run = pipelineRun({ status: 'completed' });
+    installBaseFixtures({ run, phaseRuns: [phaseRun({ id: 9001, status: 'completed' })] });
+    server.use(
+      http.get('/api/system-descriptions/', () =>
+        HttpResponse.json(
+          paginated([
+            ...CURRENT_SEED_SYSTEMS,
+            { id: 700, title: 'Generated tram depot', slug: 'tram', body: 'Depot body.', origin: 'generated', generation_run: 9001, is_scratch: false, is_editable: false },
+          ])
+        )
+      ),
+      http.get('/api/scenarios/', ({ request }) =>
+        HttpResponse.json(
+          paginated(
+            new URL(request.url).searchParams.get('phase_run') === '9001'
+              ? [{ id: 800, system_description: 700, scenario_id: 'sc_01', actor: 'Depot actor', trigger: '', standing_state: '', asset: '', threat: '', outcome: '', narrative: '', origin: 'generated', generation_run: 9001 }]
+              : []
+          )
+        )
+      )
+    );
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    const row = (await screen.findByText(/phase 2.*variant a/i)).closest('[data-testid="phase-run-row"]');
+    await user.click(within(row).getByRole('button', { name: /view output/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Generated tram depot')).toBeInTheDocument();
+    expect(within(dialog).getByRole('tab', { name: 'sc_01' })).toBeInTheDocument();
+    expect(within(dialog).getByText('Depot actor')).toBeInTheDocument();
+  });
+
   it('links to Labels with this repetition preselected, not left for the id to be typed by hand', async () => {
     const run = pipelineRun({ status: 'completed' });
     installBaseFixtures({ run, phaseRuns: [] });
