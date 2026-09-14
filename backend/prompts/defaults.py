@@ -18,10 +18,24 @@ _GENERATION_TASK = """\
 ## Task
 
 Write {{ n_systems }} new smart-city system description{{ "s" if n_systems != 1 }}. \
-Each must be a different kind of system from the examples below, described in \
-the same concrete style: its components with short ids, the people and \
-organisations involved with their roles, how they connect, and the settings \
-and procedures in force.
+Each must be a different kind of system from the example systems below.
+{% if seed_systems %}
+Write each description the way the examples are written:
+
+- Use the same numbered sections, with the same headings, in the same order.
+- Use the same kinds of tables and lists wherever the examples use them.
+- Name every device, service, data store, interface, person and role the way the \
+examples do: a short id or name, with its type in parentheses.
+- Match the examples' length and level of detail. Do not shorten or summarise.
+- Leave out anything that only explains the examples' formatting, such as a colour \
+legend.
+
+Put the whole description in `body` as Markdown.
+{% else %}
+Describe its components with short ids, the people and organisations involved \
+with their roles, how they connect, and the settings and procedures in force. Put \
+the description in `body` as Markdown.
+{% endif %}\
 {% if generate_scenarios %}
 For each system, write {{ n_scenarios_per_system }} \
 scenario{{ "s" if n_scenarios_per_system != 1 }} against it.
