@@ -265,10 +265,9 @@ export default function ExperimentBuilder() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">{isEditing ? 'Edit experiment' : 'New experiment'}</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Pin the models, prompts, taxonomy and inputs this comparison will use. The experiment
-          stays freely editable afterward — each launched repetition pins its own snapshot of the
-          seed systems, few-shots, target system, toggles and counts, so a later edit here can
-          never rewrite what a repetition already used.
+          Choose the models, prompts, taxonomy and inputs this comparison will use. You can edit the
+          experiment later; each repetition keeps the settings it was launched with, so an edit never
+          changes a repetition that already ran.
         </p>
       </div>
 
@@ -465,10 +464,8 @@ export default function ExperimentBuilder() {
         <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Seed systems</legend>
           <p className="text-xs text-gray-500">
-            Only seed and manual systems are offered here — a generated-origin system (whether from
-            a launched repetition or an iterate run's own scratch output) is refused by the API as a
-            seed, since its prose already reflects what a prior run produced and would contaminate
-            the comparison, so it is left off this list rather than offered only to be rejected.
+            Only seed and hand-written systems are listed. Generated systems can&apos;t be seeds: their text
+            already reflects what a model produced, which would skew the comparison.
           </p>
           {selectableSystems.map((system) => (
             <label key={system.id} htmlFor={`seed-system-${system.id}`} className="flex items-center gap-2 text-sm text-gray-700">
@@ -553,7 +550,7 @@ export default function ExperimentBuilder() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label htmlFor="n-systems" className="block text-xs font-medium text-gray-700">
-                Systems per repetition (n_systems)
+                Systems per repetition
               </label>
               <input
                 id="n-systems"
@@ -567,7 +564,7 @@ export default function ExperimentBuilder() {
             </div>
             <div>
               <label htmlFor="n-scenarios" className="block text-xs font-medium text-gray-700">
-                Scenarios per system (n_scenarios_per_system)
+                Scenarios per system
               </label>
               <input
                 id="n-scenarios"

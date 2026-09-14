@@ -168,7 +168,7 @@ function PromptGroupRow({ phase, name, versions, isStaff }) {
               {confirmingVersionId === version.id && (
                 <ConfirmDialog
                   title={`Delete version ${version.version}?`}
-                  message="This version is gone for good. If an experiment or a run still pins it, the API refuses the delete instead."
+                  message="This can’t be undone. A version that an experiment or run still uses is kept."
                   confirmLabel="Confirm"
                   cancelLabel="Never mind"
                   pending={deleteTemplate.isPending}

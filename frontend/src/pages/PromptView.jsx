@@ -130,7 +130,7 @@ function RenderInputs({
           <div className="flex gap-3">
             <div>
               <label htmlFor="render-n-systems" className="block text-xs font-medium text-gray-700">
-                n_systems
+                Systems
               </label>
               <input
                 id="render-n-systems"
@@ -143,7 +143,7 @@ function RenderInputs({
             </div>
             <div>
               <label htmlFor="render-n-scenarios" className="block text-xs font-medium text-gray-700">
-                n_scenarios_per_system
+                Scenarios per system
               </label>
               <input
                 id="render-n-scenarios"
@@ -399,7 +399,7 @@ export default function PromptView() {
       {displayMode === 'rendered' && (
         <div className="space-y-3">
           <p className="text-xs text-gray-500">
-            Rendered by the real backend renderer against the resources below — no model call.
+            Filled in with the inputs below, exactly as a run would send it. No model is called.
           </p>
           {!isStaff ? (
             <p role="note" className="text-sm text-amber-800">

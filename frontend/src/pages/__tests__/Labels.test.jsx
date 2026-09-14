@@ -569,8 +569,7 @@ describe('Labels', () => {
     await applyRunFilter(user, { run: 603, variant: 'A' });
 
     const matrix = await screen.findByTestId('variant-A-matrix');
-    expect(within(matrix).getByText(/pinned more than one taxonomy/i)).toBeInTheDocument();
-    expect(within(matrix).getByText(/9, 21/)).toBeInTheDocument();
+    expect(within(matrix).getByText(/used more than one taxonomy version/i)).toBeInTheDocument();
     // Nothing merged - no table at all for this variant.
     expect(within(matrix).queryByRole('table')).not.toBeInTheDocument();
   });

@@ -127,7 +127,7 @@ def test_preview_of_variant_a_with_a_taxonomy_is_refused(api_client, staff, temp
         format="json",
     )
     assert response.status_code == 400
-    assert "Run A" in str(response.json())
+    assert "Variant A" in str(response.json())
 
 
 @pytest.mark.django_db
@@ -372,7 +372,7 @@ def test_preview_refuses_when_there_is_no_guard_to_scan_against(api_client, staf
     )
 
     assert response.status_code == 400
-    assert "backstop could not run" in str(response.json())
+    assert "No taxonomy to check" in str(response.json())
 
 
 @pytest.mark.django_db
@@ -912,8 +912,8 @@ def test_preview_with_a_guard_taxonomy_of_no_rows_names_that_guard(api_client, s
 
     detail = _unscannable_preview(api_client, staff, template, guard_taxonomy=empty.id)
 
-    assert "backstop could not run" in detail
-    assert f"The guard_taxonomy you passed ({empty})" in detail
+    assert "couldn't be checked" in detail
+    assert f"The taxonomy you chose ({empty})" in detail
     assert "has no HCV rows" in detail
     assert "No taxonomy to check" not in detail
 
@@ -926,9 +926,9 @@ def test_preview_with_a_guard_taxonomy_of_blank_rows_names_those_rows(api_client
 
     detail = _unscannable_preview(api_client, staff, template, guard_taxonomy=blanked.id)
 
-    assert "backstop could not run" in detail
-    assert f"The guard_taxonomy you passed ({blanked})" in detail
-    assert "1 of 2 HCV rows with no hcv_id, name or definition" in detail
+    assert "couldn't be checked" in detail
+    assert f"The taxonomy you chose ({blanked})" in detail
+    assert "1 of 2 rows with no id, name or definition" in detail
     assert "No taxonomy to check" not in detail
 
 
@@ -942,7 +942,7 @@ def test_preview_falling_back_to_an_empty_active_taxonomy_names_it(api_client, s
 
     detail = _unscannable_preview(api_client, staff, template)
 
-    assert "backstop could not run" in detail
+    assert "couldn't be checked" in detail
     assert f"The active taxonomy ({active})" in detail
     assert "has no HCV rows" in detail
     assert "No taxonomy to check" not in detail
@@ -955,7 +955,7 @@ def test_preview_with_no_guard_at_all_still_asks_for_one(api_client, staff, temp
     detail = _unscannable_preview(api_client, staff, template)
 
     assert "No taxonomy to check" in detail
-    assert "Pass guard_taxonomy=" in detail
+    assert "Activate one on the Taxonomy page" in detail
 
 
 @pytest.mark.django_db

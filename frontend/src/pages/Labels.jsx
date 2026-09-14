@@ -182,7 +182,7 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
       {!isLoading && !isError && pinned.status === 'ok' && pinnedTaxonomy && (
         <p className="text-xs text-gray-500">
           Columns: <span className="font-medium text-gray-700">{taxonomyLabel(pinnedTaxonomy)}</span> — the
-          taxonomy this variant&apos;s own labelling run pinned
+          taxonomy this variant&apos;s labelling run used
           {differsFromActive
             ? `, not the currently active ${taxonomyLabel(activeTaxonomy)}.`
             : '.'}
@@ -191,14 +191,14 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
 
       {!isLoading && !isError && pinned.status === 'mismatch' && (
         <EmptyState
-          title="This variant pinned more than one taxonomy"
-          message={`Its own phase runs pinned different taxonomies (ids: ${pinned.ids.join(', ')}). Showing one shared column set would merge incompatible vocabularies, so nothing is shown here - inspect each phase run individually instead.`}
+          title="This variant used more than one taxonomy version"
+          message="Its runs used different taxonomy versions, which can't be shown in one table. Open each run to compare them."
         />
       )}
 
       {!isLoading && !isError && pinned.status === 'none' && (
         <EmptyState
-          title={`No labelling phase run found for variant ${variant}`}
+          title={`No labelling run for variant ${variant}`}
           message="This run may not have reached phase 3 for this variant yet."
         />
       )}

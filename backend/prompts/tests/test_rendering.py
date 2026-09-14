@@ -378,7 +378,7 @@ def test_request_scan_rejects_variant_a_with_no_taxonomy_to_check_against():
     """Fail closed: `guard_taxonomy=None` means the scan cannot run at all,
     and this is the LAST checkpoint before a real provider call — refused
     outright, not merely warned about the way render()'s own backstop would."""
-    with pytest.raises(TaxonomyLeak, match="No taxonomy"):
+    with pytest.raises(TaxonomyLeak, match="no taxonomy to check"):
         assert_request_not_leaking_taxonomy(
             variant="A", guard_taxonomy=None, request={"model": "m"}
         )
@@ -392,7 +392,7 @@ def test_request_scan_rejects_variant_a_against_an_empty_taxonomy(db):
     backstop only warns and lets the render through there; this, being the
     LAST checkpoint before the provider is contacted, refuses outright."""
     empty = Taxonomy.objects.create(vocabulary_id="HCV-EMPTY-REQ", version="1.0")
-    with pytest.raises(TaxonomyLeak, match="has no HCV rows"):
+    with pytest.raises(TaxonomyLeak, match="has no rows"):
         assert_request_not_leaking_taxonomy(
             variant="A", guard_taxonomy=empty, request={"model": "m"}
         )
@@ -410,9 +410,7 @@ def test_request_scan_names_the_any_blank_row_rule_when_refusing(db):
     HCV.objects.create(taxonomy=partly_blank, hcv_id="HCV-07", name="Malicious Insiders", order=7)
     HCV.objects.create(taxonomy=partly_blank, hcv_id="", name="", order=8)
 
-    with pytest.raises(
-        TaxonomyLeak, match="at least one HCV row with no hcv_id, name or definition"
-    ):
+    with pytest.raises(TaxonomyLeak, match="a row with no id, name or definition"):
         assert_request_not_leaking_taxonomy(
             variant="A", guard_taxonomy=partly_blank, request={"model": "m"}
         )
@@ -473,7 +471,7 @@ def test_request_scan_refuses_a_request_it_cannot_walk(taxonomy):
     test_request_scan_scans_the_text_of_an_exotic_value below for that case."""
     request = {"model": "m"}
     request["self"] = request
-    with pytest.raises(TaxonomyLeak, match="could not be walked"):
+    with pytest.raises(TaxonomyLeak, match="could not be checked"):
         assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=taxonomy, request=request)
 
 
@@ -531,7 +529,7 @@ def test_request_scan_catches_names_containing_json_escapable_characters(
 
     # The render-time scan: raw system/user strings, no request dict at all.
     rendered = RenderedPrompt(system="", user=f"Generate scenarios. {leaked_text}")
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         assert_no_taxonomy_leak(taxonomy_with_escapable_names, rendered)
 
     # The request scan: the identical text, but reached the way it actually
@@ -541,7 +539,7 @@ def test_request_scan_catches_names_containing_json_escapable_characters(
         "model": "m",
         "messages": [{"role": "user", "content": f"Generate scenarios. {leaked_text}"}],
     }
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         assert_request_not_leaking_taxonomy(
             variant="A", guard_taxonomy=taxonomy_with_escapable_names, request=request
         )

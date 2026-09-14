@@ -101,7 +101,7 @@ function DeleteExperimentModal({ experiment, runCount, onClose }) {
               {runCount} {runCount === 1 ? 'repetition' : 'repetitions'}
             </strong>{' '}
             with everything they produced: generated systems and scenarios, labels, and every recorded model
-            call. Iterate runs that borrowed its inputs are deleted too. This cannot be undone.
+            call. Prompt test runs that borrowed its inputs are deleted too. This cannot be undone.
           </p>
         ) : (
           <p>This experiment has never been run. Deleting it removes only its configuration.</p>
@@ -278,9 +278,8 @@ export default function ExperimentDetail() {
             this is NOT what any particular repetition below actually used.
             What a repetition used is on its OWN Run detail page. */}
         <p className="text-xs text-gray-500">
-          The experiment&apos;s current, live, editable configuration — not necessarily what any
-          repetition below actually used. Each repetition pins its own snapshot at launch, shown on
-          its own Run detail page.
+          The experiment&apos;s current settings. A repetition keeps the settings it was launched
+          with, so later edits don&apos;t change it; open a repetition to see what it used.
         </p>
         <dl className="grid grid-cols-1 gap-3 text-sm text-gray-700 sm:grid-cols-2">
           <div>

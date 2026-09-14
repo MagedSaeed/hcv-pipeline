@@ -258,8 +258,8 @@ export default function Taxonomy() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Taxonomy</h1>
         <p className="mt-1 text-sm text-gray-500">
-          The closed list variant B is shown and phase 3 labels from - variant A never sees it, and
-          its rows are also what variant A&apos;s leak check scans for.
+          The closed list of vulnerabilities. Variant B is shown it and phase 3 labels from it. Variant A
+          never sees it, and its prompts are checked to make sure none of it slipped in.
         </p>
       </div>
 
@@ -301,7 +301,7 @@ export default function Taxonomy() {
             {activateTaxonomy.isPending ? 'Activating…' : 'Make active'}
           </button>
           <p className="text-xs text-gray-500">
-            The active version is what new experiments and iterate runs use by default.
+            The active version is what new experiments and prompt tests use by default.
           </p>
           {activateTaxonomy.isError && <ErrorBanner error={activateTaxonomy.error} />}
         </div>

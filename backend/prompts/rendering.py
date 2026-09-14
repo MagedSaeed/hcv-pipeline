@@ -234,10 +234,8 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
     found_ids = sorted(row.hcv_id for row in rows if row.hcv_id and row.hcv_id.casefold() in blob)
     if found_ids:
         raise TaxonomyLeak(
-            "Run A request contains taxonomy identifiers "
-            f"{found_ids}. Something reached the taxonomy transitively — check "
-            "resource() calls, few-shot files referenced by this template, and "
-            "its output_schema."
+            f"This variant A prompt contains taxonomy ids {found_ids}. Remove whatever "
+            "brings them in: a resource() the prompt uses, a few-shot, or the output schema."
         )
 
     found_names = {row.name for row in rows if row.name and row.name.casefold() in blob}
@@ -248,8 +246,9 @@ def assert_no_taxonomy_leak(taxonomy, rendered, extra=""):
     if combined_count >= LEAK_MATCH_THRESHOLD:
         matches = sorted(found_names) + sorted(found_definitions)
         raise TaxonomyLeak(
-            f"Run A request contains {combined_count} taxonomy names/definitions "
-            f"{matches[:5]}. That is a taxonomy listing, not incidental prose."
+            f"This variant A prompt contains {combined_count} taxonomy names or definitions "
+            f"{matches[:5]}, which looks like a copy of the taxonomy. Remove it from the "
+            "prompt, its resources or its few-shots."
         )
     return True
 
@@ -397,30 +396,24 @@ def assert_request_not_leaking_taxonomy(*, variant, guard_taxonomy, request):
         return False
     if guard_taxonomy is None:
         raise TaxonomyLeak(
-            "No taxonomy to check this variant-A request against before "
-            "sending it. Refusing to send a request that cannot be "
-            "verified taxonomy-free."
+            "There is no taxonomy to check this variant A request against, so it was "
+            "not sent. Activate a taxonomy first."
         )
     try:
         blob = "\n".join(_iter_request_text(request))
     except (TypeError, ValueError) as error:
         raise TaxonomyLeak(
-            "The final request body could not be walked for scanning "
-            f"({error}). Refusing to send a request that cannot be "
-            "verified taxonomy-free."
+            f"This variant A request could not be checked for taxonomy content ({error}), "
+            "so it was not sent."
         ) from error
     scanned = assert_no_taxonomy_leak(
         guard_taxonomy, RenderedPrompt(system="", user=""), extra=blob
     )
     if not scanned:
         raise TaxonomyLeak(
-            f"Guard taxonomy {guard_taxonomy} has no HCV rows, or at least one "
-            "HCV row with no hcv_id, name or definition (see "
-            "`unscannable_hcv_rows`) — ANY such row is refused, not only a "
-            "taxonomy blank throughout, because a scan that skips a row cannot "
-            "vouch for it. The final request scan cannot run, and this is the "
-            "last checkpoint before the provider call. Refusing to send an "
-            "unscanned variant-A request."
+            f"Taxonomy {guard_taxonomy} has no rows, or a row with no id, name or "
+            "definition, so this variant A request can't be checked against it and was "
+            "not sent. Fix that taxonomy on the Taxonomy page."
         )
     return True
 
@@ -445,8 +438,8 @@ def _fewshot_rows(fewshots, variant=None):
                 referenced = getattr(f, side)
                 if referenced is not None and referenced.kind == ResourceKind.TAXONOMY:
                     raise TaxonomyLeak(
-                        f'Few-shot example "{f.name}" references a taxonomy resource '
-                        f"via {side} and cannot be used in a Run A (unbiased) context."
+                        f'Few-shot "{f.name}" uses a taxonomy resource as its '
+                        f"{side.split('_')[0]}, so variant A can't use it."
                     )
         rows.append({"name": f.name, "input": f.resolved_input, "output": f.resolved_output})
     return rows
@@ -474,8 +467,7 @@ def _make_resource(variant):
             ) from error
         if variant == VARIANT_UNBIASED and resource_file.kind == ResourceKind.TAXONOMY:
             raise TaxonomyLeak(
-                f'resource("{name}") is a taxonomy resource and cannot be used in a '
-                "Run A (unbiased) context."
+                f'resource("{name}") is a taxonomy resource, so variant A can\'t use it.'
             )
         return resource_file.text
 
@@ -521,12 +513,9 @@ def build_phase2_context(
             f"{type(guard_taxonomy).__name__!r}."
         )
     if variant == VARIANT_UNBIASED and taxonomy is not None:
-        raise TaxonomyLeak(
-            "Run A is the unbiased variant and must not receive a taxonomy. "
-            "Pass taxonomy=None, or run this as variant B."
-        )
+        raise TaxonomyLeak("Variant A must not receive the taxonomy.")
     if variant == VARIANT_GUIDED and taxonomy is None:
-        raise TaxonomyLeak("Run B is the guided variant and requires a taxonomy.")
+        raise TaxonomyLeak("Variant B needs a taxonomy.")
 
     context = {
         "seed_systems": _system_rows(seed_systems),

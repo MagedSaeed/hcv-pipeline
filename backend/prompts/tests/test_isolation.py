@@ -78,13 +78,13 @@ def taxonomy_with_definitions(db):
 @pytest.mark.django_db
 def test_variant_a_refuses_a_taxonomy_outright(taxonomy):
     """The isolation guarantee: a Run A context cannot even hold the taxonomy."""
-    with pytest.raises(TaxonomyLeak, match="Run A"):
+    with pytest.raises(TaxonomyLeak, match="Variant A"):
         base("A", taxonomy=taxonomy)
 
 
 @pytest.mark.django_db
 def test_variant_b_requires_a_taxonomy():
-    with pytest.raises(TaxonomyLeak, match="Run B"):
+    with pytest.raises(TaxonomyLeak, match="Variant B"):
         base("B", taxonomy=None)
 
 
@@ -397,7 +397,7 @@ def test_output_schema_carrying_definitions_is_caught_under_variant_a(taxonomy_w
             "properties": {"labels": {"type": "array", "description": definitions}},
         },
     )
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         render(template, base("A"))
 
 
@@ -455,7 +455,7 @@ def test_output_schema_scan_catches_names_with_json_escapable_characters(
         "Generate.",
         output_schema={"type": "object", "properties": {"labels": {"description": leaked_text}}},
     )
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         render(template, base("A", guard_taxonomy=taxonomy_with_escapable_names))
 
 
@@ -744,7 +744,7 @@ def test_render_refuses_three_hcv_names_only_in_keys_but_not_two(hcv21):
     rendered = render(make("Generate.", output_schema=two), base("A", guard_taxonomy=hcv21))
     assert rendered.leak_scan_ran is True
 
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         render(make("Generate.", output_schema=three), base("A", guard_taxonomy=hcv21))
 
 
@@ -824,7 +824,7 @@ def test_the_request_scan_refuses_three_hcv_names_only_in_keys_but_not_two(hcv21
     assert "HCV-" not in repr(three)
 
     assert assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=two)
-    with pytest.raises(TaxonomyLeak, match="names/definitions"):
+    with pytest.raises(TaxonomyLeak, match="names or definitions"):
         assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=three)
 
 

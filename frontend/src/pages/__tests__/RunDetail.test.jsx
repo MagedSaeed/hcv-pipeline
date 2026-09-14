@@ -236,8 +236,7 @@ describe('RunDetail', () => {
 
     await user.click(within(variantARow).getByRole('button', { name: /view calls/i }));
     const callRow = await screen.findByTestId('call-row-1');
-    expect(within(callRow).getByText(/leak scan ran/i)).toBeInTheDocument();
-    expect(within(callRow).getByText(/guarded by taxonomy #2/i)).toBeInTheDocument();
+    expect(within(callRow).getByText(/taxonomy check ran/i)).toBeInTheDocument();
 
     const variantBRow = screen.getByText(/phase 2.*variant b/i).closest('[data-testid="phase-run-row"]');
     // Variant B legitimately never runs the leak backstop (it has the
@@ -264,7 +263,7 @@ describe('RunDetail', () => {
 
     renderApp({ initialEntries: ['/pipeline-runs/501'] });
 
-    expect(await screen.findByText(/pinned to this repetition/i)).toBeInTheDocument();
+    expect(await screen.findByText(/used by this repetition/i)).toBeInTheDocument();
     expect(screen.getByText(/pinned oldsmar \(as launched\)/i)).toBeInTheDocument();
 
     expect(await screen.findByText(/experiment.s current configuration/i)).toBeInTheDocument();

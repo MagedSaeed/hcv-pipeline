@@ -166,7 +166,7 @@ describe('Taxonomy editing (staff)', () => {
 
     const activateButton = await screen.findByRole('button', { name: /make active/i });
     expect(
-      screen.getByText(/active version is what new experiments and iterate runs use by default/i)
+      screen.getByText(/active version is what new experiments and prompt tests use by default/i)
     ).toBeInTheDocument();
 
     await user.click(activateButton);

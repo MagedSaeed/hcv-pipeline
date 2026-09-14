@@ -342,33 +342,21 @@ def _unscanned_preview_detail(guard, *, explicit):
     guard came from the request or from the `Taxonomy.active()` fallback, so
     the message names the taxonomy the operator actually needs to look at.
     """
-    unproven = "A preview that proved nothing must not be shown as clean."
     if guard is None:
         return (
-            "No taxonomy to check this variant-A preview against, so the isolation "
-            "backstop could not run. Pass guard_taxonomy=, or activate a Taxonomy, "
-            f"before previewing. {unproven}"
+            "No taxonomy to check this variant A preview against. Activate one on the "
+            "Taxonomy page, then preview again."
         )
-    source = (
-        f"The guard_taxonomy you passed ({guard})"
-        if explicit
-        else f"The active taxonomy ({guard}), used because no guard_taxonomy was passed,"
-    )
+    source = f"The taxonomy you chose ({guard})" if explicit else f"The active taxonomy ({guard})"
     rows = list(guard.hcvs.all())
     blank = unscannable_hcv_rows(rows)
     if not rows:
         problem = "has no HCV rows"
     elif blank:
-        problem = f"has {len(blank)} of {len(rows)} HCV rows with no hcv_id, name or definition"
+        problem = f"has {len(blank)} of {len(rows)} rows with no id, name or definition"
     else:
         problem = "could not be scanned against"
-    alternative = (
-        "pass a different guard_taxonomy="
-        if explicit
-        else "pass guard_taxonomy= naming a complete taxonomy"
-    )
     return (
-        f"{source} {problem}, so the isolation backstop could not run. Fix or "
-        f"re-import that taxonomy (manage.py import_taxonomy), or {alternative}. "
-        f"{unproven}"
+        f"{source} {problem}, so this variant A preview couldn't be checked for "
+        "taxonomy content. Fix that taxonomy on the Taxonomy page, or use a complete one."
     )

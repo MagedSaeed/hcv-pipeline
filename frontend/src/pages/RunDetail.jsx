@@ -117,14 +117,14 @@ function IsolationBadge({ phaseRun }) {
   if (phaseRun.leak_scan_ran) {
     return (
       <p className="text-xs font-semibold text-green-700">
-        Isolation verified — guarded by taxonomy #{phaseRun.guarded_by.join(', ')}.
+        Isolation verified: every prompt was checked and none contained taxonomy content.
       </p>
     );
   }
   return (
     <p className="text-xs font-semibold text-red-700">
-      Isolation NOT verified — the leak scan did not run for every call in this run. Do not treat
-      this run as proof variant A stayed unbiased.
+      Isolation not verified: the taxonomy check did not run on every call, so this run can&apos;t show
+      that variant A stayed free of the taxonomy.
     </p>
   );
 }
@@ -146,8 +146,8 @@ function CallRow({ callRow, onInspect }) {
       </div>
       <p className={callRow.leak_scan_ran ? 'text-green-700' : 'text-gray-500'}>
         {callRow.leak_scan_ran
-          ? `Leak scan ran — guarded by taxonomy #${callRow.guarded_by}.`
-          : 'Leak scan did not run for this call.'}
+          ? 'Taxonomy check ran on this call.'
+          : 'Taxonomy check did not run on this call.'}
       </p>
       {!callRow.parsed_ok && callRow.parse_error && (
         <p className="text-red-700">Parse error: {callRow.parse_error}</p>
@@ -414,8 +414,8 @@ export default function RunDetail() {
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ConfigSummary
           testId="pinned-config"
-          label="Pinned to this repetition"
-          note="What repetition actually used, snapshotted once at launch — never re-read from the experiment afterward."
+          label="Used by this repetition"
+          note="The settings this repetition was launched with. Later edits to the experiment don't change them."
           phases={pinned.phases}
           systems={pinnedSystems}
           fewshotNames={pinnedFewshots}
@@ -428,7 +428,7 @@ export default function RunDetail() {
         <ConfigSummary
           testId="current-config"
           label="Experiment's current configuration"
-          note="May have changed since this repetition launched — this is NOT what this repetition used."
+          note="May have changed since this repetition was launched."
           phases={experiment ? experiment.phases : null}
           systems={currentSystems}
           fewshotNames={currentFewshots}

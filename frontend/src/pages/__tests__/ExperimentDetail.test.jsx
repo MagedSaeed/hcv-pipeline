@@ -127,7 +127,7 @@ describe('ExperimentDetail', () => {
 
     expect(await screen.findByRole('heading', { name: 'Baseline comparison' })).toBeInTheDocument();
     const config = screen.getByTestId('current-config');
-    expect(within(config).getByText(/not necessarily what any repetition/i)).toBeInTheDocument();
+    expect(within(config).getByText(/keeps the settings it was launched/i)).toBeInTheDocument();
     expect(within(config).getByText('gen-a (v1)')).toBeInTheDocument();
     expect(within(config).getByText('gen-b (v1)')).toBeInTheDocument();
     expect(within(config).getByText('label (v1)')).toBeInTheDocument();
