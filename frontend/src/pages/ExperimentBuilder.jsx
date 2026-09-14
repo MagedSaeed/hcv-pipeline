@@ -14,6 +14,7 @@ import {
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
+import SearchableSelect from '../components/SearchableSelect';
 
 // corpus.models.Origin.choices, spelled out here the same way Corpus.jsx's
 // ORIGIN_LABELS does — a generated row is a previous run's own output;
@@ -45,8 +46,8 @@ const emptyForm = {
   generateSystems: true,
   generateScenarios: true,
   targetSystem: '',
-  nSystems: '3',
-  nScenariosPerSystem: '5',
+  nSystems: '1',
+  nScenariosPerSystem: '3',
   variantA: true,
   variantB: true,
 };
@@ -75,8 +76,11 @@ function formFromExperiment(experiment) {
     generateSystems: experiment.generate_systems ?? true,
     generateScenarios: experiment.generate_scenarios ?? true,
     targetSystem: experiment.target_system != null ? String(experiment.target_system) : '',
-    nSystems: String(experiment.n_systems ?? '3'),
-    nScenariosPerSystem: String(experiment.n_scenarios_per_system ?? '5'),
+    // Edit mode always keeps the experiment's OWN stored counts - these
+    // `??` fallbacks only cover a defensively-missing field, so they track
+    // the same 1/3 create-mode default (`emptyForm` above), not the old 3/5.
+    nSystems: String(experiment.n_systems ?? '1'),
+    nScenariosPerSystem: String(experiment.n_scenarios_per_system ?? '3'),
     variantA: (experiment.variants ?? ['A', 'B']).includes('A'),
     variantB: (experiment.variants ?? ['A', 'B']).includes('B'),
   };
@@ -91,6 +95,44 @@ function pickDefaultTemplate(templates, name) {
   const matches = templates.filter((template) => template.name === name);
   if (matches.length === 0) return null;
   return matches.find((template) => template.is_active) ?? matches.reduce((best, t) => (t.version > best.version ? t : best));
+}
+
+// Turns a flat PromptTemplate list into SearchableSelect options: a name
+// with exactly one saved version stays a plain leaf ("name (vN)"); a name
+// with several becomes a GROUP whose own value is the resolved version
+// (active, else highest) - clicking its row picks that version directly,
+// its ▸ toggle reveals every version (newest first) to pick a specific one
+// instead. `noteMissingVariant` marks a template with no `variant` stored
+// ("variant not set") - only meaningful for phase 2's own variant-A/B
+// pickers below; phase 3 templates have no variant concept at all.
+function groupTemplatesByName(templates, { noteMissingVariant = false } = {}) {
+  const byName = new Map();
+  for (const template of templates) {
+    if (!byName.has(template.name)) byName.set(template.name, []);
+    byName.get(template.name).push(template);
+  }
+  return [...byName.values()].map((versions) => {
+    const sorted = [...versions].sort((a, b) => b.version - a.version);
+    const name = sorted[0].name;
+    const description = noteMissingVariant && !sorted[0].variant ? 'variant not set' : undefined;
+    if (sorted.length === 1) {
+      const only = sorted[0];
+      return { value: String(only.id), label: `${name} (v${only.version})`, description };
+    }
+    const resolved =
+      sorted.find((template) => template.is_active) ?? sorted.reduce((best, t) => (t.version > best.version ? t : best));
+    return {
+      value: String(resolved.id),
+      label: name,
+      description,
+      closedLabel: `${name} (v${resolved.version})`,
+      children: sorted.map((template) => ({
+        value: String(template.id),
+        label: `v${template.version}${template.is_active ? ' · active' : ''}`,
+        closedLabel: `${name} (v${template.version})`,
+      })),
+    };
+  });
 }
 
 export default function ExperimentBuilder() {
@@ -162,6 +204,23 @@ export default function ExperimentBuilder() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, phase2TemplatesQuery.isSuccess, phase3TemplatesQuery.isSuccess]);
 
+  // Same reasoning, for the taxonomy: CREATE mode only, once the list has
+  // loaded, and only while nothing has been chosen yet - the active
+  // taxonomy if there is one, else the first one, never overwriting a
+  // value the researcher (or an earlier run of this same effect) already set.
+  useEffect(() => {
+    if (isEditing) return;
+    if (!taxonomiesQuery.isSuccess) return;
+    const available = taxonomiesQuery.data?.results ?? [];
+    if (available.length === 0) return;
+    setForm((current) => {
+      if (current.taxonomy) return current;
+      const preferred = available.find((taxonomy) => taxonomy.is_active) ?? available[0];
+      return { ...current, taxonomy: String(preferred.id) };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, taxonomiesQuery.isSuccess]);
+
   if (!isStaff) {
     return (
       <div className="space-y-2">
@@ -185,6 +244,20 @@ export default function ExperimentBuilder() {
   const taxonomies = taxonomiesQuery.data?.results ?? [];
   const phase2Templates = phase2TemplatesQuery.data?.results ?? [];
   const phase3Templates = phase3TemplatesQuery.data?.results ?? [];
+  // Each variant's own picker offers only ITS stored variant, plus any
+  // template whose variant was never set (grandfathered rows, or a draft
+  // still being written) - never the other variant's own templates. Several
+  // saved versions of the same name collapse into one grouped, expandable
+  // row (`groupTemplatesByName`) rather than one flat row per version.
+  const phase2PromptAOptions = groupTemplatesByName(
+    phase2Templates.filter((template) => template.variant === 'A' || !template.variant),
+    { noteMissingVariant: true }
+  );
+  const phase2PromptBOptions = groupTemplatesByName(
+    phase2Templates.filter((template) => template.variant === 'B' || !template.variant),
+    { noteMissingVariant: true }
+  );
+  const phase3PromptOptions = groupTemplatesByName(phase3Templates);
   const systems = systemsQuery.data?.results ?? [];
   const fewshots = fewshotsQuery.data?.results ?? [];
   // Task 10.5: the backend refuses ANY generated-origin row as a seed or a
@@ -286,23 +359,17 @@ export default function ExperimentBuilder() {
             <FieldError message={fieldErrors.name} />
           </div>
           <div>
-            <label htmlFor="taxonomy" className="block text-xs font-medium text-gray-700">
-              Taxonomy
-            </label>
-            <select
+            <SearchableSelect
               id="taxonomy"
+              label="Taxonomy"
               value={form.taxonomy}
-              onChange={(event) => updateField('taxonomy', event.target.value)}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-            >
-              <option value="">Select a taxonomy…</option>
-              {taxonomies.map((taxonomy) => (
-                <option key={taxonomy.id} value={taxonomy.id}>
-                  {taxonomy.vocabulary_id} v{taxonomy.version}
-                  {taxonomy.is_active ? ' (active)' : ''}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => updateField('taxonomy', value)}
+              options={taxonomies.map((taxonomy) => ({
+                value: String(taxonomy.id),
+                label: `${taxonomy.vocabulary_id} v${taxonomy.version}${taxonomy.is_active ? ' (active)' : ''}`,
+              }))}
+              placeholder="Select a taxonomy…"
+            />
             <FieldError message={fieldErrors.taxonomy} />
           </div>
         </div>
@@ -371,41 +438,25 @@ export default function ExperimentBuilder() {
               <FieldError message={fieldErrors.phase2_temperature} />
             </div>
             <div>
-              <label htmlFor="phase2-prompt-a" className="block text-xs font-medium text-gray-700">
-                Phase 2 prompt — Variant A
-              </label>
-              <select
+              <SearchableSelect
                 id="phase2-prompt-a"
+                label="Phase 2 prompt — Variant A"
                 value={form.phase2PromptA}
-                onChange={(event) => updateField('phase2PromptA', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a template…</option>
-                {phase2Templates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.name} (v{template.version})
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => updateField('phase2PromptA', value)}
+                options={phase2PromptAOptions}
+                placeholder="Select a template…"
+              />
               <FieldError message={fieldErrors.phase2_prompt_a} />
             </div>
             <div>
-              <label htmlFor="phase2-prompt-b" className="block text-xs font-medium text-gray-700">
-                Phase 2 prompt — Variant B
-              </label>
-              <select
+              <SearchableSelect
                 id="phase2-prompt-b"
+                label="Phase 2 prompt — Variant B"
                 value={form.phase2PromptB}
-                onChange={(event) => updateField('phase2PromptB', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a template…</option>
-                {phase2Templates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.name} (v{template.version})
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => updateField('phase2PromptB', value)}
+                options={phase2PromptBOptions}
+                placeholder="Select a template…"
+              />
               <FieldError message={fieldErrors.phase2_prompt_b} />
             </div>
           </div>
@@ -439,22 +490,14 @@ export default function ExperimentBuilder() {
                 <FieldError message={fieldErrors.phase3_temperature} />
               </div>
               <div>
-                <label htmlFor="phase3-prompt" className="block text-xs font-medium text-gray-700">
-                  Phase 3 prompt
-                </label>
-                <select
+                <SearchableSelect
                   id="phase3-prompt"
+                  label="Phase 3 prompt"
                   value={form.phase3Prompt}
-                  onChange={(event) => updateField('phase3Prompt', event.target.value)}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-                >
-                  <option value="">Select a template…</option>
-                  {phase3Templates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name} (v{template.version})
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => updateField('phase3Prompt', value)}
+                  options={phase3PromptOptions}
+                  placeholder="Select a template…"
+                />
                 <FieldError message={fieldErrors.phase3_prompt} />
               </div>
             </div>
@@ -527,22 +570,17 @@ export default function ExperimentBuilder() {
 
           {!form.generateSystems && (
             <div>
-              <label htmlFor="target-system" className="block text-xs font-medium text-gray-700">
-                Target system
-              </label>
-              <select
+              <SearchableSelect
                 id="target-system"
+                label="Target system"
                 value={form.targetSystem}
-                onChange={(event) => updateField('targetSystem', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a system…</option>
-                {selectableSystems.map((system) => (
-                  <option key={system.id} value={system.id}>
-                    {system.title} ({ORIGIN_LABELS[system.origin] ?? system.origin})
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => updateField('targetSystem', value)}
+                options={selectableSystems.map((system) => ({
+                  value: String(system.id),
+                  label: `${system.title} (${ORIGIN_LABELS[system.origin] ?? system.origin})`,
+                }))}
+                placeholder="Select a system…"
+              />
               <FieldError message={fieldErrors.target_system} />
             </div>
           )}

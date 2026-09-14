@@ -22,6 +22,7 @@ import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
 import ParsedOutput from '../components/ParsedOutput';
 import PromptRuns from '../components/PromptRuns';
+import SearchableSelect from '../components/SearchableSelect';
 import SidePanel from '../components/SidePanel';
 import ScenarioPicker, { NoScenariosNotice, useScenarioGroups } from '../components/ScenarioPicker';
 import StatusBadge from '../components/StatusBadge';
@@ -805,26 +806,20 @@ export default function PromptEditor() {
           </p>
           {(phase === 3 || variant === 'B') && (
             <div>
-              <label htmlFor="preview-taxonomy" className="block text-xs font-medium text-gray-700">
-                Taxonomy
-              </label>
-              <select
+              <SearchableSelect
                 id="preview-taxonomy"
+                label="Taxonomy"
                 value={previewTaxonomyValue}
-                onChange={(event) => {
-                  setPreviewTaxonomyId(event.target.value);
+                onChange={(value) => {
+                  setPreviewTaxonomyId(value);
                   clearPreviewState();
                 }}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a taxonomy…</option>
-                {taxonomies.map((taxonomy) => (
-                  <option key={taxonomy.id} value={taxonomy.id}>
-                    {taxonomy.vocabulary_id} v{taxonomy.version}
-                    {taxonomy.is_active ? ' (active)' : ''}
-                  </option>
-                ))}
-              </select>
+                options={taxonomies.map((taxonomy) => ({
+                  value: String(taxonomy.id),
+                  label: `${taxonomy.vocabulary_id} v${taxonomy.version}${taxonomy.is_active ? ' (active)' : ''}`,
+                }))}
+                placeholder="Select a taxonomy…"
+              />
             </div>
           )}
           {phase === 3 && (

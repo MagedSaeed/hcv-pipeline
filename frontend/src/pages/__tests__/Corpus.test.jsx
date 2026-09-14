@@ -5,6 +5,7 @@ import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
+import { pickOption } from '../../test/pickOption';
 
 // The new "System (scenarios)" select renders every system's TITLE as an
 // <option> - the same text a system's own row heading shows. Left at the
@@ -248,23 +249,27 @@ beforeEach(() => {
   );
 });
 
-// The run/generation-run/system selects populate from their own queries
-// (pipeline runs, phase-2 runs, systems) - wait for the target option to
-// actually be there before picking it, rather than racing the fetch.
-async function selectWhenReady(user, field, value) {
-  await waitFor(() => expect(field.querySelector(`option[value="${value}"]`)).toBeTruthy());
-  await user.selectOptions(field, value);
-}
-
 // Every control below applies on the fly (no Apply button any more) - each
 // select is driven by its option VALUE (a numeric id), never its visible
-// label text, so these calls stay agnostic to the exact label wording.
+// label text, so these calls stay agnostic to the exact label wording. The
+// run/generation-run/system fields are now SearchableSelect comboboxes
+// (live-filters round) - `pickOption` opens one, waits for its option to
+// actually be there (their lists populate from their own queries), then
+// clicks it, rather than racing the fetch.
 async function applyFilterForm(user, { origin, run, variant, phaseRun, system } = {}) {
   if (origin !== undefined) await user.selectOptions(screen.getByLabelText(/^origin$/i), origin);
-  if (run !== undefined) await selectWhenReady(user, await screen.findByLabelText(/experiment run/i), String(run));
+  if (run !== undefined) await pickOption(user, /experiment run/i, String(run));
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
-  if (phaseRun !== undefined) await selectWhenReady(user, await screen.findByLabelText(/generation run/i), String(phaseRun));
-  if (system !== undefined) await selectWhenReady(user, await screen.findByLabelText(/^system \(scenarios\)$/i), String(system));
+  if (phaseRun !== undefined) await pickOption(user, /generation run/i, String(phaseRun));
+  if (system !== undefined) await pickOption(user, /^system \(scenarios\)$/i, String(system));
+}
+
+// Generated rows (and the Run/Variant filters, which only ever apply to
+// them) are hidden until this is ticked - unchecked by default (live-
+// filters round, user feedback: "it makes sense only to show seed and
+// manual; the generated ones are accessible from their runs").
+async function includeGenerated(user) {
+  await user.click(await screen.findByLabelText(/include generated systems and scenarios/i));
 }
 
 describe('Corpus', () => {
@@ -280,15 +285,64 @@ describe('Corpus', () => {
     expect(await screen.findByText('Seed system')).toBeInTheDocument();
   });
 
+  // User feedback: "it makes sense only to show seed and manual; the
+  // generated ones are accessible from their runs. However, you can have a
+  // check (false by default) to include generated ones too."
+  it('hides generated rows and their filters by default; the checkbox reveals both', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/resources?tab=corpus'] });
+
+    await screen.findByText('Seed system');
+    expect(screen.getByText('Manual system')).toBeInTheDocument();
+    expect(screen.queryByText('System A')).not.toBeInTheDocument();
+    expect(screen.queryByText('System B')).not.toBeInTheDocument();
+    expect(screen.queryByText('System adhoc')).not.toBeInTheDocument();
+    // Counts in the headings match what is actually shown - 2 essential
+    // seed/manual rows + 55 manual filler rows, never the 3 generated ones.
+    const systemsHeading = screen.getByRole('heading', { name: /^system descriptions/i });
+    expect(systemsHeading).toHaveTextContent('(57)');
+
+    const checkbox = screen.getByLabelText(/include generated systems and scenarios/i);
+    expect(checkbox).not.toBeChecked();
+    // Only applicable-to-generated-rows controls are gone: the Run group
+    // and Variant, never Origin/Search/System (which still apply either way).
+    expect(screen.queryByLabelText(/experiment run/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/generation run/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^variant$/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^system \(scenarios\)$/i)).toBeInTheDocument();
+    // The Origin select itself only offers All/Seed/Manual while unchecked
+    // (`option` text stays off-limits to `getByText` in this file - see
+    // this file's own `configure` above - so its options are read by role).
+    const origin = screen.getByLabelText(/^origin$/i);
+    expect(within(origin).queryByRole('option', { name: /generated/i })).not.toBeInTheDocument();
+
+    await user.click(checkbox);
+    expect(await screen.findByText('System A')).toBeInTheDocument();
+    expect(screen.getByText('System B')).toBeInTheDocument();
+    expect(screen.getByText('System adhoc')).toBeInTheDocument();
+    expect(systemsHeading).toHaveTextContent('(60)');
+    expect(await screen.findByLabelText(/experiment run/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/generation run/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^variant$/i)).toBeInTheDocument();
+    expect(within(origin).getByRole('option', { name: /generated — all/i })).toBeInTheDocument();
+
+    // Clear resets the checkbox back off, hiding generated rows again.
+    await user.click(screen.getByRole('button', { name: /^clear$/i }));
+    expect(checkbox).not.toBeChecked();
+    await waitFor(() => expect(screen.queryByText('System A')).not.toBeInTheDocument());
+  });
+
   it('lists system descriptions and scenarios with origin badges', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
     const seedRow = screen.getByText('Seed system').closest('li');
     expect(within(seedRow).getByText('Seed')).toBeInTheDocument();
 
-    const generatedRow = screen.getByText('System A').closest('li');
-    expect(within(generatedRow).getByText('Generated')).toBeInTheDocument();
+    await includeGenerated(user);
+    const generatedRow = await screen.findByText('System A');
+    expect(within(generatedRow.closest('li')).getByText('Generated')).toBeInTheDocument();
 
     expect(screen.getByText('Manual narrative')).toBeInTheDocument();
     const scenarioRow = screen.getByText('Generated narrative A').closest('li');
@@ -296,8 +350,11 @@ describe('Corpus', () => {
   });
 
   it('a generated row is read-only and the UI states why', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
+    await screen.findByText('Seed system');
+    await includeGenerated(user);
     await screen.findByText('System A');
     const generatedRow = screen.getByText('System A').closest('li');
     expect(within(generatedRow).queryByRole('button', { name: /edit/i })).not.toBeInTheDocument();
@@ -327,6 +384,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { run: 101 });
 
     expect(await screen.findByText('System A')).toBeInTheDocument();
@@ -340,6 +398,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { phaseRun: 203 });
 
     expect(await screen.findByText('System adhoc')).toBeInTheDocument();
@@ -366,9 +425,12 @@ describe('Corpus', () => {
   // serializers.py), so this must hold with NO phase-run filter applied at
   // all - the exact case the old implementation could not catch.
   it('marks scratch rows with a per-row badge wherever they appear, not only under the phase-run filter', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
+    await screen.findByText('System adhoc');
     const adhocRow = screen.getByText('System adhoc').closest('li');
     expect(within(adhocRow).getByText(/^test run$/i)).toBeInTheDocument();
     expect(adhocRow).toHaveTextContent(/made by a prompt test/i);
@@ -393,6 +455,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { phaseRun: 203 });
     await screen.findByText('System adhoc');
 
@@ -413,6 +476,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { phaseRun: 204 }); // still queued - see PHASE_RUNS_SEED
     // Not `findByRole('status')` - no corpus row is generated by #204, so
     // both "no X match" EmptyStates (also `role="status"`) render alongside
@@ -432,6 +496,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] }); // researcher@example.com - not staff, see beforeEach
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { phaseRun: 203 });
     await screen.findByText('System adhoc');
 
@@ -443,6 +508,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
 
     await applyFilterForm(user, { origin: 'generated' });
     expect(await screen.findByText('System A')).toBeInTheDocument();
@@ -465,6 +531,7 @@ describe('Corpus', () => {
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
     await screen.findByText('Seed system');
+    await includeGenerated(user);
     await applyFilterForm(user, { system: 3, variant: 'A' });
 
     expect(await screen.findByText('Generated narrative A')).toBeInTheDocument();
@@ -545,6 +612,7 @@ describe('Generated rows', () => {
     );
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
+    await includeGenerated(user);
     await user.click(await screen.findByRole('button', { name: /how was this generated/i }));
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByRole('link', { name: 'default-generation-variant-b v3' })).toHaveAttribute('href', '/prompts/12');
@@ -579,6 +647,7 @@ describe('Scratch rows', () => {
     );
     renderApp({ initialEntries: ['/resources?tab=corpus'] });
 
+    await includeGenerated(user);
     expect(await screen.findByText('Experiment grid')).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText(/^origin$/i), 'generated-scratch');
     await waitFor(() => expect(screen.queryByText('Experiment grid')).not.toBeInTheDocument());

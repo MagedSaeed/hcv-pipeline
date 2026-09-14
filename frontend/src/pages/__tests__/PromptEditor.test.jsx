@@ -674,7 +674,7 @@ describe('PromptEditor', () => {
     renderApp({ initialEntries: ['/prompts/3/edit'] });
 
     await screen.findByText(/editing: variant b/i);
-    expect(screen.getByLabelText(/^taxonomy$/i)).toHaveValue('2');
+    expect(screen.getByLabelText(/^taxonomy$/i)).toHaveTextContent('hcv-21 v2 (active)');
 
     const saveButton = screen.getByRole('button', { name: /^save$/i });
     expect(saveButton).toBeDisabled();

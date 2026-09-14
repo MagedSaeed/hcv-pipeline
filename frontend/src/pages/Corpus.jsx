@@ -18,6 +18,7 @@ import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import GenerationProvenance from '../components/GenerationProvenance';
 import Modal from '../components/Modal';
+import SearchableSelect from '../components/SearchableSelect';
 
 // corpus.models.Origin.choices.
 const ORIGIN_LABELS = { seed: 'Seed', generated: 'Generated', manual: 'Manual' };
@@ -95,7 +96,27 @@ function OriginBadge({ origin }) {
   );
 }
 
+// A labelled cluster of filter controls within the filter bar's second row
+// (e.g. "Where it came from", "Run") - just a caption over a small grid, so
+// related controls read as one group instead of seven look-alike boxes.
+function FilterGroup({ caption, children }) {
+  return (
+    <div className="space-y-3 rounded-md border border-gray-200 bg-gray-50/60 p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{caption}</p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{children}</div>
+    </div>
+  );
+}
+
+const NATIVE_SELECT_CLASS = 'mt-1 block h-9 w-full rounded-md border border-gray-300 px-2 text-sm shadow-sm';
+
 const emptyFilters = { origin: '', run: '', variant: '', phaseRun: '', system: '' };
+
+// User feedback: "it makes sense only to show seed and manual; the
+// generated ones are accessible from their runs" - generated rows stay
+// hidden unless this is on (default off). Origin/run/variant only ever
+// narrow WITHIN whatever this toggle already includes.
+const DEFAULT_INCLUDE_GENERATED = false;
 
 // `?origin=&run=&variant=&phase_run=` apply to both system descriptions and
 // scenarios; `?system=` exists only on the scenarios endpoint (spec §9).
@@ -389,6 +410,7 @@ export default function Corpus() {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [confirmingDeletePhaseRun, setConfirmingDeletePhaseRun] = useState(false);
+  const [includeGenerated, setIncludeGenerated] = useState(DEFAULT_INCLUDE_GENERATED);
   const deletePhaseRun = useDeletePhaseRun();
 
   // The only debounced control - the selects below apply on the fly, but a
@@ -402,6 +424,25 @@ export default function Corpus() {
     setFilters(emptyFilters);
     setSearchInput('');
     setSearch('');
+    setIncludeGenerated(DEFAULT_INCLUDE_GENERATED);
+  }
+
+  // Turning generated rows off also drops the filters that only ever apply
+  // to them (Run/Generation run/Variant) - keeping a hidden filter selected
+  // would silently narrow nothing once its own controls are gone. A
+  // generated-only Origin choice falls back to "All origins" for the same
+  // reason; Seed/Manual stay exactly as chosen.
+  function handleIncludeGeneratedChange(checked) {
+    setIncludeGenerated(checked);
+    if (!checked) {
+      setFilters((current) => ({
+        ...current,
+        run: '',
+        phaseRun: '',
+        variant: '',
+        origin: current.origin === 'seed' || current.origin === 'manual' ? current.origin : '',
+      }));
+    }
   }
 
   const systemsQuery = useSystemDescriptions(buildParams(filters, { includeSystem: false }));
@@ -413,11 +454,13 @@ export default function Corpus() {
   const phaseRunId = filters.phaseRun ? Number(filters.phaseRun) : null;
   const phaseRunQuery = usePhaseRun(phaseRunId);
 
-  // Options for the "Experiment run" and "Generation run" selects.
-  const pipelineRunsQuery = usePipelineRuns();
-  const experimentsQuery = useExperiments();
-  const generationRunsQuery = usePhaseRuns({ phase: 2 });
-  const promptsQuery = usePromptTemplates({ phase: 2 });
+  // Options for the "Experiment run" and "Generation run" selects - both
+  // fields (and what they back) only matter once generated rows are
+  // included, so there is nothing to fetch until then.
+  const pipelineRunsQuery = usePipelineRuns({}, { enabled: includeGenerated });
+  const experimentsQuery = useExperiments({}, { enabled: includeGenerated });
+  const generationRunsQuery = usePhaseRuns({ phase: 2 }, { enabled: includeGenerated });
+  const promptsQuery = usePromptTemplates({ phase: 2 }, { enabled: includeGenerated });
   const pipelineRunsById = byId(pipelineRunsQuery.data);
   const experimentsById = byId(experimentsQuery.data);
   const promptsById = byId(promptsQuery.data);
@@ -447,7 +490,11 @@ export default function Corpus() {
     return { value: String(run.id), label: [head, ...details].join(' · ') };
   });
 
-  const systemOptions = [...(systemOptionsQuery.data?.results ?? [])].sort((a, b) => a.title.localeCompare(b.title));
+  // Generated systems are excluded here too while hidden - offering one as
+  // a "System (scenarios)" choice would only ever show zero rows.
+  const systemOptions = [...(systemOptionsQuery.data?.results ?? [])]
+    .filter((system) => includeGenerated || system.origin !== 'generated')
+    .sort((a, b) => a.title.localeCompare(b.title));
 
   // Iterate-mode phase runs are ad-hoc: `pipeline_run` is null (spec §5.4).
   // Corpus rows now carry their own `is_scratch` directly (task 10.5, see
@@ -461,11 +508,15 @@ export default function Corpus() {
 
   const scratchOnly = { 'generated-scratch': true, 'generated-experiment': false }[filters.origin];
   const matchesScratch = (row) => scratchOnly === undefined || row.is_scratch === scratchOnly;
+  // The toggle's own exclusion - client-side, so the headings' counts below
+  // always match exactly what is actually shown, regardless of what the
+  // API itself was asked to filter by.
+  const matchesIncludeGenerated = (row) => includeGenerated || row.origin !== 'generated';
   const searchWords = search.toLowerCase().split(/\s+/).filter(Boolean);
   const matchesSearch = (text) => searchWords.every((word) => text.includes(word));
 
-  const allSystems = (systemsQuery.data?.results ?? []).filter(matchesScratch);
-  const allScenarios = (scenariosQuery.data?.results ?? []).filter(matchesScratch);
+  const allSystems = (systemsQuery.data?.results ?? []).filter(matchesScratch).filter(matchesIncludeGenerated);
+  const allScenarios = (scenariosQuery.data?.results ?? []).filter(matchesScratch).filter(matchesIncludeGenerated);
   const systemTitleById = new Map(allSystems.map((system) => [system.id, system.title]));
 
   const systems = allSystems.filter((system) => matchesSearch(`${system.title} ${system.body}`.toLowerCase()));
@@ -493,119 +544,116 @@ export default function Corpus() {
 
   return (
     <div className="space-y-8">
-      <div
-        role="group"
-        aria-label="Corpus filters"
-        className="grid grid-cols-2 gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7"
-      >
-        <div>
-          <label htmlFor="filter-origin" className="block text-xs font-medium text-gray-700">
-            Origin
-          </label>
-          <select
-            id="filter-origin"
-            value={filters.origin}
-            onChange={(event) => setFilters((current) => ({ ...current, origin: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">All origins</option>
-            <option value="seed">Seed</option>
-            <option value="generated">Generated — all</option>
-            <option value="generated-experiment">Generated — experiment runs</option>
-            <option value="generated-scratch">Generated — prompt tests</option>
-            <option value="manual">Manual</option>
-          </select>
-        </div>
-        <div>
-          <label htmlFor="filter-run" className="block text-xs font-medium text-gray-700">
-            Experiment run
-          </label>
-          <select
-            id="filter-run"
-            value={filters.run}
-            onChange={(event) => setFilters((current) => ({ ...current, run: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">All experiment runs</option>
-            {experimentRunOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="filter-phase-run" className="block text-xs font-medium text-gray-700">
-            Generation run
-          </label>
-          <select
-            id="filter-phase-run"
-            value={filters.phaseRun}
-            onChange={(event) => setFilters((current) => ({ ...current, phaseRun: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">All generation runs</option>
-            {generationRunOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="filter-variant" className="block text-xs font-medium text-gray-700">
-            Variant
-          </label>
-          <select
-            id="filter-variant"
-            value={filters.variant}
-            onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">All variants</option>
-            <option value="A">A</option>
-            <option value="B">B</option>
-          </select>
-        </div>
-        <div>
-          <label htmlFor="filter-system" className="block text-xs font-medium text-gray-700">
-            System (scenarios)
-          </label>
-          <select
-            id="filter-system"
-            value={filters.system}
-            onChange={(event) => setFilters((current) => ({ ...current, system: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">All systems</option>
-            {systemOptions.map((system) => (
-              <option key={system.id} value={system.id}>
-                {system.title}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="filter-search" className="block text-xs font-medium text-gray-700">
-            Search
-          </label>
-          <input
-            id="filter-search"
-            type="search"
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="Title, body, scenario text…"
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          />
-        </div>
-        <div className="flex items-end">
+      <div role="group" aria-label="Corpus filters" className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <label htmlFor="filter-search" className="block text-xs font-medium text-gray-700">
+              Search
+            </label>
+            <input
+              id="filter-search"
+              type="search"
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+              placeholder="Title, body, scenario text…"
+              className={NATIVE_SELECT_CLASS}
+            />
+          </div>
           <button
             type="button"
             onClick={handleClear}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+            className="h-9 shrink-0 rounded-md border border-gray-300 px-3 text-sm font-medium text-gray-700 hover:bg-gray-100"
           >
             Clear
           </button>
+        </div>
+
+        <label htmlFor="filter-include-generated" className="flex items-center gap-2 text-sm text-gray-700">
+          <input
+            id="filter-include-generated"
+            type="checkbox"
+            checked={includeGenerated}
+            onChange={(event) => handleIncludeGeneratedChange(event.target.checked)}
+          />
+          Include generated systems and scenarios
+        </label>
+
+        <div className={`grid grid-cols-1 gap-4 ${includeGenerated ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+          <FilterGroup caption="Where it came from">
+            <div>
+              <label htmlFor="filter-origin" className="block text-xs font-medium text-gray-700">
+                Origin
+              </label>
+              <select
+                id="filter-origin"
+                value={filters.origin}
+                onChange={(event) => setFilters((current) => ({ ...current, origin: event.target.value }))}
+                className={NATIVE_SELECT_CLASS}
+              >
+                <option value="">All origins</option>
+                <option value="seed">Seed</option>
+                {includeGenerated && <option value="generated">Generated — all</option>}
+                {includeGenerated && <option value="generated-experiment">Generated — experiment runs</option>}
+                {includeGenerated && <option value="generated-scratch">Generated — prompt tests</option>}
+                <option value="manual">Manual</option>
+              </select>
+            </div>
+            {includeGenerated && (
+              <div>
+                <label htmlFor="filter-variant" className="block text-xs font-medium text-gray-700">
+                  Variant
+                </label>
+                <select
+                  id="filter-variant"
+                  value={filters.variant}
+                  onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
+                  className={NATIVE_SELECT_CLASS}
+                >
+                  <option value="">All variants</option>
+                  <option value="A">A</option>
+                  <option value="B">B</option>
+                </select>
+              </div>
+            )}
+          </FilterGroup>
+
+          {includeGenerated && (
+            <FilterGroup caption="Run">
+              <SearchableSelect
+                id="filter-run"
+                label="Experiment run"
+                value={filters.run}
+                onChange={(value) => {
+                  setFilters((current) => ({ ...current, run: value }));
+                  if (value) setIncludeGenerated(true);
+                }}
+                options={experimentRunOptions}
+                emptyLabel="All experiment runs"
+              />
+              <SearchableSelect
+                id="filter-phase-run"
+                label="Generation run"
+                value={filters.phaseRun}
+                onChange={(value) => {
+                  setFilters((current) => ({ ...current, phaseRun: value }));
+                  if (value) setIncludeGenerated(true);
+                }}
+                options={generationRunOptions}
+                emptyLabel="All generation runs"
+              />
+            </FilterGroup>
+          )}
+
+          <FilterGroup caption="System">
+            <SearchableSelect
+              id="filter-system"
+              label="System (scenarios)"
+              value={filters.system}
+              onChange={(value) => setFilters((current) => ({ ...current, system: value }))}
+              options={systemOptions.map((system) => ({ value: String(system.id), label: system.title }))}
+              emptyLabel="All systems"
+            />
+          </FilterGroup>
         </div>
       </div>
 

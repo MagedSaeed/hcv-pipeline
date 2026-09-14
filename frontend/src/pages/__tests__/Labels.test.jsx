@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { configure, screen, waitFor, within } from '@testing-library/react';
+import { configure, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated } from '../../test/mockApi';
+import { pickOption } from '../../test/pickOption';
 
 // The new "Experiment run" select renders "<experiment> · repetition N" as
 // <option> text, so its options never collide with a row's own text here -
@@ -299,15 +300,11 @@ beforeEach(() => {
 });
 
 // Every control below applies on the fly (no Apply button any more). The
-// run select populates from its own query (pipeline runs) - wait for the
-// target option to actually be there before picking it.
+// run field is a SearchableSelect (live-filters round) - it populates from
+// its own query (pipeline runs), and `pickOption` waits for the target
+// option to actually be there before picking it.
 async function applyRunFilter(user, { run, variant, hcv } = {}) {
-  if (run !== undefined) {
-    const field = await screen.findByLabelText(/experiment run/i);
-    const value = run === '' ? '' : String(run);
-    if (value) await waitFor(() => expect(field.querySelector(`option[value="${value}"]`)).toBeTruthy());
-    await user.selectOptions(field, value);
-  }
+  if (run !== undefined) await pickOption(user, /experiment run/i, String(run));
   if (variant !== undefined) await user.selectOptions(screen.getByLabelText(/^variant$/i), variant);
   if (hcv !== undefined) await user.selectOptions(screen.getByLabelText(/^hcv$/i), hcv);
 }
@@ -523,7 +520,7 @@ describe('Labels', () => {
 
     // No "Apply filters" click needed - the matrices render straight away.
     expect(await screen.findByRole('rowheader', { name: /System Alpha \/ sc_01/ })).toBeInTheDocument();
-    expect(screen.getByLabelText(/experiment run/i)).toHaveValue('101');
+    expect(screen.getByLabelText(/experiment run/i)).toHaveTextContent(/oldsmar pilot.*repetition 1/i);
   });
 
   it('selecting an experiment run applies immediately, with no Apply button anywhere on the page', async () => {

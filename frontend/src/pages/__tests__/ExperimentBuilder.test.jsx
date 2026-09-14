@@ -5,6 +5,7 @@ import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginate, paginated, requireCsrf, requireStaff } from '../../test/mockApi';
+import { pickOption } from '../../test/pickOption';
 import { apiClient } from '../../api/client';
 
 // The OpenRouter catalogue shape llm/models_api.py's AvailableModelsView
@@ -51,6 +52,14 @@ const TEMPLATES_SEED = [
   { id: 4, phase: 2, name: 'default-generation-variant-a', version: 1, system_prompt: '', user_prompt: 'Default A', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
   { id: 5, phase: 2, name: 'default-generation-variant-b', version: 1, system_prompt: '', user_prompt: 'Default B', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
   { id: 6, phase: 3, name: 'default-labelling', version: 1, system_prompt: '', user_prompt: 'Default label', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  // Live only on one variant - the grouped-prompt-fields round's own
+  // "each field lists only its own stored variant" rule.
+  { id: 62, phase: 2, name: 'phase2-only-a', variant: 'A', version: 1, system_prompt: '', user_prompt: 'A only', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  { id: 63, phase: 2, name: 'phase2-only-b', variant: 'B', version: 1, system_prompt: '', user_prompt: 'B only', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  // Two saved versions of the same name - the ONE prompt in this fixture
+  // that groups behind a toggle rather than rendering as a flat leaf.
+  { id: 60, phase: 2, name: 'multi-version-prompt', variant: 'A', version: 1, system_prompt: '', user_prompt: 'V1', output_schema: {}, is_active: false, created_by: 3, created_at: '2026-01-01T00:00:00Z' },
+  { id: 61, phase: 2, name: 'multi-version-prompt', variant: 'A', version: 2, system_prompt: '', user_prompt: 'V2', output_schema: {}, is_active: true, created_by: 3, created_at: '2026-01-02T00:00:00Z' },
   ...PAGINATION_FILLER_TEMPLATES,
 ];
 
@@ -168,17 +177,6 @@ beforeEach(() => {
 // cleanly, so a test can then deliberately corrupt exactly one thing and
 // see that ONE field error land in the right place - never fighting five
 // unrelated "required" errors at once.
-// Selects an option only once it has actually loaded - the field itself
-// (label + <select>/<input>) can exist on the very first render, well
-// before the async query populating its options resolves; selecting
-// against it too early is exactly the race PromptEditor.test.jsx's own
-// `selectTemplate` helper already guards against.
-async function selectOnceLoaded(user, label, optionText, value, selectorOpts) {
-  const field = await screen.findByLabelText(label, selectorOpts);
-  await within(field).findByText(optionText);
-  await user.selectOptions(field, value);
-}
-
 // ModelPicker (task C) is a searchable combobox, not a native <select> -
 // open it, type the model's id to narrow the list to one row, then click
 // that row (found by the id ModelPicker itself puts on the option's
@@ -193,12 +191,12 @@ async function pickModel(user, label, modelId) {
 
 async function fillMinimalValidForm(user, { name = 'Baseline comparison' } = {}) {
   await user.type(screen.getByLabelText(/^name$/i), name);
-  await selectOnceLoaded(user, /^taxonomy$/i, /active/i, '2'); // active taxonomy, from server.js's TAXONOMIES_SEED
+  await pickOption(user, /^taxonomy$/i, '2'); // active taxonomy, from server.js's TAXONOMIES_SEED
   await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
-  await selectOnceLoaded(user, /variant a/i, 'gen-a (v1)', '1', { selector: 'select' });
-  await selectOnceLoaded(user, /variant b/i, 'gen-b (v1)', '2', { selector: 'select' });
+  await pickOption(user, /variant a/i, '1'); // gen-a (v1)
+  await pickOption(user, /variant b/i, '2'); // gen-b (v1)
   await pickModel(user, /^phase 3 model$/i, 'openai/gpt-4o-mini');
-  await selectOnceLoaded(user, /^phase 3 prompt$/i, 'label (v1)', '3');
+  await pickOption(user, /^phase 3 prompt$/i, '3'); // label (v1)
 }
 
 describe('ExperimentBuilder', () => {
@@ -224,17 +222,22 @@ describe('ExperimentBuilder', () => {
   });
 
   it('selects a phase-2 prompt per variant, and a phase-3 prompt', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/experiments/new'] });
 
-    const variantA = await screen.findByLabelText(/variant a/i, { selector: 'select' });
-    const variantB = screen.getByLabelText(/variant b/i, { selector: 'select' });
-    expect(await within(variantA).findByText('gen-a (v1)')).toBeInTheDocument();
-    expect(await within(variantB).findByText('gen-b (v1)')).toBeInTheDocument();
+    const variantA = await screen.findByRole('combobox', { name: /variant a/i });
+    await user.click(variantA);
+    expect(await screen.findByTestId('phase2-prompt-a-option-1')).toHaveTextContent('gen-a (v1)');
 
-    const phase3Prompt = screen.getByLabelText(/^phase 3 prompt$/i);
-    expect(await within(phase3Prompt).findByText('label (v1)')).toBeInTheDocument();
+    const variantB = screen.getByRole('combobox', { name: /variant b/i });
+    await user.click(variantB);
+    expect(await screen.findByTestId('phase2-prompt-b-option-2')).toHaveTextContent('gen-b (v1)');
+
+    const phase3Prompt = screen.getByRole('combobox', { name: /^phase 3 prompt$/i });
+    await user.click(phase3Prompt);
+    expect(await screen.findByTestId('phase3-prompt-option-3')).toHaveTextContent('label (v1)');
     // Phase-2 templates must never leak into the phase-3 dropdown.
-    expect(within(phase3Prompt).queryByText('gen-a (v1)')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('phase3-prompt-option-1')).not.toBeInTheDocument();
   });
 
   it('selects taxonomy, seed systems, few-shots, both toggles, counts and variants', async () => {
@@ -249,6 +252,10 @@ describe('ExperimentBuilder', () => {
 
     const nSystems = screen.getByLabelText(/systems per repetition/i);
     const nScenarios = screen.getByLabelText(/scenarios per system/i);
+    // A brand-new experiment defaults to 1 system × 3 scenarios (matching
+    // the backend model's own new default), not the old 3 × 5.
+    expect(nSystems).toHaveValue(1);
+    expect(nScenarios).toHaveValue(3);
     await user.clear(nSystems);
     await user.type(nSystems, '4');
     await user.clear(nScenarios);
@@ -274,19 +281,86 @@ describe('ExperimentBuilder', () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/experiments/new'] });
 
-    const variantA = await screen.findByLabelText(/variant a/i, { selector: 'select' });
+    const variantA = await screen.findByRole('combobox', { name: /variant a/i });
     await within(variantA).findByText('default-generation-variant-a (v1)');
-    expect(variantA).toHaveValue('4');
 
-    const variantB = screen.getByLabelText(/variant b/i, { selector: 'select' });
-    expect(variantB).toHaveValue('5');
+    const variantB = screen.getByRole('combobox', { name: /variant b/i });
+    expect(within(variantB).getByText('default-generation-variant-b (v1)')).toBeInTheDocument();
 
-    const phase3Prompt = screen.getByLabelText(/^phase 3 prompt$/i);
-    expect(phase3Prompt).toHaveValue('6');
+    const phase3Prompt = screen.getByRole('combobox', { name: /^phase 3 prompt$/i });
+    expect(within(phase3Prompt).getByText('default-labelling (v1)')).toBeInTheDocument();
 
     // Still a free choice - picking something else overrides the preselected default.
-    await user.selectOptions(variantA, '1');
-    expect(variantA).toHaveValue('1');
+    await pickOption(user, /variant a/i, '1');
+    expect(within(variantA).getByText('gen-a (v1)')).toBeInTheDocument();
+  });
+
+  it('auto-preselects the active taxonomy on a brand-new experiment, and a later pick still wins', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    // Taxonomy id 2 ("hcv-21 v2") is the active one - server.js's own
+    // TAXONOMIES_SEED - so it fills in on its own with nothing clicked.
+    const taxonomy = await screen.findByRole('combobox', { name: /^taxonomy$/i });
+    await within(taxonomy).findByText(/hcv-21 v2 \(active\)/i);
+
+    // Still a free choice - picking something else overrides it.
+    await pickOption(user, /^taxonomy$/i, '1');
+    expect(within(taxonomy).getByText(/hcv-21 v1/i)).toBeInTheDocument();
+  });
+
+  // Grouped-prompt-fields round: "instead of listing versions... only list
+  // the prompts with a triangle collapse for each prompt for versions when
+  // applicable" - `multi-version-prompt` (ids 60/61) is the one fixture
+  // template with two saved versions.
+  it('a prompt with several saved versions collapses behind a toggle, defaulting to its active version', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    const variantA = await screen.findByRole('combobox', { name: /variant a/i });
+    await user.click(variantA);
+    // v2 (id 61) is the active version - it, not v1, is what the group row
+    // itself resolves to.
+    const groupRow = await screen.findByTestId('phase2-prompt-a-option-61');
+    expect(groupRow).toHaveTextContent('multi-version-prompt');
+    expect(groupRow).not.toHaveTextContent('v1');
+    // No version rows yet - collapsed by default.
+    expect(screen.queryByTestId('phase2-prompt-a-version-60')).not.toBeInTheDocument();
+
+    // Clicking the row itself (not the toggle) picks the active version.
+    await user.click(groupRow);
+    expect(within(variantA).getByText('multi-version-prompt (v2)')).toBeInTheDocument();
+
+    // Reopening shows its versions already expanded, since the current
+    // selection (v2) belongs to this group - pick the OLDER version instead.
+    await user.click(variantA);
+    expect(await screen.findByTestId('phase2-prompt-a-version-60')).toHaveTextContent('v1');
+    await user.click(screen.getByTestId('phase2-prompt-a-version-60'));
+    expect(within(variantA).getByText('multi-version-prompt (v1)')).toBeInTheDocument();
+
+    // Collapsing it back closed hides the version rows again.
+    await user.click(variantA);
+    await user.click(screen.getByRole('button', { name: /collapse multi-version-prompt versions/i }));
+    expect(screen.queryByTestId('phase2-prompt-a-version-61')).not.toBeInTheDocument();
+  });
+
+  it('each phase-2 prompt field lists only its own stored variant, plus any template with no variant set', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    const variantA = await screen.findByRole('combobox', { name: /variant a/i });
+    await user.click(variantA);
+    // Its own variant, and an unset-variant template (gen-a), both offered…
+    expect(await screen.findByTestId('phase2-prompt-a-option-62')).toHaveTextContent('phase2-only-a (v1)');
+    expect(screen.getByTestId('phase2-prompt-a-option-1')).toHaveTextContent('gen-a (v1)');
+    // …but never the OTHER variant's own template.
+    expect(screen.queryByTestId('phase2-prompt-a-option-63')).not.toBeInTheDocument();
+
+    const variantB = screen.getByRole('combobox', { name: /variant b/i });
+    await user.click(variantB);
+    expect(await screen.findByTestId('phase2-prompt-b-option-63')).toHaveTextContent('phase2-only-b (v1)');
+    expect(screen.getByTestId('phase2-prompt-b-option-2')).toHaveTextContent('gen-b (v1)');
+    expect(screen.queryByTestId('phase2-prompt-b-option-62')).not.toBeInTheDocument();
   });
 
   it("surfaces the API's validation errors field-by-field, never in a generic banner", async () => {
@@ -465,12 +539,15 @@ describe('ExperimentBuilder', () => {
   });
 
   it('the phase-2 prompt selects offer every template, not just the first 50 (fails if only page 1 is read)', async () => {
+    const user = userEvent.setup();
     renderApp({ initialEntries: ['/experiments/new'] });
 
-    // Phase 2 has gen-a + gen-b + 55 filler templates = 57 rows - one page
-    // (50) would drop the last 7, `filler-template-55` among them.
-    const variantA = await screen.findByLabelText(/variant a/i, { selector: 'select' });
-    expect(await within(variantA).findByText(/filler-template-55/)).toBeInTheDocument();
+    // Phase 2 has gen-a + gen-b + 55 filler templates = 57 rows (filler ids
+    // 100-154) - one page (50) would drop the last 7, `filler-template-55`
+    // (id 154) among them.
+    const variantA = await screen.findByRole('combobox', { name: /variant a/i });
+    await user.click(variantA);
+    expect(await screen.findByTestId('phase2-prompt-a-option-154')).toHaveTextContent(/filler-template-55/);
   });
 
   // Task 10.5: the backend refuses ANY generated-origin row as a seed or a
@@ -493,9 +570,10 @@ describe('ExperimentBuilder', () => {
 
     // Uncheck "generate systems" to reveal the Target system picker too.
     await user.click(screen.getByLabelText(/^generate systems$/i));
-    const targetSelect = screen.getByLabelText(/^target system$/i);
-    expect(within(targetSelect).getByText(/oldsmar water plant/i)).toBeInTheDocument();
-    expect(within(targetSelect).queryByText(/leaked system/i)).not.toBeInTheDocument();
+    const targetSelect = await screen.findByRole('combobox', { name: /^target system$/i });
+    await user.click(targetSelect);
+    expect(screen.getByTestId('target-system-option-10')).toHaveTextContent(/oldsmar water plant/i);
+    expect(screen.queryByText(/leaked system/i)).not.toBeInTheDocument();
   });
 
   it('the seed-system list and target-system picker offer every system, not just the first 50 (fails if only page 1 is read)', async () => {

@@ -12,6 +12,7 @@ import {
 } from '../api/queries';
 import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
+import SearchableSelect from '../components/SearchableSelect';
 
 // This screen is where the experiment's actual result is read, so it is
 // held to a stricter rule than every other screen in the app: it computes
@@ -325,26 +326,16 @@ export default function Labels() {
       <div
         role="group"
         aria-label="Labels filters"
-        className="grid grid-cols-1 gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid grid-cols-1 items-end gap-4 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-4"
       >
-        <div>
-          <label htmlFor="labels-filter-run" className="block text-xs font-medium text-gray-700">
-            Experiment run
-          </label>
-          <select
-            id="labels-filter-run"
-            value={filters.run}
-            onChange={(event) => setFilters((current) => ({ ...current, run: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-          >
-            <option value="">Choose a run…</option>
-            {runOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <SearchableSelect
+          id="labels-filter-run"
+          label="Experiment run"
+          value={filters.run}
+          onChange={(value) => setFilters((current) => ({ ...current, run: value }))}
+          options={runOptions}
+          placeholder="Choose a run…"
+        />
         <div>
           <label htmlFor="labels-filter-variant" className="block text-xs font-medium text-gray-700">
             Variant
@@ -353,7 +344,7 @@ export default function Labels() {
             id="labels-filter-variant"
             value={filters.variant}
             onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+            className="mt-1 block h-9 w-full rounded-md border border-gray-300 px-2 text-sm shadow-sm"
           >
             <option value="">All variants</option>
             <option value="A">A</option>
@@ -368,7 +359,7 @@ export default function Labels() {
             id="labels-filter-hcv"
             value={filters.hcv}
             onChange={(event) => setFilters((current) => ({ ...current, hcv: event.target.value }))}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+            className="mt-1 block h-9 w-full rounded-md border border-gray-300 px-2 text-sm shadow-sm"
           >
             <option value="">All HCVs</option>
             {hcvs.map((hcv) => (
@@ -378,11 +369,11 @@ export default function Labels() {
             ))}
           </select>
         </div>
-        <div className="flex items-end">
+        <div>
           <button
             type="button"
             onClick={handleClear}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+            className="h-9 rounded-md border border-gray-300 px-3 text-sm font-medium text-gray-700 hover:bg-gray-100"
           >
             Clear
           </button>

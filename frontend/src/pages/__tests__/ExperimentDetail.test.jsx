@@ -5,6 +5,7 @@ import { delay, http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginated, requireCsrf, requireStaff } from '../../test/mockApi';
+import { pickOption } from '../../test/pickOption';
 import { apiClient } from '../../api/client';
 
 // Task 10.3: this screen is the one place an already-created experiment
@@ -540,17 +541,14 @@ describe('ExperimentDetail', () => {
     renderApp({ initialEntries: ['/experiments/new'] });
     await screen.findByLabelText(/^name$/i);
     await user.type(screen.getByLabelText(/^name$/i), 'Baseline comparison');
-    await user.selectOptions(await screen.findByLabelText(/^taxonomy$/i), '2');
+    // Taxonomy auto-preselects (the active one), but pick it explicitly
+    // anyway so this flow doesn't depend on that default.
+    await pickOption(user, /^taxonomy$/i, '2');
     await pickModel(user, /^phase 2 model$/i, 'anthropic/claude-sonnet-4');
-    const variantASelect = await screen.findByLabelText(/variant a/i, { selector: 'select' });
-    await within(variantASelect).findByText('gen-a (v1)');
-    await user.selectOptions(variantASelect, '1');
-    const variantBSelect = screen.getByLabelText(/variant b/i, { selector: 'select' });
-    await user.selectOptions(variantBSelect, '2');
+    await pickOption(user, /variant a/i, '1'); // gen-a (v1)
+    await pickOption(user, /variant b/i, '2'); // gen-b (v1)
     await pickModel(user, /^phase 3 model$/i, 'openai/gpt-4o-mini');
-    const phase3PromptField = await screen.findByLabelText(/^phase 3 prompt$/i);
-    await within(phase3PromptField).findByText('label (v1)');
-    await user.selectOptions(phase3PromptField, '3');
+    await pickOption(user, /^phase 3 prompt$/i, '3'); // label (v1)
     await user.click(screen.getByRole('button', { name: /create experiment/i }));
 
     // 2. Landed on the detail screen; launching hits the 503.
