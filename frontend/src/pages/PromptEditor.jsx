@@ -177,8 +177,8 @@ export default function PromptEditor() {
   // taxonomy is used (see previewTaxonomyValue below).
   const [previewTaxonomyId, setPreviewTaxonomyId] = useState('');
   const [previewScenarioId, setPreviewScenarioId] = useState('');
-  const [previewNSystems, setPreviewNSystems] = useState('3');
-  const [previewNScenarios, setPreviewNScenarios] = useState('5');
+  const [previewNSystems, setPreviewNSystems] = useState('1');
+  const [previewNScenarios, setPreviewNScenarios] = useState('3');
 
   const [previewResult, setPreviewResult] = useState(null);
   const [previewError, setPreviewError] = useState(null);
@@ -193,7 +193,7 @@ export default function PromptEditor() {
   const [iterateModel, setIterateModel] = useState('');
   const [iterateTemperature, setIterateTemperature] = useState('0');
   const [iterateNSystems, setIterateNSystems] = useState('1');
-  const [iterateNScenarios, setIterateNScenarios] = useState('1');
+  const [iterateNScenarios, setIterateNScenarios] = useState('3');
   const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
   const [iterateRunId, setIterateRunId] = useState(null);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
@@ -379,8 +379,8 @@ export default function PromptEditor() {
         ? {
             variant,
             ...(variant === 'B' ? { taxonomy: Number(previewTaxonomyValue) } : {}),
-            n_systems: Number(previewNSystems || 3),
-            n_scenarios_per_system: Number(previewNScenarios || 5),
+            n_systems: Number(previewNSystems || 1),
+            n_scenarios_per_system: Number(previewNScenarios || 3),
           }
         : {
             taxonomy: Number(previewTaxonomyValue),
@@ -459,7 +459,7 @@ export default function PromptEditor() {
       body.experiment = Number(iterateExperimentId);
       if (phase === 2) {
         body.n_systems = Number(iterateNSystems || 1);
-        body.n_scenarios_per_system = Number(iterateNScenarios || 1);
+        body.n_scenarios_per_system = Number(iterateNScenarios || 3);
       }
     }
     try {

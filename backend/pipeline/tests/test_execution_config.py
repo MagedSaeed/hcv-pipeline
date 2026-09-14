@@ -794,8 +794,8 @@ def test_borrowing_with_no_experiment_set_still_uses_bare_defaults(templates, ta
 
     assert config["seed_systems"] == []
     assert config["fewshots"] == []
-    assert config["n_systems"] == 3
-    assert config["n_scenarios_per_system"] == 5
+    assert config["n_systems"] == 1
+    assert config["n_scenarios_per_system"] == 3
 
 
 @pytest.mark.django_db

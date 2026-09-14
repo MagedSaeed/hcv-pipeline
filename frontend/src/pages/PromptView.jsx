@@ -212,8 +212,8 @@ export default function PromptView() {
   const [renderScenarioId, setRenderScenarioId] = useState('');
   const [generateSystems, setGenerateSystems] = useState(true);
   const [generateScenarios, setGenerateScenarios] = useState(true);
-  const [nSystems, setNSystems] = useState('3');
-  const [nScenariosPerSystem, setNScenariosPerSystem] = useState('5');
+  const [nSystems, setNSystems] = useState('1');
+  const [nScenariosPerSystem, setNScenariosPerSystem] = useState('3');
   const [defaultsForId, setDefaultsForId] = useState(null);
   const [renderedResult, setRenderedResult] = useState(null);
 
@@ -284,8 +284,8 @@ export default function PromptView() {
           fewshots: fewshotIds.map(Number),
           generate_systems: generateSystems,
           generate_scenarios: generateScenarios,
-          n_systems: Number(nSystems || 3),
-          n_scenarios_per_system: Number(nScenariosPerSystem || 5),
+          n_systems: Number(nSystems || 1),
+          n_scenarios_per_system: Number(nScenariosPerSystem || 3),
         }
       : {
           taxonomy: Number(renderTaxonomyId),

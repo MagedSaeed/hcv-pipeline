@@ -91,8 +91,8 @@ class PreviewSerializer(serializers.Serializer):
     fewshots = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     generate_systems = serializers.BooleanField(required=False, default=True)
     generate_scenarios = serializers.BooleanField(required=False, default=True)
-    n_systems = serializers.IntegerField(required=False, default=3)
-    n_scenarios_per_system = serializers.IntegerField(required=False, default=5)
+    n_systems = serializers.IntegerField(required=False, default=1)
+    n_scenarios_per_system = serializers.IntegerField(required=False, default=3)
     target_system = serializers.IntegerField(required=False, allow_null=True)
     scenario = serializers.IntegerField(required=False, allow_null=True)
 

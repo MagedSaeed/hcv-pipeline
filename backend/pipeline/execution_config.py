@@ -237,8 +237,9 @@ _ADHOC_GENERATION_CONFIG = {
     "fewshots": [],
     "generate_systems": True,
     "generate_scenarios": True,
-    "n_systems": 3,
-    "n_scenarios_per_system": 5,
+    # Small on purpose: an iterate run is a quick test, not a full experiment.
+    "n_systems": 1,
+    "n_scenarios_per_system": 3,
     "target_system": None,
     "target_system_id": None,
 }
