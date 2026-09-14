@@ -3,6 +3,7 @@ import copy
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from corpus.models import Scenario
 from pipeline.models import (
     VARIANTS,
     Experiment,
@@ -37,6 +38,8 @@ from taxonomy.models import Taxonomy
 # one JSON body. The asymmetry with `Experiment.n_systems` is intentional,
 # not an oversight: nothing here caps what a real experiment can request.
 _ADHOC_OVERRIDE_MAX = 50
+# Most scenarios one ad-hoc labelling test may choose (`PhaseRun.scenario_ids`).
+_ADHOC_SCENARIOS_MAX = 200
 
 
 class ProgressField(serializers.Field):
@@ -220,6 +223,7 @@ class PhaseRunSerializer(serializers.ModelSerializer):
     progress = ProgressField()
     leak_scan_ran = serializers.SerializerMethodField()
     guarded_by = serializers.SerializerMethodField()
+    scenarios = serializers.JSONField(source="scenario_ids", read_only=True)
 
     class Meta:
         model = PhaseRun
@@ -233,6 +237,9 @@ class PhaseRunSerializer(serializers.ModelSerializer):
             "prompt_template",
             "taxonomy",
             "source_phase_run",
+            # The Scenario ids an ad-hoc labelling run was asked to label, or
+            # null when it labels `source_phase_run`'s output.
+            "scenarios",
             # The ad-hoc "borrow an experiment's live inputs" trio — see
             # `PhaseRun.experiment`'s own comment. Always present (null on
             # every orchestrated row, and on a bare ad-hoc one), so a client
@@ -374,6 +381,11 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
     # was submitted, so requiring it here would demand a value this
     # serializer is about to discard anyway.
     taxonomy = serializers.PrimaryKeyRelatedField(queryset=Taxonomy.objects.all(), required=False)
+    # Phase 3 only: label exactly these Scenario ids (any origin) instead of a
+    # source run's output. Stored as `PhaseRun.scenario_ids`.
+    scenarios = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_null=True
+    )
 
     class Meta:
         model = PhaseRun
@@ -386,6 +398,7 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
             "prompt_template",
             "taxonomy",
             "source_phase_run",
+            "scenarios",
             "experiment",
             "n_systems",
             "n_scenarios_per_system",
@@ -398,6 +411,12 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
         variant = attrs.get("variant", "")
         source = attrs.get("source_phase_run")
         experiment = attrs.get("experiment")
+        chosen = attrs.pop("scenarios", None)
+        if chosen is not None:
+            scenario_error = self._chosen_scenarios_error(phase, chosen, source)
+            if scenario_error:
+                errors["scenarios"] = scenario_error
+            attrs["scenario_ids"] = list(dict.fromkeys(chosen))
 
         if phase == 2:
             if variant not in VARIANTS:
@@ -407,12 +426,12 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
                     "generation — see PhaseRun.is_unbiased."
                 )
         elif phase == 3:
-            if source is None:
+            if source is None and chosen is None:
                 errors["source_phase_run"] = (
                     "A phase 3 (labelling) run needs source_phase_run — it is "
                     "where the scenarios to label come from."
                 )
-            elif source.phase != 2:
+            elif source is not None and source.phase != 2:
                 errors["source_phase_run"] = (
                     f"source_phase_run must be a phase 2 (generation) run; "
                     f"{source} is phase {source.phase}."
@@ -490,6 +509,21 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
+
+    @staticmethod
+    def _chosen_scenarios_error(phase, chosen, source):
+        if phase != 3:
+            return "Choosing scenarios applies only to a labelling run."
+        if source is not None:
+            return "Choose either scenarios to label or a generation run, not both."
+        ids = set(chosen)
+        if not ids:
+            return "Choose at least one scenario to label."
+        if len(ids) > _ADHOC_SCENARIOS_MAX:
+            return f"Choose at most {_ADHOC_SCENARIOS_MAX} scenarios for one test run."
+        if Scenario.objects.filter(id__in=ids).count() != len(ids):
+            return "Some chosen scenarios no longer exist. Refresh the list and choose again."
+        return None
 
 
 class LLMCallSerializer(serializers.ModelSerializer):

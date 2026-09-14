@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Q, Sum
 
 from prompts.rendering import VARIANT_GUIDED, VARIANT_UNBIASED, unscannable_hcv_rows
 from taxonomy.models import Taxonomy
@@ -797,6 +797,9 @@ class PhaseRun(models.Model):
     # (read by nothing) without `experiment` set, and for a phase-3 run.
     n_systems = models.PositiveIntegerField(null=True, blank=True)
     n_scenarios_per_system = models.PositiveIntegerField(null=True, blank=True)
+    # Ad-hoc phase-3 runs only: the exact Scenario ids a researcher chose to
+    # label (seed, manual or generated). None means "use source_phase_run".
+    scenario_ids = models.JSONField(null=True, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     error = models.TextField(blank=True, default="")
     total_children = models.PositiveIntegerField(default=0)
@@ -808,6 +811,12 @@ class PhaseRun(models.Model):
 
     class Meta:
         ordering = ["-id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(scenario_ids__isnull=True) | Q(phase=3, pipeline_run__isnull=True),
+                name="scenario_ids_only_on_adhoc_labelling",
+            )
+        ]
 
     def __str__(self):
         label = f"phase {self.phase}"

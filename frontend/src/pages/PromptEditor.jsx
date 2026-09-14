@@ -11,7 +11,6 @@ import {
   usePhaseRunCalls,
   usePreviewPromptTemplate,
   usePromptTemplates,
-  useScenarios,
   useTaxonomies,
   useUpdatePromptTemplate,
 } from '../api/queries';
@@ -21,47 +20,47 @@ import ErrorBanner from '../components/ErrorBanner';
 import ModelPicker from '../components/ModelPicker';
 import ParsedOutput from '../components/ParsedOutput';
 import SidePanel from '../components/SidePanel';
-import SourceRunPicker, { NoLabellableRunsNotice, useLabellableRuns } from '../components/SourceRunPicker';
+import ScenarioPicker, { NoScenariosNotice, useScenarioGroups } from '../components/ScenarioPicker';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
 
 const PHASE_LABELS = { 2: 'Phase 2 — generation', 3: 'Phase 3 — labelling' };
 
-// prompts/rendering.py's VARIANT_UNBIASED/VARIANT_GUIDED. Spelled out in
-// full here rather than just "A"/"B" - this label is the whole point of
-// the variant selector below (spec §10: "the editor... must say plainly
-// which variant it is").
+// prompts/rendering.py's VARIANT_UNBIASED/VARIANT_GUIDED, spelled out in full:
+// the editor must say plainly which variant it is.
 const VARIANT_COPY = {
   A: { label: 'Variant A', detail: 'taxonomy WITHHELD — must never reference {{ taxonomy }}' },
   B: { label: 'Variant B', detail: 'taxonomy SUPPLIED — renders with the taxonomy in scope' },
 };
 
 const SCRATCH_NOTICE =
-  'Iterate runs are scratch: never archived, never included in any export bundle (spec §9) — ' +
-  'even a run that succeeds leaves no trace beyond what you see on this screen right now.';
+  'Test runs are scratch: they are never archived or exported. Even a successful run leaves ' +
+  'no trace beyond what you see here.';
 
-const DELETE_ITERATE_RUN_MESSAGE =
-  'Its generated material — every system description and scenario it produced — goes with it. ' +
-  'There is no per-row undo.';
+const DELETE_TEST_RUN_MESSAGE =
+  'Everything it generated (systems and scenarios) is deleted with it. This cannot be undone.';
 
-// Task 10.5: the same isolation evidence Run detail shows per phase run
-// (`leak_scan_ran`/`guarded_by`, both already on `PhaseRunSerializer`), read
-// straight off THIS iterate run rather than off whatever `phase`/`variant`
-// happen to be selected in the editor right now - only meaningful for a
-// phase-2, variant-A run.
-function IterateIsolationNote({ iterateRun }) {
+function taxonomyName(taxonomies, id) {
+  const taxonomy = taxonomies.find((row) => row.id === Number(id));
+  return taxonomy ? `${taxonomy.vocabulary_id} v${taxonomy.version}` : 'the run’s taxonomy';
+}
+
+// Isolation evidence read off THIS test run (`leak_scan_ran`/`guarded_by`);
+// only meaningful for a phase-2, variant-A run.
+function IterateIsolationNote({ iterateRun, taxonomies }) {
   if (iterateRun.phase !== 2 || iterateRun.variant !== 'A') return null;
   if (iterateRun.leak_scan_ran) {
     return (
       <p className="text-xs font-semibold text-green-700">
-        Isolation verified — guarded by taxonomy #{iterateRun.guarded_by.join(', ')}.
+        Isolation verified — checked against{' '}
+        {iterateRun.guarded_by.map((id) => taxonomyName(taxonomies, id)).join(', ')}.
       </p>
     );
   }
   return (
     <p className="text-xs font-semibold text-red-700">
-      Isolation NOT verified — the leak scan did not run for every call in this run. Do not treat
-      this run as proof variant A stayed unbiased.
+      Isolation not verified — the taxonomy check did not run on every call, so this run does not
+      prove Variant A stayed unbiased.
     </p>
   );
 }
@@ -100,10 +99,10 @@ function PhaseRunCallCard({ call, phase, phaseRunId }) {
   return (
     <div className="space-y-2 rounded-md border border-gray-200 p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
-        <span className="font-semibold text-gray-900">Call #{call.sequence}</span>
+        <span className="font-semibold text-gray-900">Call {call.sequence}</span>
         <span>{call.model}</span>
-        <span>HTTP {call.http_status}</span>
-        <span>finish: {call.finish_reason || '—'}</span>
+        {call.http_status != null && call.http_status !== 200 && <span>HTTP {call.http_status}</span>}
+        <span>Stopped: {call.finish_reason || '—'}</span>
         <span>
           {call.prompt_tokens ?? '—'} → {call.completion_tokens ?? '—'} tokens
         </span>
@@ -179,7 +178,7 @@ export default function PromptEditor() {
   // previewTaxonomyId is an explicit OVERRIDE; when blank the active
   // taxonomy is used (see previewTaxonomyValue below).
   const [previewTaxonomyId, setPreviewTaxonomyId] = useState('');
-  const [previewScenarioId, setPreviewScenarioId] = useState('');
+  const [previewScenarioId, setPreviewScenarioId] = useState(null);
   const [previewNSystems, setPreviewNSystems] = useState('1');
   const [previewNScenarios, setPreviewNScenarios] = useState('3');
 
@@ -197,8 +196,7 @@ export default function PromptEditor() {
   const [iterateTemperature, setIterateTemperature] = useState('0');
   const [iterateNSystems, setIterateNSystems] = useState('1');
   const [iterateNScenarios, setIterateNScenarios] = useState('3');
-  const [iterateSourcePhaseRunId, setIterateSourcePhaseRunId] = useState('');
-  const labellableRuns = useLabellableRuns();
+  const [iterateScenarioIds, setIterateScenarioIds] = useState([]);
   const [iterateRunId, setIterateRunId] = useState(null);
   const [confirmingDeleteIterateRun, setConfirmingDeleteIterateRun] = useState(false);
 
@@ -229,8 +227,10 @@ export default function PromptEditor() {
   const templates = templatesQuery.data?.results ?? [];
   const currentTemplate = isEditing ? templates.find((template) => String(template.id) === id) : null;
   const phase = isEditing ? currentTemplate?.phase : phaseParam;
-  // Only phase 3 previews/iterate runs need a scenario.
-  const scenariosQuery = useScenarios({}, { enabled: phase === 3 });
+  // Only phase 3 previews/test runs need scenarios.
+  const scenarioGroups = useScenarioGroups({ enabled: phase === 3 });
+  const noScenarios =
+    phase === 3 && !scenarioGroups.isLoading && !scenarioGroups.error && scenarioGroups.total === 0;
 
   // React's own "adjust state when a prop changes" pattern (same as
   // ExperimentBuilder.jsx): once the addressed version has loaded, seed the
@@ -258,7 +258,6 @@ export default function PromptEditor() {
   const activeTaxonomy = taxonomies.find((taxonomy) => taxonomy.is_active) ?? null;
   const previewTaxonomyValue = previewTaxonomyId || (activeTaxonomy ? String(activeTaxonomy.id) : '');
 
-  const scenarios = scenariosQuery.data?.results ?? [];
   const experiments = experimentsQuery.data?.results ?? [];
   const chosenExperiment = experiments.find((experiment) => experiment.id === Number(iterateExperimentId)) ?? null;
 
@@ -311,7 +310,7 @@ export default function PromptEditor() {
     taxonomy: previewTaxonomyValue,
     scenario: previewScenarioId,
   });
-  // Save is gated on a SUCCESSFUL preview of this exact content (spec §10).
+  // Save is gated on a SUCCESSFUL preview of this exact content.
   const previewedCurrentDraft = previewedKey === currentAttemptKey;
 
   const missingRequiredPreviewInputs =
@@ -343,23 +342,23 @@ export default function PromptEditor() {
 
   function previewBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
-    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B before previewing — the editor must know which one it is validating.';
-    if (phase === 2 && variant === 'B' && !previewTaxonomyValue) return 'Choose a taxonomy to render Variant B against.';
-    if (phase === 3 && !previewTaxonomyValue) return 'Choose a taxonomy to preview a phase 3 template against.';
-    if (phase === 3 && !previewScenarioId) return 'Choose a scenario to preview a phase 3 template against.';
+    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B before previewing.';
+    if (phase === 2 && variant === 'B' && !previewTaxonomyValue) return 'Choose a taxonomy to preview Variant B with.';
+    if (phase === 3 && !previewTaxonomyValue) return 'Choose a taxonomy to preview this labelling prompt with.';
+    if (phase === 3 && !previewScenarioId) return 'Choose a scenario to preview this labelling prompt with.';
     return null;
   }
 
   function saveBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
-    if (missingName) return 'Name this template before saving.';
+    if (missingName) return 'Name this prompt before saving.';
     if (previewedCurrentDraft) return null;
-    if (previewError) return 'Fix the render error above, then preview again before saving.';
-    return 'Preview this exact content successfully before saving — nothing is saved until it renders cleanly.';
+    if (previewError) return 'Fix the error above, then preview again before saving.';
+    return 'Preview this draft successfully before saving.';
   }
 
   // Renders the current draft through the real backend renderer WITHOUT
-  // persisting anything (spec §9/§10) - never a client-side stand-in.
+  // persisting anything - never a client-side stand-in.
   async function handlePreview() {
     let outputSchema;
     try {
@@ -458,7 +457,7 @@ export default function PromptEditor() {
       taxonomy: derivedTaxonomyId,
     };
     if (phase === 2) body.variant = variant;
-    if (phase === 3) body.source_phase_run = Number(iterateSourcePhaseRunId);
+    if (phase === 3) body.scenarios = iterateScenarioIds;
     if (iterateExperimentId) {
       body.experiment = Number(iterateExperimentId);
       if (phase === 2) {
@@ -496,9 +495,9 @@ export default function PromptEditor() {
     if (!isStaff) return null; // covered by its own notice below
     if (phase === 2 && variant === '') return 'Choose Variant A or Variant B above before testing.';
     if (!chosenExperiment && !activeTaxonomy) return 'No taxonomy is active. Activate one on the Taxonomy screen, or borrow an experiment instead.';
-    if (phase === 3 && !labellableRuns.isLoading && labellableRuns.rows.length === 0) return 'There are no generated scenarios to label yet.';
-    if (phase === 3 && iterateSourcePhaseRunId === '') return 'Choose the generation run whose scenarios to label.';
-    if (iterateModel.trim() === '') return 'Enter a model id to run.';
+    if (noScenarios) return 'There are no scenarios to label yet.';
+    if (phase === 3 && iterateScenarioIds.length === 0) return 'Choose at least one scenario to label.';
+    if (iterateModel.trim() === '') return 'Choose a model to run.';
     if (hasUnsavedChanges) return saveBlockedReason();
     return null;
   }
@@ -536,8 +535,8 @@ export default function PromptEditor() {
             {isEditing ? `Editing “${currentTemplate.name}”` : 'New prompt'}
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            {PHASE_LABELS[phase]} · Jinja2 templates, versioned. Saving never mutates a version — it
-            creates the next one, so a run's pinned template id always stays recoverable.
+            {PHASE_LABELS[phase]} · Saving creates a new version and leaves earlier ones unchanged,
+            so every run keeps the exact prompt it used.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -657,7 +656,7 @@ export default function PromptEditor() {
 
         <div>
           <label htmlFor="output-schema" className="block text-xs font-medium text-gray-700">
-            Output schema (JSON Schema, pinned into the request)
+            Output schema (JSON Schema the model's answer must follow)
           </label>
           <textarea
             id="output-schema"
@@ -673,7 +672,7 @@ export default function PromptEditor() {
 
         <div className="grid grid-cols-1 gap-3 rounded-md bg-gray-50 p-3 sm:grid-cols-2">
           <p className="text-xs font-medium uppercase tracking-wide text-gray-500 sm:col-span-2">
-            Preview context — rendered by the real backend renderer, never synthesised here
+            Preview with
           </p>
           {(phase === 3 || variant === 'B') && (
             <div>
@@ -700,34 +699,23 @@ export default function PromptEditor() {
             </div>
           )}
           {phase === 3 && (
-            <div>
-              <label htmlFor="preview-scenario" className="block text-xs font-medium text-gray-700">
-                Scenario
-              </label>
-              <select
-                id="preview-scenario"
+            <div className="sm:col-span-2">
+              <ScenarioPicker
+                mode="single"
+                label="Scenario"
                 value={previewScenarioId}
-                onChange={(event) => {
-                  setPreviewScenarioId(event.target.value);
+                onChange={(scenarioId) => {
+                  setPreviewScenarioId(scenarioId);
                   clearPreviewState();
                 }}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
-              >
-                <option value="">Select a scenario…</option>
-                {scenarios.map((scenario) => (
-                  <option key={scenario.id} value={scenario.id}>
-                    #{scenario.id} · system {scenario.system_description} · {scenario.scenario_id}
-                    {scenario.is_scratch ? ' · scratch (iterate run)' : ''}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
           )}
           {phase === 2 && (
             <>
               <div>
                 <label htmlFor="preview-n-systems" className="block text-xs font-medium text-gray-700">
-                  n_systems
+                  Number of systems
                 </label>
                 <input
                   id="preview-n-systems"
@@ -743,7 +731,7 @@ export default function PromptEditor() {
               </div>
               <div>
                 <label htmlFor="preview-n-scenarios" className="block text-xs font-medium text-gray-700">
-                  n_scenarios_per_system
+                  Scenarios per system
                 </label>
                 <input
                   id="preview-n-scenarios"
@@ -782,9 +770,8 @@ export default function PromptEditor() {
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              Preview renders the draft above through the real backend renderer — never a
-              client-side stand-in — and persists nothing, win or lose. Save is disabled until this
-              exact draft has previewed cleanly for this exact variant.
+              Preview shows exactly what the model will receive and saves nothing. Save unlocks once
+              this exact draft previews without errors.
             </p>
             {previewBlockedReason() && (
               <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
@@ -798,7 +785,7 @@ export default function PromptEditor() {
         {previewError && (
           <div className="space-y-1">
             <p className="text-sm font-semibold text-red-800">
-              Render failed — nothing was saved, and there is no preview to show.
+              The prompt could not be rendered. Nothing was saved.
             </p>
             <ErrorBanner error={previewError} />
           </div>
@@ -809,7 +796,7 @@ export default function PromptEditor() {
             <p className="text-sm font-semibold text-green-700">
               Preview OK
               {previewResult.leak_scan_ran
-                ? ` — isolation scan ran, guarded by taxonomy #${previewResult.guarded_by}.`
+                ? ` — isolation verified against ${taxonomyName(taxonomies, previewResult.guarded_by)}.`
                 : '.'}
             </p>
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -828,15 +815,13 @@ export default function PromptEditor() {
 
           {!isStaff && (
             <p role="note" className="text-sm text-amber-800">
-              Only staff may run an iterate-mode call.
+              Only staff can run a test.
             </p>
           )}
 
-          {isStaff && phase === 3 && !labellableRuns.isLoading && !labellableRuns.error && labellableRuns.rows.length === 0 && (
-            <NoLabellableRunsNotice />
-          )}
+          {isStaff && noScenarios && <NoScenariosNotice />}
 
-          {isStaff && !(phase === 3 && !labellableRuns.isLoading && labellableRuns.rows.length === 0) && (
+          {isStaff && !noScenarios && (
             <form onSubmit={handleTestPrompt} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label htmlFor="iterate-experiment" className="block text-xs font-medium text-gray-700">
@@ -880,14 +865,13 @@ export default function PromptEditor() {
                   />
                 </div>
 
-                {phase === 3 && labellableRuns.rows.length > 0 && (
+                {phase === 3 && (
                   <div className="sm:col-span-2">
-                    <SourceRunPicker
-                      rows={labellableRuns.rows}
-                      isLoading={labellableRuns.isLoading}
-                      error={labellableRuns.error}
-                      value={iterateSourcePhaseRunId}
-                      onChange={setIterateSourcePhaseRunId}
+                    <ScenarioPicker
+                      mode="multiple"
+                      label="Scenarios to label"
+                      value={iterateScenarioIds}
+                      onChange={setIterateScenarioIds}
                     />
                   </div>
                 )}
@@ -896,7 +880,7 @@ export default function PromptEditor() {
                   <>
                     <div>
                       <label htmlFor="iterate-n-systems" className="block text-xs font-medium text-gray-700">
-                        Override n_systems (cheap to iterate: try 1)
+                        Number of systems (try 1 for a quick test)
                       </label>
                       <input
                         id="iterate-n-systems"
@@ -909,7 +893,7 @@ export default function PromptEditor() {
                     </div>
                     <div>
                       <label htmlFor="iterate-n-scenarios" className="block text-xs font-medium text-gray-700">
-                        Override n_scenarios_per_system (cheap to iterate: try 1)
+                        Scenarios per system (try 1 for a quick test)
                       </label>
                       <input
                         id="iterate-n-scenarios"
@@ -926,11 +910,11 @@ export default function PromptEditor() {
                 <p className="text-xs text-gray-600 sm:col-span-2">
                   Taxonomy:{' '}
                   {chosenExperiment
-                    ? `derived from “${chosenExperiment.name}” — not a free choice`
+                    ? `the one used by “${chosenExperiment.name}”`
                     : activeTaxonomy
                       ? `${activeTaxonomy.vocabulary_id} v${activeTaxonomy.version} (currently active)`
                       : 'no taxonomy is currently active'}
-                  . Template:{' '}
+                  . Prompt:{' '}
                   {isEditing
                     ? `“${currentTemplate.name}” v${currentTemplate.version}${hasUnsavedChanges ? ' (edited, not yet saved)' : ''}`
                     : 'not saved yet — “Save & test” will create it'}
@@ -963,7 +947,10 @@ export default function PromptEditor() {
               <div className="space-y-3 border-t border-gray-200 pt-4">
                 <div className="flex flex-wrap items-center gap-3">
                   {iterateRun && <StatusBadge status={iterateRun.status} />}
-                  <span className="text-sm text-gray-600">Phase run #{iterateRunId}</span>
+                  <span className="text-sm text-gray-600">
+                    {iterateRun?.phase === 3 ? 'Labelling test run' : 'Generation test run'}
+                    {iterateRun?.scenarios ? ` · ${iterateRun.scenarios.length} ${iterateRun.scenarios.length === 1 ? 'scenario' : 'scenarios'}` : ''}
+                  </span>
                   {isStaff && !confirmingDeleteIterateRun && (
                     <button
                       type="button"
@@ -975,12 +962,12 @@ export default function PromptEditor() {
                   )}
                 </div>
                 {iterateRun && <ProgressBar progress={iterateRun.progress} label="This run" />}
-                {iterateRun && <IterateIsolationNote iterateRun={iterateRun} />}
+                {iterateRun && <IterateIsolationNote iterateRun={iterateRun} taxonomies={taxonomies} />}
 
                 {confirmingDeleteIterateRun && (
                   <ConfirmDialog
-                    title={`Delete iterate run #${iterateRunId}?`}
-                    message={DELETE_ITERATE_RUN_MESSAGE}
+                    title="Delete this test run?"
+                    message={DELETE_TEST_RUN_MESSAGE}
                     confirmLabel="Confirm"
                     cancelLabel="Never mind"
                     pending={deletePhaseRun.isPending}

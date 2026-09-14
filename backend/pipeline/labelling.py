@@ -42,7 +42,12 @@ def scenarios_for(phase_run):
     scenarios too — the exact isolation this design exists to keep. An
     ad-hoc run (no pipeline_run) with no source genuinely does mean "label
     everything", and keeps that behaviour.
+
+    An ad-hoc run created with a chosen subset (`scenario_ids`) labels exactly
+    those that still exist — never everything, even if all were deleted since.
     """
+    if phase_run.scenario_ids is not None and not phase_run.pipeline_run_id:
+        return Scenario.objects.filter(id__in=phase_run.scenario_ids)
     if phase_run.source_phase_run_id:
         return Scenario.objects.filter(generation_run_id=phase_run.source_phase_run_id)
     if phase_run.pipeline_run_id:
@@ -224,6 +229,13 @@ def finish_labelling_run(phase_run):
     if phase_run.pipeline_run_id and not phase_run.source_phase_run_id:
         phase_run.status = PhaseRun.Status.FAILED
         phase_run.error = "Source phase run was deleted; nothing to label."
+        phase_run.failed_children = 0
+        phase_run.finished_at = timezone.now()
+        phase_run.save(update_fields=["status", "error", "failed_children", "finished_at"])
+        return phase_run
+    if phase_run.scenario_ids is not None and not phase_run.calls.exists():
+        phase_run.status = PhaseRun.Status.FAILED
+        phase_run.error = "The chosen scenarios were deleted; nothing to label."
         phase_run.failed_children = 0
         phase_run.finished_at = timezone.now()
         phase_run.save(update_fields=["status", "error", "failed_children", "finished_at"])
