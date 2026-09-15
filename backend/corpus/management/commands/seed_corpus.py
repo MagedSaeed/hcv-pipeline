@@ -49,9 +49,18 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--pack", default="oldsmar", help="Seed pack directory name.")
+        parser.add_argument(
+            "--if-missing",
+            action="store_true",
+            help="Do nothing if the pack is already seeded, so edits made in the app survive.",
+        )
 
     def handle(self, *args, **options):
         pack = options["pack"]
+        if options["if_missing"] and SystemDescription.objects.filter(slug=pack).exists():
+            self.stdout.write(f"Seed pack {pack} is already loaded; skipped")
+            return
+
         directory = settings.RESOURCES_DIR / "seeds" / pack
         if not directory.is_dir():
             raise CommandError(f"No seed pack at {directory}")

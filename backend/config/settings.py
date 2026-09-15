@@ -91,6 +91,14 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# The built SPA (`npm run build`). A deployment serves it from Django so the
+# browser sees one origin, as the Vite proxy does in development: WhiteNoise
+# serves its assets from the site root and config.urls answers every other
+# non-API path with its index.html.
+FRONTEND_DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
+if FRONTEND_DIST_DIR.is_dir():
+    WHITENOISE_ROOT = FRONTEND_DIST_DIR
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {

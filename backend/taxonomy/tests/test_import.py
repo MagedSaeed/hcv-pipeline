@@ -127,6 +127,41 @@ def test_activate_deactivates_other_versions(tmp_path):
 
 
 @pytest.mark.django_db
+def test_if_missing_imports_a_version_the_database_lacks():
+    call_command("import_taxonomy", "--activate", "--if-missing")
+
+    taxonomy = Taxonomy.objects.get(vocabulary_id="HCV-21", version="1.1")
+    assert taxonomy.is_active is True
+    assert taxonomy.hcvs.count() == 21
+
+
+@pytest.mark.django_db
+def test_if_missing_leaves_an_imported_version_untouched(tmp_path):
+    path = write_taxonomy(tmp_path / "t.json", [{"hcv_id": "HCV-01", "name": "Original"}])
+    call_command("import_taxonomy", str(path))
+    changed = [{"hcv_id": "HCV-01", "name": "Changed"}, {"hcv_id": "HCV-02", "name": "New"}]
+    write_taxonomy(path, changed)
+
+    call_command("import_taxonomy", str(path), "--if-missing")
+
+    assert list(HCV.objects.values_list("hcv_id", "name")) == [("HCV-01", "Original")]
+
+
+@pytest.mark.django_db
+def test_if_missing_does_not_reactivate_an_imported_version(tmp_path):
+    """A deployment runs this on every start; it must not undo a researcher's
+    choice of active taxonomy."""
+    call_command("import_taxonomy", "--activate")
+    other = write_taxonomy(tmp_path / "v2.json", [{"hcv_id": "HCV-01", "name": "A"}], "2.0")
+    call_command("import_taxonomy", str(other), "--activate")
+
+    call_command("import_taxonomy", "--activate", "--if-missing")
+
+    assert Taxonomy.objects.get(version="1.1").is_active is False
+    assert Taxonomy.objects.get(version="2.0").is_active is True
+
+
+@pytest.mark.django_db
 def test_missing_file_reports_clearly(tmp_path):
     with pytest.raises(CommandError, match="not found"):
         call_command("import_taxonomy", str(tmp_path / "absent.json"))

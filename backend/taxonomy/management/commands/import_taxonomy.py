@@ -25,6 +25,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Mark this version active and deactivate all others.",
         )
+        parser.add_argument(
+            "--if-missing",
+            action="store_true",
+            help="Do nothing, not even --activate, if this version is already imported.",
+        )
 
     def handle(self, *args, **options):
         path = Path(options["path"]) if options["path"] else settings.RESOURCES_DIR / DEFAULT_PATH
@@ -35,6 +40,17 @@ class Command(BaseCommand):
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
             raise CommandError(f"{path} is not valid JSON: {error}") from error
+
+        if (
+            options["if_missing"]
+            and Taxonomy.objects.filter(
+                vocabulary_id=payload["vocabulary_id"], version=str(payload["version"])
+            ).exists()
+        ):
+            self.stdout.write(
+                f"{payload['vocabulary_id']} v{payload['version']} is already imported; skipped"
+            )
+            return
 
         rows = payload.get("rows") or []
         if not rows:
