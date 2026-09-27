@@ -56,6 +56,24 @@ def json_schema(model):
     return model.model_json_schema()
 
 
+def strict_schema(schema):
+    """A copy with every object closed and every field required, the shape
+    OpenAI's newer models insist on. Parsing still accepts missing fields."""
+
+    def convert(node):
+        if isinstance(node, list):
+            return [convert(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        converted = {key: convert(value) for key, value in node.items()}
+        if isinstance(converted.get("properties"), dict):
+            converted["additionalProperties"] = False
+            converted["required"] = list(converted["properties"])
+        return converted
+
+    return convert(schema)
+
+
 def phase2_json_schema(*, generate_systems):
     """`Phase2Response`'s schema, restricted to the ONE top-level field the
     run's actual mode uses.

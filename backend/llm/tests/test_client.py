@@ -14,6 +14,7 @@ from llm.client import (
     split_request_for_the_sdk,
 )
 from llm.fake import FakeLLMClient
+from llm.schemas import strict_schema
 
 SENTINEL_KEY = "sk-or-v1-SENTINELSENTINELSENTINEL"
 
@@ -144,20 +145,21 @@ def test_an_empty_system_prompt_sends_no_system_message():
     assert result.request_json["messages"] == [{"role": "user", "content": "u"}]
 
 
-def test_a_json_schema_is_pinned_into_response_format_without_forcing_strict_mode():
-    """`model_json_schema()` does not satisfy strict structured-output rules
-    (audited: additionalProperties is never false, and `required` omits every
-    defaulted field). Pinning `strict: True` regardless would 400 every
-    schema-pinned call on a strict-enforcing provider, so `strict` is omitted
-    rather than pinned or post-processed.
-    """
+def test_a_json_schema_is_sent_in_strict_shape_without_the_strict_flag():
+    """OpenAI's newer models 400 unless every object is closed and every field
+    required; the `strict` flag itself isn't needed for that."""
     stub = StubCompletions(BODY)
     schema = {"type": "object", "properties": {"labels": {"type": "array"}}}
     client_with(stub).complete(model="m", system_prompt="", user_prompt="u", json_schema=schema)
 
     envelope = stub.seen["response_format"]["json_schema"]
     assert stub.seen["response_format"]["type"] == "json_schema"
-    assert envelope["schema"] == schema
+    assert envelope["schema"] == {
+        "type": "object",
+        "properties": {"labels": {"type": "array"}},
+        "additionalProperties": False,
+        "required": ["labels"],
+    }
     assert "strict" not in envelope
 
 
@@ -343,7 +345,7 @@ def test_a_preflight_receives_the_full_final_request_body():
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "usr"},
     ]
-    assert seen["response_format"]["json_schema"]["schema"] == schema
+    assert seen["response_format"]["json_schema"]["schema"] == strict_schema(schema)
 
 
 def test_a_preflight_that_does_not_raise_lets_the_call_through():
@@ -493,7 +495,7 @@ def test_the_fake_builds_the_same_request_shape_as_the_real_client():
     real = client_with(StubCompletions(BODY)).complete(**arguments)
 
     assert fake.complete(**arguments).request_json == real.request_json
-    assert real.request_json["response_format"]["json_schema"]["schema"] == schema
+    assert real.request_json["response_format"]["json_schema"]["schema"] == strict_schema(schema)
 
 
 def test_the_fake_satisfies_the_llm_client_protocol():

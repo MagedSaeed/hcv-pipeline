@@ -28,6 +28,8 @@ from typing import Protocol, runtime_checkable
 from openai import OpenAI
 from openai.resources.chat.completions import Completions
 
+from llm.schemas import strict_schema
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TIMEOUT = 120
 
@@ -138,21 +140,9 @@ def build_request(model, system_prompt, user_prompt, temperature=0.0, json_schem
     if json_schema:
         request["response_format"] = {
             "type": "json_schema",
-            # `strict` is deliberately omitted, not pinned. Audited:
-            # model_json_schema() violates strict structured-output rules
-            # (6 places on Phase2Response, 4 on Phase3Response —
-            # `additionalProperties` is never set to false, and `required`
-            # omits every defaulted field, including `labels` itself). On
-            # a strict-enforcing provider, pinning strict=True would 400
-            # every schema-pinned call, recorded as a failure — a whole
-            # run producing nothing, discovered only on the first live
-            # call. Turning it on later means post-processing the schema
-            # (force additionalProperties: false recursively, and move
-            # every defaulted field into `required`), which changes what
-            # the model is told it must emit — a deliberate follow-up,
-            # not a flag flipped here. Omitting it keeps the schema as
-            # guidance only, with no failure mode.
-            "json_schema": {"name": "response", "schema": json_schema},
+            # Sent in strict shape for every model (OpenAI's newer models 400
+            # otherwise); the `strict` flag itself isn't needed for that.
+            "json_schema": {"name": "response", "schema": strict_schema(json_schema)},
         }
     return request
 

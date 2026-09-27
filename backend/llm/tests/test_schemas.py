@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from llm.schemas import (
@@ -9,6 +11,7 @@ from llm.schemas import (
     parse_phase3,
     phase2_json_schema,
     split_known_labels,
+    strict_schema,
 )
 
 CARD = {
@@ -107,6 +110,22 @@ def test_json_schema_is_shaped_for_response_format():
 
     schema3 = json_schema(Phase3Response)
     assert "labels" in schema3["properties"]
+
+
+def test_strict_schema_closes_every_object_and_requires_every_field():
+    """OpenAI's newer models reject a schema that isn't in this shape."""
+    strict = strict_schema(phase2_json_schema(generate_systems=True))
+    objects = [strict, strict["$defs"]["GeneratedSystem"], strict["$defs"]["ScenarioCard"]]
+    for node in objects:
+        assert node["additionalProperties"] is False
+        assert sorted(node["required"]) == sorted(node["properties"])
+
+
+def test_strict_schema_leaves_its_input_unchanged():
+    schema = json_schema(Phase3Response)
+    before = json.dumps(schema, sort_keys=True)
+    strict_schema(schema)
+    assert json.dumps(schema, sort_keys=True) == before
 
 
 def test_phase2_json_schema_for_generate_systems_omits_bare_scenarios():

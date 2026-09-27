@@ -787,8 +787,14 @@ def test_variant_b_may_carry_hcv_ids_as_schema_keys(hcv21):
 
 def request_with_schema(schema):
     """The REAL request shape — `llm.client.build_request`, the one both
-    clients use — carrying `schema` as `response_format.json_schema.schema`."""
-    return build_request("m", "You write scenarios.", "Generate scenarios.", 1.0, schema)
+    clients use — carrying `schema` unconverted as
+    `response_format.json_schema.schema`. build_request's strict conversion
+    copies keys into `required`, which would make a key-only id visible as a
+    value too; the scan must also catch it without that help."""
+    request = build_request("m", "You write scenarios.", "Generate scenarios.", 1.0, schema)
+    if schema is not None:
+        request["response_format"]["json_schema"]["schema"] = schema
+    return request
 
 
 @pytest.mark.django_db
@@ -800,6 +806,16 @@ def test_the_request_scan_refuses_an_hcv_id_only_in_a_key(hcv21, shape):
     ids = [row.hcv_id for row in hcv21.hcvs.all()]
     request = request_with_schema(KEY_ONLY_ID_SCHEMAS[shape](ids))
     assert not any(hcv_id in text for text in string_values(request) for hcv_id in ids)
+
+    with pytest.raises(TaxonomyLeak, match="HCV-01"):
+        assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=request)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", KEY_ONLY_ID_SCHEMAS)
+def test_the_request_scan_refuses_the_strict_request_actually_sent(hcv21, shape):
+    ids = [row.hcv_id for row in hcv21.hcvs.all()]
+    request = build_request("m", "sys", "usr", 1.0, KEY_ONLY_ID_SCHEMAS[shape](ids))
 
     with pytest.raises(TaxonomyLeak, match="HCV-01"):
         assert_request_not_leaking_taxonomy(variant="A", guard_taxonomy=hcv21, request=request)
