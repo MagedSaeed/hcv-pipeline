@@ -6,7 +6,7 @@ caller records on the call record rather than letting it kill a run.
 
 import json
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class SchemaError(ValueError):
@@ -37,8 +37,12 @@ class Phase2Response(BaseModel):
 
 
 class LabelOut(BaseModel):
+    # Required in the schema sent to the model (some models skip optional
+    # evidence); parsing keeps the defaults so a reply without it isn't lost.
+    model_config = ConfigDict(json_schema_extra={"required": ["hcv_id", "evidence", "rationale"]})
+
     hcv_id: str
-    evidence: str = ""
+    evidence: str = Field(default="", json_schema_extra={"minLength": 1})
     rationale: str = ""
 
 

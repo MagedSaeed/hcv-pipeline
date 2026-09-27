@@ -72,6 +72,19 @@ def test_missing_labels_key_defaults_to_empty():
     assert parse_phase3({}).labels == []
 
 
+def test_the_label_schema_requires_evidence_and_rationale():
+    """Optional, qwen3-vl-8b-thinking and DeepSeek models omitted evidence."""
+    label = json_schema(Phase3Response)["$defs"]["LabelOut"]
+    assert sorted(label["required"]) == ["evidence", "hcv_id", "rationale"]
+    assert label["properties"]["evidence"]["minLength"] == 1
+
+
+def test_a_label_without_evidence_still_parses():
+    """Required is asked of the model only; parsing keeps such labels."""
+    parsed = parse_phase3({"labels": [{"hcv_id": "HCV-03", "rationale": "r"}]})
+    assert parsed.labels[0].evidence == ""
+
+
 def test_split_known_labels_separates_out_of_vocabulary_ids():
     parsed = parse_phase3(
         {
