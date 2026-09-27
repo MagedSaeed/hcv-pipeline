@@ -287,6 +287,23 @@ function renderPreview({ phase, systemPrompt, userPrompt, outputSchema, body }) 
   });
 }
 
+// A stand-in for `POST /api/prompts/check/`: a tag that never closes is a
+// syntax error; a `{{ name` the phase doesn't provide is an unknown variable.
+const PHASE_NAMES = {
+  2: ['seed_systems', 'fewshots', 'generate_systems', 'generate_scenarios', 'n_systems', 'n_scenarios_per_system', 'target_system', 'resource'],
+  3: ['scenario', 'system_description', 'fewshots', 'resource', 'taxonomy', 'hcv_table'],
+};
+
+function fakeCheck({ phase, variant, system_prompt: systemPrompt = '', user_prompt: userPrompt = '' }) {
+  for (const [label, source] of [['System prompt', systemPrompt], ['User prompt', userPrompt]]) {
+    if (/{{(?![\s\S]*?}})|{%(?![\s\S]*?%})/.test(source)) return { syntax_error: `${label}, line 1: unexpected end of template`, unknown_variables: [] };
+  }
+  const known = new Set(PHASE_NAMES[phase]);
+  if (phase === 2 && variant !== 'A') ['taxonomy', 'hcv_table'].forEach((name) => known.add(name));
+  const used = [...`${systemPrompt} ${userPrompt}`.matchAll(/{{\s*([A-Za-z_]\w*)/g)].map((match) => match[1]);
+  return { syntax_error: null, unknown_variables: [...new Set(used.filter((name) => !known.has(name)))].sort() };
+}
+
 function nextVersionFor(name, phase) {
   const existingVersions = templates.filter((t) => t.name === name && t.phase === phase).map((t) => t.version);
   return Math.max(...existingVersions) + 1;
@@ -377,6 +394,14 @@ beforeEach(() => {
       };
       templates.push(created);
       return HttpResponse.json(created, { status: 201 });
+    }),
+
+    http.post('/api/prompts/check/', async ({ request }) => {
+      const staffRefusal = requireStaff(currentUser());
+      if (staffRefusal) return staffRefusal;
+      const csrfRefusal = requireCsrf(request);
+      if (csrfRefusal) return csrfRefusal;
+      return HttpResponse.json(fakeCheck(await request.json()));
     }),
 
     http.post('/api/prompts/:id/preview/', async ({ request, params }) => {
@@ -648,7 +673,7 @@ describe('PromptEditor', () => {
     expect(screen.queryByRole('radio', { name: /^variant a/i, hidden: true })).not.toBeInTheDocument();
   });
 
-  it('a variant-A template referencing taxonomy shows the render error, and Save refuses to save it', async () => {
+  it('a variant-A template referencing taxonomy fails to preview, and Save warns before saving it', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/prompts/1/edit'] });
 
@@ -662,12 +687,47 @@ describe('PromptEditor', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/'taxonomy' is undefined/i);
     expect(screen.queryByText(/preview ok/i)).not.toBeInTheDocument();
 
-    // An edit enables Save, but Save runs the same check first and saves nothing.
+    // Save checks without rendering: `taxonomy` is unknown to variant A, so it
+    // warns and waits for the user's choice.
     await user.type(screen.getByLabelText(/user prompt/i), ' extra');
     expect(saveButton).toBeEnabled();
     await user.click(saveButton);
-    expect(await screen.findByText(/could not be rendered/i)).toBeInTheDocument();
+    const warning = await screen.findByRole('alertdialog');
+    expect(warning).toHaveTextContent(/unknown variable: taxonomy/i);
     expect(promptWriteCount).toBe(0);
+
+    await user.click(within(warning).getByRole('button', { name: /keep editing/i }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(promptWriteCount).toBe(0);
+
+    await user.click(saveButton);
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /save anyway/i }));
+    await waitFor(() => expect(promptWriteCount).toBe(1));
+  });
+
+  it('Save refuses a template with a syntax error and says where it is', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/4/edit'] });
+
+    await user.type(await screen.findByLabelText(/user prompt/i), ' {{{{ scenario.actor');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    expect(await screen.findByText(/not saved\. user prompt, line 1/i)).toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(promptWriteCount).toBe(0);
+  });
+
+  it('a labelling prompt saves without choosing a scenario to preview with', async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ['/prompts/4/edit'] });
+
+    await user.type(await screen.findByLabelText(/user prompt/i), ' Be brief.');
+    expect(screen.getByText(/choose a scenario to preview/i)).toBeInTheDocument();
+    const saveButton = screen.getByRole('button', { name: /^save$/i });
+    expect(saveButton).toBeEnabled();
+
+    await user.click(saveButton);
+    await waitFor(() => expect(promptWriteCount).toBe(1));
   });
 
   it('an existing variant-B template previews successfully with the active taxonomy preselected', async () => {
@@ -718,7 +778,7 @@ describe('PromptEditor', () => {
     expect(screen.getByLabelText(/variant a/i)).toBeEnabled(); // free choice - nothing stored yet
     await user.type(screen.getByLabelText(/user prompt/i), 'Make {{ n_systems }} systems.');
 
-    // Save works straight away: it renders the draft itself before saving.
+    // Save works straight away: it checks the draft itself before saving.
     const saveButton = screen.getByRole('button', { name: /^save$/i });
     expect(saveButton).toBeEnabled();
     expect(promptWriteCount).toBe(0);

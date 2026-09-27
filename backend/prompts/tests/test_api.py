@@ -1067,3 +1067,70 @@ def test_phase_3_templates_refuse_a_variant(api_client, staff):
         format="json",
     )
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_a_template_with_a_syntax_error_is_not_saved(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/",
+        {"phase": 3, "name": "broken", "user_prompt": "{% if scenario %}never closed"},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert response.json()["user_prompt"][0].startswith("User prompt, line 1:")
+    assert not PromptTemplate.objects.filter(name="broken").exists()
+
+
+@pytest.mark.django_db
+def test_an_edit_with_a_syntax_error_creates_no_version(api_client, staff, template):
+    api_client.force_authenticate(user=staff)
+    response = api_client.patch(
+        f"/api/prompts/{template.id}/", {"system_prompt": "{{ unclosed"}, format="json"
+    )
+    assert response.status_code == 400
+    assert "system_prompt" in response.json()
+    assert PromptTemplate.objects.filter(name=template.name).count() == 1
+
+
+@pytest.mark.django_db
+def test_an_unknown_variable_does_not_block_saving(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/",
+        {"phase": 3, "name": "typo", "user_prompt": "{{ scenrio.actor }}"},
+        format="json",
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.django_db
+def test_check_reports_unknown_variables_without_saving(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/check/",
+        {"phase": 2, "variant": "A", "user_prompt": "{{ n_systems }} {{ taxonomy }}"},
+        format="json",
+    )
+    assert response.status_code == 200
+    assert response.json() == {"syntax_error": None, "unknown_variables": ["taxonomy"]}
+    assert not PromptTemplate.objects.exists()
+
+
+@pytest.mark.django_db
+def test_check_reports_a_syntax_error(api_client, staff):
+    api_client.force_authenticate(user=staff)
+    response = api_client.post(
+        "/api/prompts/check/", {"phase": 3, "user_prompt": "{{ nope"}, format="json"
+    )
+    assert response.status_code == 200
+    assert response.json()["syntax_error"].startswith("User prompt, line 1:")
+
+
+@pytest.mark.django_db
+def test_non_staff_cannot_check(api_client, member):
+    api_client.force_authenticate(user=member)
+    response = api_client.post(
+        "/api/prompts/check/", {"phase": 3, "user_prompt": "x"}, format="json"
+    )
+    assert response.status_code == 403

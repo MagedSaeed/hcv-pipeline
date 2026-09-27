@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/auth-context';
 import {
   useCreatePhaseRun,
+  useCheckPromptTemplate,
   useCreatePromptTemplate,
   useDeletePhaseRun,
   useExperiments,
@@ -229,6 +230,47 @@ function parseOutputSchema(text) {
   return value;
 }
 
+// Shown when Save finds names the phase doesn't provide; the user decides.
+function UnknownVariablesWarning({ names, onSaveAnyway, onKeepEditing }) {
+  return (
+    <div
+      role="alertdialog"
+      aria-labelledby="unknown-variables-title"
+      className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3"
+    >
+      <p id="unknown-variables-title" className="text-sm font-semibold text-amber-900">
+        {names.length === 1 ? 'Unknown variable' : 'Unknown variables'}:{' '}
+        {names.map((name, index) => (
+          <span key={name}>
+            {index > 0 && ', '}
+            <code className="rounded bg-amber-100 px-1 font-mono text-[13px]">{name}</code>
+          </span>
+        ))}
+      </p>
+      <p className="text-sm text-amber-800">
+        This phase doesn&apos;t provide {names.length === 1 ? 'it' : 'them'}, so a run fails when it reaches{' '}
+        {names.length === 1 ? 'it' : 'one'}. Save anyway if that&apos;s intended.
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={onSaveAnyway}
+          className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+        >
+          Save anyway
+        </button>
+        <button
+          type="button"
+          onClick={onKeepEditing}
+          className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100"
+        >
+          Keep editing
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const emptyDraft = { systemPrompt: '', userPrompt: '', outputSchemaText: '{}' };
 
 // This page now edits the template named by the URL - `/prompts/new?phase=`
@@ -247,6 +289,9 @@ export default function PromptEditor() {
   const [newName, setNewName] = useState('');
   const [draft, setDraft] = useState(emptyDraft);
   const [schemaError, setSchemaError] = useState(null);
+  // What Save's check found, tagged with where it was started ('save' or 'test').
+  const [checkError, setCheckError] = useState(null);
+  const [unknownWarning, setUnknownWarning] = useState(null);
   // `?testRun=<id>` (from a prompt's View page) opens the panel on that run.
   const [testOpen, setTestOpen] = useState(() => searchParams.has('testRun'));
 
@@ -260,10 +305,8 @@ export default function PromptEditor() {
 
   const [previewResult, setPreviewResult] = useState(null);
   const [previewError, setPreviewError] = useState(null);
-  // Snapshot of exactly what the LAST *successful* preview was run against.
-  // Save is enabled only while this still matches the current draft/
-  // variant/context; any edit, a variant switch, or a different preview
-  // taxonomy/scenario invalidates it.
+  // Snapshot of exactly what the LAST *successful* preview was run against;
+  // Preview skips re-rendering while it still matches.
   const [previewedKey, setPreviewedKey] = useState(null);
 
   // Iterate ("Test this prompt") panel - POST /api/phase-runs/.
@@ -293,6 +336,7 @@ export default function PromptEditor() {
   const modelsQuery = useModels({ enabled: isStaff });
 
   const previewMutation = usePreviewPromptTemplate();
+  const checkMutation = useCheckPromptTemplate();
   const createTemplate = useCreatePromptTemplate();
   const updateTemplate = useUpdatePromptTemplate();
   const createPhaseRun = useCreatePhaseRun();
@@ -385,6 +429,8 @@ export default function PromptEditor() {
   function clearPreviewState() {
     setPreviewResult(null);
     setPreviewError(null);
+    setCheckError(null);
+    setUnknownWarning(null);
   }
 
   function updateDraftField(field, value) {
@@ -422,7 +468,7 @@ export default function PromptEditor() {
 
   const missingName = isEditing ? false : !newName.trim();
   const isPreviewing = previewMutation.isPending;
-  const isPersisting = createTemplate.isPending || updateTemplate.isPending;
+  const isPersisting = checkMutation.isPending || createTemplate.isPending || updateTemplate.isPending;
   const canPreview = isStaff && !missingRequiredPreviewInputs && !isPreviewing;
 
   // Task D: an existing phase-2 prompt's variant is fixed once saved -
@@ -440,9 +486,7 @@ export default function PromptEditor() {
     draft.systemPrompt !== currentTemplate.system_prompt ||
     draft.userPrompt !== currentTemplate.user_prompt ||
     draft.outputSchemaText !== JSON.stringify(currentTemplate.output_schema ?? {}, null, 2);
-  // Save checks the draft renders cleanly (the same check as Preview) before saving.
-  const canSave =
-    isStaff && hasUnsavedChanges && !missingName && !missingRequiredPreviewInputs && !isPersisting && !isPreviewing;
+  const canSave = isStaff && saveBlockedReason() == null && !isPersisting;
 
   function previewBlockedReason() {
     if (!isStaff) return null; // covered by its own notice below
@@ -457,7 +501,8 @@ export default function PromptEditor() {
     if (!isStaff) return null; // covered by its own notice below
     if (!hasUnsavedChanges) return 'No changes to save.';
     if (missingName) return 'Name this prompt before saving.';
-    return previewBlockedReason();
+    if (phase === 2 && variant === '') return 'Choose Variant A or Variant B before saving.';
+    return null;
   }
 
   // Renders the current draft through the real backend renderer WITHOUT
@@ -516,10 +561,10 @@ export default function PromptEditor() {
     }
   }
 
-  // Renders the draft first and saves only if that succeeds. Returns the saved
-  // row (the NEW version) or null - shared by Save and "Save & test".
-  async function saveDraft() {
-    if (!(await renderDraft())) return null;
+  // Checks the draft, then saves it. A syntax error stops the save; unknown
+  // variables wait for "Save anyway", which calls `onAccept`. Returns the
+  // saved row (the NEW version) or null - shared by Save and "Save & test".
+  async function saveDraft({ source, acceptUnknownVariables = false, onAccept }) {
     let outputSchema;
     try {
       outputSchema = parseOutputSchema(draft.outputSchemaText);
@@ -527,6 +572,30 @@ export default function PromptEditor() {
     } catch (error) {
       setSchemaError(error.message);
       return null;
+    }
+
+    setCheckError(null);
+    setUnknownWarning(null);
+    if (!acceptUnknownVariables) {
+      let check;
+      try {
+        check = await checkMutation.mutateAsync({
+          phase,
+          variant: phase === 2 ? variant : '',
+          system_prompt: draft.systemPrompt,
+          user_prompt: draft.userPrompt,
+        });
+      } catch {
+        return null; // Surfaced below via checkMutation.error.
+      }
+      if (check.syntax_error) {
+        setCheckError({ source, message: check.syntax_error });
+        return null;
+      }
+      if (check.unknown_variables.length > 0) {
+        setUnknownWarning({ source, names: check.unknown_variables, onAccept });
+        return null;
+      }
     }
 
     try {
@@ -552,9 +621,13 @@ export default function PromptEditor() {
     }
   }
 
-  async function handleSave(event) {
-    event.preventDefault();
-    const saved = await saveDraft();
+  async function handleSave(event, acceptUnknownVariables = false) {
+    event?.preventDefault();
+    const saved = await saveDraft({
+      source: 'save',
+      acceptUnknownVariables,
+      onAccept: () => handleSave(null, true),
+    });
     if (saved) navigate(`/prompts/${saved.id}/edit`, { replace: true });
   }
 
@@ -609,10 +682,14 @@ export default function PromptEditor() {
   // only AFTER the run is already under way (`iterateRunId` set), so the
   // brief re-render while the new version loads never has a window where
   // the just-started run is invisible.
-  async function handleTestPrompt(event) {
-    event.preventDefault();
+  async function handleTestPrompt(event, acceptUnknownVariables = false) {
+    event?.preventDefault();
     if (hasUnsavedChanges) {
-      const saved = await saveDraft();
+      const saved = await saveDraft({
+        source: 'test',
+        acceptUnknownVariables,
+        onAccept: () => handleTestPrompt(null, true),
+      });
       if (!saved) return;
       await runIterate(saved.id);
       navigate(`/prompts/${saved.id}/edit`, { replace: true });
@@ -903,8 +980,8 @@ export default function PromptEditor() {
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              Preview shows exactly what the model will receive and saves nothing. Save checks the draft
-              the same way first and only saves it if it renders without errors.
+              Preview shows exactly what the model will receive and saves nothing. Save checks the
+              template&apos;s syntax and the variables it uses first.
             </p>
             {previewBlockedReason() && (
               <p className="text-xs font-medium text-amber-800">{previewBlockedReason()}</p>
@@ -912,6 +989,19 @@ export default function PromptEditor() {
             {saveBlockedReason() && saveBlockedReason() !== previewBlockedReason() && (
               <p className="text-xs font-medium text-amber-800">{saveBlockedReason()}</p>
             )}
+            {checkError?.source === 'save' && (
+              <p role="alert" className="text-sm font-medium text-red-700">
+                Not saved. {checkError.message}
+              </p>
+            )}
+            {unknownWarning?.source === 'save' && (
+              <UnknownVariablesWarning
+                names={unknownWarning.names}
+                onSaveAnyway={unknownWarning.onAccept}
+                onKeepEditing={() => setUnknownWarning(null)}
+              />
+            )}
+            {checkMutation.isError && <ErrorBanner error={checkMutation.error} />}
             {createTemplate.isError && <ErrorBanner error={createTemplate.error} />}
             {updateTemplate.isError && <ErrorBanner error={updateTemplate.error} />}
           </div>
@@ -1173,6 +1263,20 @@ export default function PromptEditor() {
                   </button>
                   {testBlockedReason() && (
                     <p className="mt-1 text-xs font-medium text-amber-800">{testBlockedReason()}</p>
+                  )}
+                  {checkError?.source === 'test' && (
+                    <p role="alert" className="mt-1 text-sm font-medium text-red-700">
+                      Not saved. {checkError.message}
+                    </p>
+                  )}
+                  {unknownWarning?.source === 'test' && (
+                    <div className="mt-2">
+                      <UnknownVariablesWarning
+                        names={unknownWarning.names}
+                        onSaveAnyway={unknownWarning.onAccept}
+                        onKeepEditing={() => setUnknownWarning(null)}
+                      />
+                    </div>
                   )}
                   {createTemplate.isError && hasUnsavedChanges && <ErrorBanner error={createTemplate.error} />}
                   {updateTemplate.isError && hasUnsavedChanges && <ErrorBanner error={updateTemplate.error} />}

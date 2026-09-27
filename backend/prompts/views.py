@@ -9,6 +9,7 @@ from rest_framework.response import Response
 
 from core.permissions import StaffWrites as BaseStaffWrites
 from corpus.models import FewShotExample, Scenario, SystemDescription
+from prompts.checks import syntax_error, unknown_variables
 from prompts.models import PromptTemplate
 from prompts.rendering import (
     VARIANT_UNBIASED,
@@ -19,7 +20,7 @@ from prompts.rendering import (
     render,
     unscannable_hcv_rows,
 )
-from prompts.serializers import PreviewSerializer, PromptTemplateSerializer
+from prompts.serializers import CheckSerializer, PreviewSerializer, PromptTemplateSerializer
 from taxonomy.models import Taxonomy
 
 
@@ -158,6 +159,21 @@ class PromptTemplateViewSet(
         """
         template = self.get_object()
         return self._preview(request, template)
+
+    @action(detail=False, methods=["post"])
+    def check(self, request, format=None):
+        """Check a draft without rendering it: a syntax error blocks saving,
+        unknown variables are only a warning."""
+        serializer = CheckSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        draft = serializer.validated_data
+        prompts = (draft["system_prompt"], draft["user_prompt"])
+        return Response(
+            {
+                "syntax_error": syntax_error(*prompts),
+                "unknown_variables": unknown_variables(draft["phase"], draft["variant"], *prompts),
+            }
+        )
 
     @action(detail=False, methods=["post"], url_path="preview")
     def preview_unsaved(self, request, format=None):

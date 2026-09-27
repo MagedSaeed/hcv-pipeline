@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from prompts.checks import field_syntax_error
 from prompts.models import PromptTemplate
 
 
@@ -53,6 +54,12 @@ class PromptTemplateSerializer(serializers.ModelSerializer):
         variant = attrs.get("variant", getattr(self.instance, "variant", ""))
         if phase == 3 and variant:
             raise serializers.ValidationError({"variant": "Phase 3 templates have no variant."})
+        # A template that doesn't parse fails every call, so it is never saved.
+        for field in ("system_prompt", "user_prompt"):
+            if field in attrs:
+                error = field_syntax_error(field, attrs[field])
+                if error:
+                    raise serializers.ValidationError({field: error})
         return attrs
 
 
@@ -104,3 +111,12 @@ class PreviewSerializer(serializers.Serializer):
 
     def validate_output_schema(self, value):
         return _require_json_object(value)
+
+
+class CheckSerializer(serializers.Serializer):
+    """A draft to check without rendering it."""
+
+    phase = serializers.ChoiceField(choices=PromptTemplate.PHASE_CHOICES)
+    variant = serializers.ChoiceField(choices=["", "A", "B"], required=False, default="")
+    system_prompt = serializers.CharField(required=False, allow_blank=True, default="")
+    user_prompt = serializers.CharField(required=False, allow_blank=True, default="")

@@ -936,6 +936,16 @@ export function useUpdatePromptTemplate() {
 // not a mutation failure to recover from - it is the guarantee working - so
 // this deliberately has no `onError`/retry handling beyond what the caller
 // does with the rejected promise.
+// Checks a draft without rendering it: `{ syntax_error, unknown_variables }`.
+export function useCheckPromptTemplate() {
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/prompts/check/', payload);
+      return data;
+    },
+  });
+}
+
 export function usePreviewPromptTemplate() {
   return useMutation({
     mutationFn: async ({ id, ...payload }) => {
