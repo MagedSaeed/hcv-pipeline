@@ -45,7 +45,7 @@ import json
 import re
 import zipfile
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 
 from corpus.models import Scenario, SystemDescription
 from pipeline.execution_config import (
@@ -90,6 +90,7 @@ def _experiment(experiment):
         "n_systems": experiment.n_systems,
         "n_scenarios_per_system": experiment.n_scenarios_per_system,
         "variants": experiment.variants,
+        "label_scenarios": sorted(experiment.label_scenarios.values_list("pk", flat=True)),
         "created_by": experiment.created_by_id,
         "created_at": experiment.created_at.isoformat(),
     }
@@ -335,6 +336,16 @@ def _phase_run_ids(experiment):
     )
 
 
+def _chosen_scenario_ids(phase_run_ids):
+    """Scenarios a phase-3-only repetition labelled from the corpus."""
+    chosen = set()
+    for ids in PhaseRun.objects.filter(pk__in=phase_run_ids, scenario_ids__isnull=False).values_list(
+        "scenario_ids", flat=True
+    ):
+        chosen.update(ids)
+    return chosen
+
+
 def _systems(phase_run_ids):
     # `SystemDescription.Meta.ordering = ["title"]` is not unique: every
     # repetition of one experiment generates a system from the same prompt,
@@ -345,7 +356,11 @@ def _systems(phase_run_ids):
     # closed here explicitly rather than left to chance.
     return [
         _system_row(s)
-        for s in SystemDescription.objects.filter(generation_run_id__in=phase_run_ids)
+        for s in SystemDescription.objects.filter(
+            Q(generation_run_id__in=phase_run_ids)
+            | Q(scenarios__id__in=_chosen_scenario_ids(phase_run_ids))
+        )
+        .distinct()
         .select_related("generation_run")
         .order_by("title", "id")
     ]
@@ -365,7 +380,9 @@ def _scenarios(phase_run_ids):
     # as the final tiebreaker.
     return [
         _scenario_row(s)
-        for s in Scenario.objects.filter(generation_run_id__in=phase_run_ids)
+        for s in Scenario.objects.filter(
+            Q(generation_run_id__in=phase_run_ids) | Q(id__in=_chosen_scenario_ids(phase_run_ids))
+        )
         .select_related("generation_run")
         .prefetch_related("intended_hcvs")
         .order_by("system_description_id", "order", "scenario_id", "id")

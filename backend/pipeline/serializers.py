@@ -90,6 +90,7 @@ class ExperimentSerializer(serializers.ModelSerializer):
             "phase3_prompt",
             "seed_systems",
             "fewshots",
+            "label_scenarios",
             "generate_systems",
             "generate_scenarios",
             "target_system",
@@ -103,7 +104,7 @@ class ExperimentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["created_by", "created_at"]
         # Not settable on an unsaved instance, so validate() skips them.
-        m2m_fields = frozenset({"seed_systems", "fewshots"})
+        m2m_fields = frozenset({"seed_systems", "fewshots", "label_scenarios"})
 
     def get_run_count(self, obj):
         """Prefer `get_queryset()`'s annotated Count over a live `.count()`.
@@ -134,6 +135,9 @@ class ExperimentSerializer(serializers.ModelSerializer):
         for field, value in attrs.items():
             if field not in self.Meta.m2m_fields:
                 setattr(instance, field, value)
+        if "label_scenarios" in attrs:
+            # clean() validates the submitted selection, not the saved one.
+            instance._pending_label_scenarios = attrs["label_scenarios"]
 
         try:
             instance.clean()
@@ -176,8 +180,8 @@ class RunRequestSerializer(serializers.Serializer):
         min_value=1,
         max_value=100,
         help_text=(
-            "Model output varies between runs, so one repetition's difference between "
-            "variants A and B may be noise; more repetitions give a result you can trust. "
+            "Model output varies between runs, so one repetition's result may be noise; "
+            "more repetitions give a result you can trust. "
             "Cost grows with this number (each run page shows what it cost), and up to 2 "
             "repetitions run at once. Start with 1."
         ),

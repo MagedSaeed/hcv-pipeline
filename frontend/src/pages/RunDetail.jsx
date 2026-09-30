@@ -75,7 +75,9 @@ function titleLookup(rows, key = 'title') {
   return (id) => (id == null ? null : (map.get(id) ?? `#${id}`));
 }
 
-function ConfigSummary({ testId, label, note, phases, systems, fewshotNames, targetTitle, generateSystems, generateScenarios, nSystems, nScenariosPerSystem }) {
+function ConfigSummary({ testId, label, note, phases, systems, fewshotNames, targetTitle, generateSystems, generateScenarios, nSystems, nScenariosPerSystem, labelCount }) {
+  // A phase-3-only configuration labels chosen scenarios; its generation settings are unused.
+  const labelsOnly = Array.isArray(phases) && !phases.includes(2);
   return (
     <div data-testid={testId} className="space-y-2 rounded-md border border-gray-200 bg-white p-3">
       <p className="text-sm font-semibold text-gray-900">{label}</p>
@@ -85,33 +87,54 @@ function ConfigSummary({ testId, label, note, phases, systems, fewshotNames, tar
           <dt className="font-medium text-gray-500">Phases</dt>
           <dd>{phases === null ? '—' : <PhasesLabel phases={phases} />}</dd>
         </div>
-        <div>
-          <dt className="font-medium text-gray-500">Seed systems</dt>
-          <dd>{systems.length > 0 ? systems.join(', ') : '(none)'}</dd>
-        </div>
+        {labelsOnly && (
+          <div>
+            <dt className="font-medium text-gray-500">Scenarios to label</dt>
+            <dd>{labelCount}</dd>
+          </div>
+        )}
+        {!labelsOnly && (
+          <div>
+            <dt className="font-medium text-gray-500">Seed systems</dt>
+            <dd>{systems.length > 0 ? systems.join(', ') : '(none)'}</dd>
+          </div>
+        )}
         <div>
           <dt className="font-medium text-gray-500">Few-shots</dt>
           <dd>{fewshotNames.length > 0 ? fewshotNames.join(', ') : '(none)'}</dd>
         </div>
-        <div>
-          <dt className="font-medium text-gray-500">Target system</dt>
-          <dd>{targetTitle ?? '(none — generating fresh systems)'}</dd>
-        </div>
-        <div>
-          <dt className="font-medium text-gray-500">Generate</dt>
-          <dd>
-            {[generateSystems && 'systems', generateScenarios && 'scenarios'].filter(Boolean).join(' + ') || 'nothing (invalid)'}
-          </dd>
-        </div>
-        <div>
-          <dt className="font-medium text-gray-500">Counts</dt>
-          <dd>
-            {nSystems} {nSystems === 1 ? 'system' : 'systems'} × {nScenariosPerSystem} {nScenariosPerSystem === 1 ? 'scenario' : 'scenarios'}
-          </dd>
-        </div>
+        {!labelsOnly && (
+          <>
+            <div>
+              <dt className="font-medium text-gray-500">Target system</dt>
+              <dd>{targetTitle ?? '(none — generating fresh systems)'}</dd>
+            </div>
+            <div>
+              <dt className="font-medium text-gray-500">Generate</dt>
+              <dd>
+                {[generateSystems && 'systems', generateScenarios && 'scenarios'].filter(Boolean).join(' + ') || 'nothing (invalid)'}
+              </dd>
+            </div>
+            <div>
+              <dt className="font-medium text-gray-500">Counts</dt>
+              <dd>
+                {nSystems} {nSystems === 1 ? 'system' : 'systems'} × {nScenariosPerSystem} {nScenariosPerSystem === 1 ? 'scenario' : 'scenarios'}
+              </dd>
+            </div>
+          </>
+        )}
       </dl>
     </div>
   );
+}
+
+// A phase run with no variant is a phase-3-only run over chosen scenarios.
+function phaseRunSubject(phaseRun) {
+  return phaseRun.variant ? `Variant ${phaseRun.variant}` : 'chosen scenarios';
+}
+
+function phaseRunHeading(phaseRun) {
+  return `Phase ${phaseRun.phase} — ${phaseRunSubject(phaseRun)}`;
 }
 
 function IsolationBadge({ phaseRun }) {
@@ -191,7 +214,7 @@ function PhaseRunRow({ phaseRunRow, isStaff, retryPhaseRun, onRetry }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-sm font-semibold text-gray-900">
-            Phase {phaseRunRow.phase} — Variant {phaseRunRow.variant || '—'}
+            {phaseRunHeading(phaseRunRow)}
           </p>
           <p className="text-xs text-gray-500">
             {phaseRunRow.model} · temperature {phaseRunRow.temperature}
@@ -238,7 +261,7 @@ function PhaseRunRow({ phaseRunRow, isStaff, retryPhaseRun, onRetry }) {
 
       {viewingOutput && (
         <Modal
-          title={`Phase ${phaseRunRow.phase} output — Variant ${phaseRunRow.variant || '—'}`}
+          title={`Phase ${phaseRunRow.phase} output — ${phaseRunSubject(phaseRunRow)}`}
           onClose={() => setViewingOutput(false)}
           wide
         >
@@ -446,6 +469,7 @@ export default function RunDetail() {
           generateScenarios={pinned.generate_scenarios}
           nSystems={pinned.n_systems ?? '—'}
           nScenariosPerSystem={pinned.n_scenarios_per_system ?? '—'}
+          labelCount={(pinned.label_scenario_ids ?? []).length}
         />
         <ConfigSummary
           testId="current-config"
@@ -459,6 +483,7 @@ export default function RunDetail() {
           generateScenarios={experiment?.generate_scenarios}
           nSystems={experiment?.n_systems ?? '—'}
           nScenariosPerSystem={experiment?.n_scenarios_per_system ?? '—'}
+          labelCount={(experiment?.label_scenarios ?? []).length}
         />
       </section>
 

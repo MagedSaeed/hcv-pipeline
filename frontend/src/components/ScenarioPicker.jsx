@@ -10,18 +10,10 @@ import {
 } from '../api/queries';
 import ErrorBanner from './ErrorBanner';
 import GenerationProvenance from './GenerationProvenance';
+import { CARD_FIELDS } from './scenarioCard';
 
 const SEED_GROUP = 'seed';
 const SEED_TITLE = 'Seed & hand-written scenarios';
-
-const CARD_FIELDS = [
-  ['actor', 'Actor'],
-  ['trigger', 'Trigger'],
-  ['standing_state', 'Standing state'],
-  ['asset', 'Asset'],
-  ['threat', 'Threat'],
-  ['outcome', 'Outcome'],
-];
 
 function truncate(text, max = 140) {
   const flat = text.replace(/\s+/g, ' ').trim();

@@ -39,3 +39,6 @@ backend/staticfiles/
 
 # Local database dumps (contain the OpenRouter key and password hashes)
 railway_db_dumps/
+
+
+post_genration_work

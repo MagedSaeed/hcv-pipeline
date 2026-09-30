@@ -1,7 +1,9 @@
 from django.db.models.deletion import ProtectedError
-from rest_framework import viewsets
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from core.params import integer_param
 from corpus.models import FewShotExample, Origin, ResourceFile, Scenario, SystemDescription
@@ -9,9 +11,11 @@ from corpus.permissions import ReadOnlyIfGenerated
 from corpus.serializers import (
     FewShotExampleSerializer,
     ResourceFileSerializer,
+    ScenarioBulkCreateSerializer,
     ScenarioSerializer,
     SystemDescriptionSerializer,
 )
+from pipeline.models import PhaseRun, labelled_elsewhere_error
 
 
 class ResourceFileViewSet(viewsets.ModelViewSet):
@@ -83,6 +87,9 @@ class SystemDescriptionViewSet(viewsets.ModelViewSet):
                 "which deleting it would destroy. Delete the run that produced "
                 "them instead."
             )
+        elsewhere = labelled_elsewhere_error(instance.scenarios.all())
+        if elsewhere:
+            raise PermissionDenied(elsewhere)
         instance.delete()
 
 
@@ -119,7 +126,34 @@ class ScenarioViewSet(viewsets.ModelViewSet):
         phase_run = integer_param(params, "phase_run")
         if phase_run is not None:
             queryset = queryset.filter(generation_run_id=phase_run)
+        labelled_in_run = integer_param(params, "labelled_in_run")
+        if labelled_in_run is not None:
+            # Scenarios a phase-3-only repetition was launched to label.
+            chosen = set()
+            for ids in PhaseRun.objects.filter(
+                pipeline_run_id=labelled_in_run, phase=3, scenario_ids__isnull=False
+            ).values_list("scenario_ids", flat=True):
+                chosen.update(ids)
+            queryset = queryset.filter(id__in=chosen)
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, origin=Origin.MANUAL)
+
+    def perform_destroy(self, instance):
+        """Refused while an experiment's labels point at this scenario."""
+        elsewhere = labelled_elsewhere_error(Scenario.objects.filter(pk=instance.pk))
+        if elsewhere:
+            raise PermissionDenied(elsewhere)
+        instance.delete()
+
+    @action(detail=False, methods=["post"], url_path="bulk")
+    def bulk(self, request, format=None):
+        """Save drafted systems and scenarios in one transaction."""
+        serializer = ScenarioBulkCreateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        created = serializer.save()
+        return Response(
+            {"scenario_ids": [scenario.pk for scenario in created]},
+            status=status.HTTP_201_CREATED,
+        )

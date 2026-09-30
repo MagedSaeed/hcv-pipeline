@@ -14,8 +14,9 @@ from rest_framework.response import Response
 from core.keys import MissingAPIKey, resolve_openrouter_key
 from core.params import integer_param
 from core.permissions import StaffWrites as BaseStaffWrites
+from corpus.models import Scenario
 from pipeline.export import build_bundle, build_run_bundle, safe_filename_stem, write_csv_zip
-from pipeline.models import Experiment, Label, PhaseRun, PipelineRun
+from pipeline.models import Experiment, Label, PhaseRun, PipelineRun, labelled_elsewhere_error
 from pipeline.orchestration import (
     PhaseRunQueueingError,
     QueueingError,
@@ -225,8 +226,8 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
         they are absent — e.g. straight after `perform_create`, where the
         just-saved instance never went through this queryset at all.
 
-        `prefetch_related` closes the other half of the same N+1: `seed_systems`
-        and `fewshots` are plain M2M fields, and DRF's default
+        `prefetch_related` closes the other half of the same N+1: `seed_systems`,
+        `fewshots` and `label_scenarios` are plain M2M fields, and DRF's default
         `PrimaryKeyRelatedField` list rendering iterates each instance's
         manager separately — one more query per row per M2M field — unless
         prefetched here, once, for the whole page.
@@ -245,7 +246,7 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
                 progress_completed=Sum("runs__phase_runs__completed_children"),
                 progress_failed=Sum("runs__phase_runs__failed_children"),
             )
-            .prefetch_related("seed_systems", "fewshots")
+            .prefetch_related("seed_systems", "fewshots", "label_scenarios")
             .order_by("-created_at")
         )
 
@@ -283,6 +284,12 @@ class ExperimentViewSet(ConflictCodeMixin, ExportContentNegotiationMixin, viewse
                 "may still be held by a worker. Wait for them to finish, or cancel them first.",
                 code="run_in_flight",
             )
+        elsewhere = labelled_elsewhere_error(
+            Scenario.objects.filter(generation_run__pipeline_run__experiment=instance),
+            instance.runs.values_list("pk", flat=True),
+        )
+        if elsewhere:
+            raise Conflict(elsewhere, code="labelled_elsewhere")
         with transaction.atomic():
             instance.adhoc_phase_runs.all().delete()
             instance.delete()
@@ -463,6 +470,11 @@ class PipelineRunViewSet(
                 "finish, or cancel it first.",
                 code="run_in_flight",
             )
+        elsewhere = labelled_elsewhere_error(
+            Scenario.objects.filter(generation_run__pipeline_run=instance), [instance.pk]
+        )
+        if elsewhere:
+            raise Conflict(elsewhere, code="labelled_elsewhere")
         instance.delete()
 
     @action(detail=True, methods=["post"])
@@ -779,6 +791,12 @@ class PhaseRunViewSet(
                 "a worker may still hold it. Wait for it to finish.",
                 code="run_in_flight",
             )
+        elsewhere = labelled_elsewhere_error(
+            Scenario.objects.filter(generation_run=instance),
+            [instance.pipeline_run_id] if instance.pipeline_run_id else [],
+        )
+        if elsewhere:
+            raise Conflict(elsewhere, code="labelled_elsewhere")
         instance.delete()
 
     @action(detail=True, methods=["get"])
@@ -808,7 +826,11 @@ class PhaseRunViewSet(
             raise ValidationError(
                 {"detail": "Retry re-labels scenarios and applies only to a phase 3 run."}
             )
-        if phase_run.pipeline_run_id and not phase_run.source_phase_run_id:
+        if (
+            phase_run.pipeline_run_id
+            and not phase_run.source_phase_run_id
+            and phase_run.scenario_ids is None
+        ):
             # `retry_failed` re-derives the scenario list from
             # `source_phase_run` (see `scenarios_for`); with it gone,
             # `scenarios_for` returns nothing to relabel, but `retry_failed`

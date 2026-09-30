@@ -276,6 +276,34 @@ describe('RunDetail', () => {
     expect(within(currentPanel).queryByText(/pinned oldsmar/i)).not.toBeInTheDocument();
   });
 
+  it('heads a variant-less labelling run by its chosen scenarios, not "Variant —"', async () => {
+    const run = pipelineRun({ status: 'completed', config: { ...PINNED_CONFIG, phases: [3], label_scenario_ids: [4] } });
+    installBaseFixtures({ run, phaseRuns: [phaseRun({ phase: 3, variant: '', status: 'completed' })] });
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    const row = await screen.findByTestId('phase-run-row');
+    expect(within(row).getByText('Phase 3 — chosen scenarios')).toBeInTheDocument();
+    expect(within(row).queryByText(/variant/i)).not.toBeInTheDocument();
+  });
+
+  it('a phase-3-only run shows the chosen scenario count instead of generation settings', async () => {
+    const run = pipelineRun({
+      status: 'completed',
+      config: { ...PINNED_CONFIG, phases: [3], label_scenario_ids: [4, 5, 6] },
+    });
+    installBaseFixtures({ run, phaseRuns: [] });
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    const pinnedPanel = await screen.findByTestId('pinned-config');
+    expect(within(pinnedPanel).getByText('Phase 3 only (label chosen scenarios)')).toBeInTheDocument();
+    expect(within(pinnedPanel).getByText('Scenarios to label')).toBeInTheDocument();
+    expect(within(pinnedPanel).getByText('3')).toBeInTheDocument();
+    expect(within(pinnedPanel).queryByText('Seed systems')).not.toBeInTheDocument();
+    expect(within(pinnedPanel).queryByText('Counts')).not.toBeInTheDocument();
+  });
+
   it('shows the pinned phases, which may differ from the experiment\'s current phases', async () => {
     const run = pipelineRun({ status: 'completed', config: { ...PINNED_CONFIG, phases: [2] } });
     installBaseFixtures({ run, phaseRuns: [] });

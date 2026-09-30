@@ -80,7 +80,14 @@ _ADHOC_PATH = (
 # rule really cannot bite on this path rather than merely being awkward to
 # wire in. An unjustified entry here re-opens exactly the hole this file
 # exists to close, so the reason is required reading for whoever reviews it.
-_NOT_APPLICABLE_TO_ADHOC = {}
+_NOT_APPLICABLE_TO_ADHOC = {
+    # Checks an experiment's own `label_scenarios`. An ad-hoc run picks its
+    # scenarios through `_chosen_scenarios_error`, and a prompt test may
+    # legitimately label another test's scratch output.
+    "label_scenarios_error": "phase-3-only experiment selection; ad-hoc runs have their own check",
+    # Guards deletes that would cascade away labels; it never validates a run.
+    "labelled_elsewhere_error": "delete guard, not a run configuration rule",
+}
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 

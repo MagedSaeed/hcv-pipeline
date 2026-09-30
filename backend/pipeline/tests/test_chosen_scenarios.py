@@ -259,7 +259,7 @@ def test_a_run_whose_chosen_scenarios_were_all_deleted_fails_not_labels_everythi
 
 
 @pytest.mark.django_db
-def test_the_database_refuses_a_choice_on_an_orchestrated_run(taxonomy, phase3_template):
+def test_the_database_refuses_a_choice_on_a_generation_run(taxonomy, phase3_template):
     experiment = Experiment.objects.create(
         name="e",
         taxonomy=taxonomy,
@@ -273,7 +273,8 @@ def test_the_database_refuses_a_choice_on_an_orchestrated_run(taxonomy, phase3_t
     with pytest.raises(IntegrityError):
         PhaseRun.objects.create(
             pipeline_run=pipeline_run,
-            phase=3,
+            phase=2,
+            variant="A",
             model="m3",
             prompt_template=phase3_template,
             taxonomy=taxonomy,

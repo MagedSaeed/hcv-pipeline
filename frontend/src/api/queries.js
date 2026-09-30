@@ -807,6 +807,22 @@ export function useUpdateScenario() {
   });
 }
 
+// `POST /api/scenarios/bulk/` - saves drafted systems and scenarios in one
+// transaction; returns `{ scenario_ids }` for the new scenarios.
+export function useBulkCreateScenarios() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) => {
+      const { data } = await apiClient.post('/scenarios/bulk/', payload);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.scenarios.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.systemDescriptions.all });
+    },
+  });
+}
+
 // -----------------------------------------------------------------------
 // A single PhaseRun, read alone (not the list). Corpus is the one screen
 // that needs this: a system description or scenario row never carries its

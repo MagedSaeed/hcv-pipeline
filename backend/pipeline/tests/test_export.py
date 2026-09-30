@@ -150,6 +150,7 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
         "n_systems",
         "n_scenarios_per_system",
         "variants",
+        "label_scenarios",
         "created_by",
         "created_at",
     }
@@ -781,6 +782,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "n_systems",
         "n_scenarios_per_system",
         "variants",
+        "label_scenarios",
         "created_by",
         "created_at",
     ]
@@ -843,6 +845,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "generate_scenarios",
         "n_systems",
         "n_scenarios_per_system",
+        "label_scenario_ids",
     ]
     assert header("labels") == [
         "id",
@@ -1301,6 +1304,7 @@ def test_a_run_export_carries_its_own_pinned_inputs_with_every_nested_field_popu
         "generate_scenarios",
         "n_systems",
         "n_scenarios_per_system",
+        "label_scenario_ids",
     }
 
     snapshot_system = config["seed_systems"][0]

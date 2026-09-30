@@ -2,7 +2,8 @@ import { useEffect, useId } from 'react';
 
 // A centred pop-up over a dimmed backdrop. Escape or a backdrop click closes
 // it; the caller owns the open state and simply unmounts it on `onClose`.
-export default function Modal({ title, onClose, children, wide = false }) {
+// `centered` also centres it vertically; a taller dialog still scrolls from its top.
+export default function Modal({ title, onClose, children, wide = false, centered = false }) {
   const titleId = useId();
 
   useEffect(() => {
@@ -24,7 +25,7 @@ export default function Modal({ title, onClose, children, wide = false }) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`w-full ${wide ? 'max-w-4xl' : 'max-w-xl'} rounded-lg bg-white shadow-xl`}
+        className={`w-full ${wide ? 'max-w-4xl' : 'max-w-xl'} ${centered ? 'my-auto' : ''} rounded-lg bg-white shadow-xl`}
       >
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
           <h2 id={titleId} className="text-base font-semibold text-gray-900">

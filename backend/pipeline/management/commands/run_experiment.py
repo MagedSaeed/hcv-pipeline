@@ -32,8 +32,8 @@ class Command(BaseCommand):
             default=1,
             help=(
                 "How many times to repeat this configuration (default: 1). Model "
-                "output varies between runs, so one repetition's A-vs-B difference "
-                "may be noise. Cost grows with this number; up to 2 repetitions run "
+                "output varies between runs, so one repetition's result may be "
+                "noise. Cost grows with this number; up to 2 repetitions run "
                 "at once (--inline runs them one at a time)."
             ),
         )

@@ -186,6 +186,7 @@ export default function ExperimentDetail() {
   const phase2PromptLabel = templateLookup(phase2Templates);
   const phase3PromptLabel = templateLookup(phase3Templates);
   const taxonomyLabel = taxonomyLookup(taxonomies);
+  const runsPhase2 = (experiment.phases ?? [2, 3]).includes(2);
   const runsPhase3 = (experiment.phases ?? [2, 3]).includes(3);
 
   // The backend's own launch-time dry render (spec §10.4) refuses a
@@ -292,16 +293,25 @@ export default function ExperimentDetail() {
             <dt className="font-medium text-gray-500">Taxonomy</dt>
             <dd>{taxonomyLabel(experiment.taxonomy)}</dd>
           </div>
-          <div>
-            <dt className="font-medium text-gray-500">Variants</dt>
-            <dd>{(experiment.variants ?? []).join(', ') || '(none)'}</dd>
-          </div>
-          <div>
-            <dt className="font-medium text-gray-500">Phase 2 model / temperature</dt>
-            <dd>
-              {experiment.phase2_model} · {experiment.phase2_temperature}
-            </dd>
-          </div>
+          {runsPhase2 ? (
+            <div>
+              <dt className="font-medium text-gray-500">Variants</dt>
+              <dd>{(experiment.variants ?? []).join(', ') || '(none)'}</dd>
+            </div>
+          ) : (
+            <div>
+              <dt className="font-medium text-gray-500">Scenarios to label</dt>
+              <dd>{(experiment.label_scenarios ?? []).length}</dd>
+            </div>
+          )}
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Phase 2 model / temperature</dt>
+              <dd>
+                {experiment.phase2_model} · {experiment.phase2_temperature}
+              </dd>
+            </div>
+          )}
           {runsPhase3 && (
             <div>
               <dt className="font-medium text-gray-500">Phase 3 model / temperature</dt>
@@ -310,52 +320,64 @@ export default function ExperimentDetail() {
               </dd>
             </div>
           )}
-          <div>
-            <dt className="font-medium text-gray-500">Phase 2 prompt — Variant A</dt>
-            <dd>{phase2PromptLabel(experiment.phase2_prompt_a) ?? '(none)'}</dd>
-            <FieldNote message={launchFieldErrors.phase2_prompt_a} />
-          </div>
-          <div>
-            <dt className="font-medium text-gray-500">Phase 2 prompt — Variant B</dt>
-            <dd>{phase2PromptLabel(experiment.phase2_prompt_b) ?? '(none)'}</dd>
-            <FieldNote message={launchFieldErrors.phase2_prompt_b} />
-          </div>
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Phase 2 prompt — Variant A</dt>
+              <dd>{phase2PromptLabel(experiment.phase2_prompt_a) ?? '(none)'}</dd>
+              <FieldNote message={launchFieldErrors.phase2_prompt_a} />
+            </div>
+          )}
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Phase 2 prompt — Variant B</dt>
+              <dd>{phase2PromptLabel(experiment.phase2_prompt_b) ?? '(none)'}</dd>
+              <FieldNote message={launchFieldErrors.phase2_prompt_b} />
+            </div>
+          )}
           {runsPhase3 && (
             <div>
               <dt className="font-medium text-gray-500">Phase 3 prompt</dt>
               <dd>{phase3PromptLabel(experiment.phase3_prompt) ?? '(none)'}</dd>
             </div>
           )}
-          <div>
-            <dt className="font-medium text-gray-500">Seed systems</dt>
-            <dd>{(experiment.seed_systems ?? []).map(systemTitle).join(', ') || '(none)'}</dd>
-          </div>
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Seed systems</dt>
+              <dd>{(experiment.seed_systems ?? []).map(systemTitle).join(', ') || '(none)'}</dd>
+            </div>
+          )}
           <div>
             <dt className="font-medium text-gray-500">Few-shots</dt>
             <dd>{(experiment.fewshots ?? []).map(fewshotName).join(', ') || '(none)'}</dd>
           </div>
-          <div>
-            <dt className="font-medium text-gray-500">Target system</dt>
-            <dd>
-              {experiment.target_system != null
-                ? systemTitle(experiment.target_system)
-                : '(none — generating fresh systems)'}
-            </dd>
-          </div>
-          <div>
-            <dt className="font-medium text-gray-500">Generate</dt>
-            <dd>
-              {[experiment.generate_systems && 'systems', experiment.generate_scenarios && 'scenarios']
-                .filter(Boolean)
-                .join(' + ') || 'nothing (invalid)'}
-            </dd>
-          </div>
-          <div>
-            <dt className="font-medium text-gray-500">Counts</dt>
-            <dd>
-              {experiment.n_systems} {experiment.n_systems === 1 ? 'system' : 'systems'} × {experiment.n_scenarios_per_system} {experiment.n_scenarios_per_system === 1 ? 'scenario' : 'scenarios'}
-            </dd>
-          </div>
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Target system</dt>
+              <dd>
+                {experiment.target_system != null
+                  ? systemTitle(experiment.target_system)
+                  : '(none — generating fresh systems)'}
+              </dd>
+            </div>
+          )}
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Generate</dt>
+              <dd>
+                {[experiment.generate_systems && 'systems', experiment.generate_scenarios && 'scenarios']
+                  .filter(Boolean)
+                  .join(' + ') || 'nothing (invalid)'}
+              </dd>
+            </div>
+          )}
+          {runsPhase2 && (
+            <div>
+              <dt className="font-medium text-gray-500">Counts</dt>
+              <dd>
+                {experiment.n_systems} {experiment.n_systems === 1 ? 'system' : 'systems'} × {experiment.n_scenarios_per_system} {experiment.n_scenarios_per_system === 1 ? 'scenario' : 'scenarios'}
+              </dd>
+            </div>
+          )}
         </dl>
       </section>
 

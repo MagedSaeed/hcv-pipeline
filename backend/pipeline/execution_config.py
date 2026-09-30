@@ -86,6 +86,7 @@ from types import SimpleNamespace
 from corpus.models import FewShotExample, ResourceKind, SystemDescription
 from pipeline.models import (
     ALLOWED_PHASES,
+    PHASE_LABELLING_ONLY,
     PHASE_LABELLING,
     Experiment,
     chosen_fewshots_error,
@@ -499,6 +500,7 @@ _TOP_LEVEL_KEY_ORDER = (
     "generate_scenarios",
     "n_systems",
     "n_scenarios_per_system",
+    "label_scenario_ids",
 )
 _SYSTEM_KEY_ORDER = ("id", "title", "slug", "body", "scenarios")
 _SCENARIO_KEY_ORDER = (
@@ -649,6 +651,12 @@ def config_snapshot(experiment):
         "generate_scenarios": experiment.generate_scenarios,
         "n_systems": experiment.n_systems,
         "n_scenarios_per_system": experiment.n_scenarios_per_system,
+        # What a phase-3-only run labels, frozen so retries and repeats agree.
+        "label_scenario_ids": (
+            sorted(experiment.label_scenarios.values_list("pk", flat=True))
+            if experiment.labels_only
+            else []
+        ),
     }
 
 
@@ -883,6 +891,16 @@ def validate_snapshot(config):
     _require_bool(config["generate_scenarios"], "generate_scenarios")
     _require_int(config["n_systems"], "n_systems")
     _require_int(config["n_scenarios_per_system"], "n_scenarios_per_system")
+    ids = config["label_scenario_ids"]
+    _require_list(ids, "label_scenario_ids")
+    for index, scenario_pk in enumerate(ids):
+        _require_int(scenario_pk, f"label_scenario_ids[{index}]")
+    if config["phases"] == PHASE_LABELLING_ONLY and not ids:
+        raise MalformedSnapshot("label_scenario_ids must name at least one scenario for phases [3].")
+    if config["phases"] != PHASE_LABELLING_ONLY and ids:
+        raise MalformedSnapshot(
+            f"label_scenario_ids must be empty for phases {config['phases']!r}, got {ids!r}."
+        )
 
 
 def system_from_snapshot(system_dict):

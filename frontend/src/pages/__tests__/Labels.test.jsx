@@ -310,6 +310,42 @@ async function applyRunFilter(user, { run, variant, hcv } = {}) {
 }
 
 describe('Labels', () => {
+  it('shows one matrix of the chosen scenarios for a phase-3-only run, without the variant filter', async () => {
+    server.use(
+      http.get('/api/pipeline-runs/', () =>
+        HttpResponse.json(
+          paginated([
+            { id: 90, experiment: 5, repetition_index: 1, status: 'completed', config: { phases: [3], label_scenario_ids: [55] } },
+          ])
+        )
+      ),
+      http.get('/api/phase-runs/', () =>
+        HttpResponse.json(paginated([{ id: 91, pipeline_run: 90, phase: 3, variant: '', taxonomy: 9, status: 'completed' }]))
+      ),
+      http.get('/api/scenarios/', ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('labelled_in_run') !== '90') return HttpResponse.json(paginated([]));
+        return HttpResponse.json(
+          paginated([{ id: 55, system_description: 11, scenario_id: 'sc_55', origin: 'seed', generation_run: null }])
+        );
+      })
+    );
+    renderApp({ initialEntries: ['/labels?run=90'] });
+
+    const matrix = await screen.findByTestId('chosen-matrix');
+    expect(within(matrix).getByRole('heading', { name: '1 chosen scenario' })).toBeInTheDocument();
+    expect(await within(matrix).findByRole('rowheader', { name: /sc_55/ })).toBeInTheDocument();
+    expect(screen.queryByTestId('variant-A-matrix')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^variant$/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the A/B matrices for a run whose config has no phases', async () => {
+    renderApp({ initialEntries: ['/labels?run=101'] });
+    expect(await screen.findByTestId('variant-A-matrix')).toBeInTheDocument();
+    expect(screen.getByTestId('variant-B-matrix')).toBeInTheDocument();
+    expect(screen.queryByTestId('chosen-matrix')).not.toBeInTheDocument();
+  });
+
   it('renders one scenario x HCV matrix per variant, not a merged view', async () => {
     const user = userEvent.setup();
     renderApp({ initialEntries: ['/labels'] });

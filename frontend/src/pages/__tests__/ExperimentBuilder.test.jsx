@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -498,7 +498,7 @@ describe('ExperimentBuilder', () => {
     expect(screen.queryByLabelText(/^name$/i)).not.toBeInTheDocument();
   });
 
-  it('always runs phase 2; unticking phase 3 hides its section and saves phases [2]', async () => {
+  it('unticking phase 3 hides its section and saves phases [2]', async () => {
     const user = userEvent.setup();
     let posted = null;
     server.use(
@@ -506,28 +506,89 @@ describe('ExperimentBuilder', () => {
         '/api/experiments/',
         guardedExperimentWrite(async ({ request }) => {
           posted = await request.json();
-          return HttpResponse.json({ phases: ['Phase 3 labels the scenarios phase 2 generates, so it needs phase 2.'] }, { status: 400 });
+          return HttpResponse.json({ phases: ['Some phases error.'] }, { status: 400 });
         })
       )
     );
     renderApp({ initialEntries: ['/experiments/new'] });
 
-    const phase2 = await screen.findByRole('checkbox', { name: /phase 2 — generate scenarios/i });
-    expect(phase2).toBeChecked();
-    expect(phase2).toBeDisabled();
-    const phase3 = screen.getByRole('checkbox', { name: /phase 3 — label the generated scenarios/i });
+    const phase3 = await screen.findByRole('checkbox', { name: /phase 3 — label scenarios/i });
     expect(phase3).toBeChecked();
-    expect(screen.getByLabelText(/^phase 3 prompt$/i)).toBeInTheDocument();
-
     await fillMinimalValidForm(user);
     await user.click(phase3);
     expect(screen.queryByLabelText(/^phase 3 prompt$/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/^phase 3 model$/i)).not.toBeInTheDocument();
     expect(screen.getByText(/only generates scenarios; nothing is labelled/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /create experiment/i }));
-    expect(await screen.findByText(/so it needs phase 2/i)).toBeInTheDocument();
+    expect(await screen.findByText(/some phases error/i)).toBeInTheDocument();
     expect(posted.phases).toEqual([2]);
+    expect(posted.label_scenarios).toEqual([]);
+  });
+
+  it('phase 3 only hides generation settings, picks scenarios in the modal, and saves them', async () => {
+    const user = userEvent.setup();
+    let posted = null;
+    server.use(
+      http.get('/api/scenarios/', () =>
+        HttpResponse.json(
+          paginated([
+            { id: 1, system_description: 10, scenario_id: 'sc_01', origin: 'seed', generation_run: null, threat: 'Remote login' },
+            { id: 2, system_description: 10, scenario_id: 'sc_02', origin: 'seed', generation_run: null, threat: 'Insider' },
+          ])
+        )
+      ),
+      http.get('/api/phase-runs/', () => HttpResponse.json(paginated([]))),
+      http.post(
+        '/api/experiments/',
+        guardedExperimentWrite(async ({ request }) => {
+          posted = await request.json();
+          return HttpResponse.json({ phase3_model: ['Stop here.'] }, { status: 400 });
+        })
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/new'] });
+
+    await user.click(await screen.findByRole('checkbox', { name: /phase 2 — generate scenarios/i }));
+    expect(screen.queryByLabelText(/^phase 2 model$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /seed systems/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /what to generate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /variants/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/labels the scenarios you choose below/i)).toBeInTheDocument();
+    expect(screen.getByText('No scenarios chosen yet.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /choose scenarios/i }));
+    const dialog = await screen.findByRole('dialog', { name: /choose scenarios to label/i });
+    const systems = await within(dialog).findByRole('list', { name: /systems/i });
+    await user.click(within(systems).getByRole('button', { name: /oldsmar water plant/i }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /select all in seed & hand-written/i }));
+    await user.click(within(dialog).getByRole('button', { name: /^apply$/i }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByText('2 scenarios · 1 system')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^name$/i), 'Labellers');
+    await user.click(screen.getByRole('button', { name: /create experiment/i }));
+    expect(await screen.findByText('Stop here.')).toBeInTheDocument();
+    expect(posted.phases).toEqual([3]);
+    expect(posted.label_scenarios).toEqual([1, 2]);
+  });
+
+  it('shows a label_scenarios field error under the selection', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/scenarios/', () => HttpResponse.json(paginated([]))),
+      http.get('/api/phase-runs/', () => HttpResponse.json(paginated([]))),
+      http.post(
+        '/api/experiments/',
+        guardedExperimentWrite(() =>
+          HttpResponse.json({ label_scenarios: ['Choose at least one scenario to label.'] }, { status: 400 })
+        )
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/new'] });
+    await user.click(await screen.findByRole('checkbox', { name: /phase 2 — generate scenarios/i }));
+    await user.click(screen.getByRole('button', { name: /create experiment/i }));
+    expect(await screen.findByText('Choose at least one scenario to label.')).toBeInTheDocument();
   });
 
   it('a non-staff user cannot see the builder form', async () => {
@@ -637,6 +698,49 @@ describe('ExperimentBuilder editing an existing experiment', () => {
     expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument();
     // Never the create-mode heading/button for an existing experiment.
     expect(screen.queryByRole('button', { name: /^create experiment$/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps the saved few-shots when the few-shot list fails to load', async () => {
+    const user = userEvent.setup();
+    let patched = null;
+    server.use(
+      http.get('/api/fewshots/', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })),
+      http.patch(
+        '/api/experiments/42/',
+        guardedExperimentWrite(async ({ request }) => {
+          patched = await request.json();
+          return HttpResponse.json({ ...currentExperiment, ...patched });
+        })
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/42/edit'] });
+    await screen.findByLabelText(/^name$/i);
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+    await vi.waitFor(() => expect(patched).not.toBeNull());
+    expect(patched.fewshots).toEqual([20]);
+  });
+
+  it('switching to phase 3 only drops the hidden seed systems and phase 2 few-shots from the save', async () => {
+    const user = userEvent.setup();
+    let patched = null;
+    server.use(
+      http.get('/api/scenarios/', () => HttpResponse.json(paginated([]))),
+      http.get('/api/phase-runs/', () => HttpResponse.json(paginated([]))),
+      http.patch(
+        '/api/experiments/42/',
+        guardedExperimentWrite(async ({ request }) => {
+          patched = await request.json();
+          return HttpResponse.json({ label_scenarios: ['Stop here.'] }, { status: 400 });
+        })
+      )
+    );
+    renderApp({ initialEntries: ['/experiments/42/edit'] });
+    await user.click(await screen.findByRole('checkbox', { name: /phase 2 — generate scenarios/i }));
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(await screen.findByText('Stop here.')).toBeInTheDocument();
+    expect(patched.phases).toEqual([3]);
+    expect(patched.seed_systems).toEqual([]);
+    expect(patched.fewshots).toEqual([]);
   });
 
   it('loads a generation-only experiment with phase 3 unticked and its section hidden', async () => {

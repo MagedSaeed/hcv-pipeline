@@ -155,6 +155,19 @@ describe('ExperimentDetail', () => {
     expect(within(config).queryByText(/phase 3 prompt/i)).not.toBeInTheDocument();
   });
 
+  it('a phase-3-only experiment shows its scenario count and hides the generation rows', async () => {
+    installDetailFixtures({ ...EXPERIMENT, phases: [3], label_scenarios: [4, 5], phase2_model: '' });
+    renderApp({ initialEntries: ['/experiments/77'] });
+
+    const config = await screen.findByTestId('current-config');
+    expect(within(config).getByText('Phase 3 only (label chosen scenarios)')).toBeInTheDocument();
+    expect(within(config).getByText('Scenarios to label')).toBeInTheDocument();
+    expect(within(config).getByText(/phase 3 model/i)).toBeInTheDocument();
+    for (const hidden of [/phase 2 model/i, /phase 2 prompt/i, /seed systems/i, /target system/i, /^generate$/i, /^counts$/i, /^variants$/i]) {
+      expect(within(config).queryByText(hidden)).not.toBeInTheDocument();
+    }
+  });
+
   it('counts a single system and scenario in the singular', async () => {
     installDetailFixtures({ ...EXPERIMENT, n_systems: 1, n_scenarios_per_system: 1 });
     renderApp({ initialEntries: ['/experiments/77'] });

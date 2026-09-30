@@ -552,13 +552,12 @@ def test_an_experiment_runs_both_phases_by_default(experiment):
 
 
 @pytest.mark.django_db
-def test_phase_three_alone_is_refused_because_it_needs_phase_two(experiment):
+def test_phase_three_alone_needs_scenarios_to_label(experiment):
     experiment.phases = [3]
     with pytest.raises(ValidationError) as caught:
         experiment.full_clean()
-    assert caught.value.message_dict["phases"] == [
-        "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
-    ]
+    assert "phases" not in caught.value.message_dict
+    assert "Choose at least one scenario" in caught.value.message_dict["label_scenarios"][0]
 
 
 @pytest.mark.django_db

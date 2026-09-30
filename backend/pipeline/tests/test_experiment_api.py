@@ -155,15 +155,16 @@ def test_an_experiment_without_phases_defaults_to_both(api_client, member, exper
 
 
 @pytest.mark.django_db
-def test_phase_three_without_phase_two_is_a_400_on_phases(api_client, staff, experiment):
+def test_phase_three_alone_without_scenarios_is_a_400_on_label_scenarios(
+    api_client, staff, experiment
+):
     api_client.force_authenticate(user=staff)
     response = api_client.patch(
         f"/api/experiments/{experiment.id}/", {"phases": [3]}, format="json"
     )
     assert response.status_code == 400
-    assert response.json()["phases"] == [
-        "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
-    ]
+    assert "phases" not in response.json()
+    assert "Choose at least one scenario" in response.json()["label_scenarios"][0]
 
 
 @pytest.mark.django_db

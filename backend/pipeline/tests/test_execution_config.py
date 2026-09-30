@@ -48,6 +48,7 @@ _VALID_CONFIG = {
     "generate_scenarios": True,
     "n_systems": 1,
     "n_scenarios_per_system": 1,
+    "label_scenario_ids": [],
 }
 
 
@@ -161,10 +162,10 @@ def test_a_snapshot_missing_phases_is_malformed():
 
 
 @pytest.mark.parametrize(
-    "phases", [[3], [], [3, 2], [2, 2], [2, 3, 4], ["2", "3"], [True], (2, 3), "2,3", None]
+    "phases", [[], [3, 2], [2, 2], [2, 3, 4], ["2", "3"], [True], (2, 3), "2,3", None]
 )
 def test_a_lying_phases_value_is_malformed(phases):
-    """Only the two shapes launch can pin — [2] and [2, 3] — are accepted."""
+    """Only the shapes launch can pin — [2], [2, 3] and [3] — are accepted."""
     config = copy.deepcopy(_VALID_CONFIG)
     config["phases"] = phases
     with pytest.raises(MalformedSnapshot, match="phases"):

@@ -16,9 +16,9 @@ from taxonomy.models import Taxonomy
 VARIANTS = (VARIANT_UNBIASED, VARIANT_GUIDED)
 PHASE_GENERATION = 2
 PHASE_LABELLING = 3
-# The only two pipeline shapes: labelling always needs this run's own generation.
-ALLOWED_PHASES = ([PHASE_GENERATION], [PHASE_GENERATION, PHASE_LABELLING])
-PHASE3_NEEDS_PHASE2 = "Phase 3 labels the scenarios phase 2 generates, so it needs phase 2."
+PHASE_LABELLING_ONLY = [PHASE_LABELLING]
+# Generate only, generate then label that output, or label chosen corpus scenarios.
+ALLOWED_PHASES = ([PHASE_GENERATION], [PHASE_GENERATION, PHASE_LABELLING], PHASE_LABELLING_ONLY)
 
 
 def default_phases():
@@ -437,14 +437,47 @@ def _phases_error(phases):
     """Inline `Experiment.clean()` rule (not a `*_error` helper): an ad-hoc run
     has a single `phase` field and nothing equivalent to check."""
     if not isinstance(phases, list) or not phases:
-        return "Choose the phases to run: [2] or [2, 3]."
+        return "Choose the phases to run: [2], [2, 3] or [3]."
     if any(isinstance(p, bool) or p not in (PHASE_GENERATION, PHASE_LABELLING) for p in phases):
         return f"Unknown phase(s) in {phases!r}; expected 2 and/or 3."
     if len(set(phases)) != len(phases):
         return f"Duplicate phase(s) in {phases!r}; each phase may appear at most once."
-    if PHASE_GENERATION not in phases:
-        return PHASE3_NEEDS_PHASE2
     return None
+
+
+def label_scenarios_error(scenarios):
+    """The chosen scenarios of a phase-3-only experiment, or `None` when valid.
+
+    Scratch rows are refused because exports leave prompt-test output out.
+    """
+    if not scenarios:
+        return "Choose at least one scenario to label: this experiment runs phase 3 only."
+    scratch = sorted(scenario.scenario_id for scenario in scenarios if scenario.is_scratch)
+    if scratch:
+        return (
+            "Scenarios from prompt test runs can't be labelled in an experiment: "
+            f"{', '.join(scratch)}."
+        )
+    return None
+
+
+def labelled_elsewhere_error(scenarios, own_pipeline_run_ids=()):
+    """Refuse a delete that would cascade away another repetition's labels, or
+    `None`. A phase-3-only run labels scenarios it does not own, so deleting
+    them (or whatever generated them) would silently shrink its results."""
+    names = sorted(
+        set(
+            Label.objects.filter(scenario__in=scenarios, phase_run__pipeline_run__isnull=False)
+            .exclude(phase_run__pipeline_run_id__in=list(own_pipeline_run_ids))
+            .values_list("phase_run__pipeline_run__experiment__name", flat=True)
+        )
+    )
+    if not names:
+        return None
+    return (
+        f"Experiment(s) {', '.join(names)} labelled these scenarios; deleting them would "
+        "remove those labels. Delete those experiments first."
+    )
 
 
 class Experiment(models.Model):
@@ -459,7 +492,8 @@ class Experiment(models.Model):
     description = models.TextField(blank=True, default="")
     taxonomy = models.ForeignKey("taxonomy.Taxonomy", on_delete=models.PROTECT)
 
-    phase2_model = models.CharField(max_length=200)
+    # Blank for a phase-3-only experiment; `clean()` requires it when phase 2 runs.
+    phase2_model = models.CharField(max_length=200, blank=True, default="")
     phase2_temperature = models.FloatField(default=1.0)
     # Two fully independent templates, one per variant — NOT one shared FK
     # branching on `{% if taxonomy is defined %}` (the old shape; see
@@ -502,11 +536,16 @@ class Experiment(models.Model):
         related_name="phase3_experiments",
         on_delete=models.PROTECT,
     )
-    # [2] (generation only) or [2, 3] (generate, then label that output).
+    # [2] (generate only), [2, 3] (generate, then label that output) or [3]
+    # (label `label_scenarios`).
     phases = models.JSONField(default=default_phases)
 
     seed_systems = models.ManyToManyField("corpus.SystemDescription", blank=True)
     fewshots = models.ManyToManyField("corpus.FewShotExample", blank=True)
+    # What a phase-3-only experiment labels; ignored for other phase lists.
+    label_scenarios = models.ManyToManyField(
+        "corpus.Scenario", blank=True, related_name="labelled_by_experiments"
+    )
 
     generate_systems = models.BooleanField(default=True)
     generate_scenarios = models.BooleanField(default=True)
@@ -538,6 +577,20 @@ class Experiment(models.Model):
     @property
     def runs_labelling(self):
         return isinstance(self.phases, list) and PHASE_LABELLING in self.phases
+
+    @property
+    def labels_only(self):
+        return self.phases == PHASE_LABELLING_ONLY
+
+    def label_scenario_rows(self):
+        """The scenarios `clean()` checks: the serializer's pending list when it
+        set one, else the saved M2M (empty for an unsaved row)."""
+        pending = getattr(self, "_pending_label_scenarios", None)
+        if pending is not None:
+            return list(pending)
+        if not self.pk:
+            return []
+        return list(self.label_scenarios.select_related("generation_run"))
 
     def phase2_prompt_for(self, variant):
         """Which per-variant phase-2 template `launch()` pins onto `variant`'s
@@ -592,7 +645,7 @@ class Experiment(models.Model):
         # failed three review rounds running, and `pipeline/tests/
         # test_adhoc_rule_parity.py` now fails the build if a NEW rule is
         # added here without reaching that path.
-        errors = dict(generation_config_errors(self.generation_config))
+        errors = {} if self.labels_only else dict(generation_config_errors(self.generation_config))
 
         variants = list(self.variants or [])
         variant_errors = []
@@ -606,7 +659,7 @@ class Experiment(models.Model):
             variant_errors.append(
                 f"Duplicate variant(s) {duplicated}; each variant may appear at most once."
             )
-        if variant_errors:
+        if variant_errors and not self.labels_only:
             errors["variants"] = variant_errors
 
         # Which variants this experiment will ACTUALLY run once saved —
@@ -669,12 +722,23 @@ class Experiment(models.Model):
             (VARIANT_UNBIASED, "phase2_prompt_a"),
             (VARIANT_GUIDED, "phase2_prompt_b"),
         ):
-            if variant in effective_variants and getattr(self, f"{field}_id") is None:
+            if (
+                not self.labels_only
+                and variant in effective_variants
+                and getattr(self, f"{field}_id") is None
+            ):
                 errors[field] = (
                     f"variant {variant!r} is enabled (in `variants`) but {field} "
                     f"is not set. Phase 2 needs a template for every variant "
                     "this experiment actually runs."
                 )
+
+        if not self.labels_only and not (self.phase2_model or "").strip():
+            errors["phase2_model"] = "Set phase2_model: phase 2 is enabled."
+        if self.labels_only:
+            label_error = label_scenarios_error(self.label_scenario_rows())
+            if label_error:
+                errors["label_scenarios"] = label_error
 
         # Phase-3 settings are required only when this experiment labels.
         if self.runs_labelling:
@@ -847,8 +911,8 @@ class PhaseRun(models.Model):
         ordering = ["-id"]
         constraints = [
             models.CheckConstraint(
-                condition=Q(scenario_ids__isnull=True) | Q(phase=3, pipeline_run__isnull=True),
-                name="scenario_ids_only_on_adhoc_labelling",
+                condition=Q(scenario_ids__isnull=True) | Q(phase=3),
+                name="scenario_ids_only_on_labelling",
             ),
             models.CheckConstraint(
                 condition=Q(

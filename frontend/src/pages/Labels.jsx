@@ -121,19 +121,31 @@ function LabelCell({ label, cellLabel, testId }) {
   );
 }
 
-// One variant's own scenario x HCV matrix. Spec §10: "Variants A and B
+// One scenario x HCV matrix over one set of scenarios and its labelling run(s),
+// wrapped per variant by VariantMatrix below. Spec §10: "Variants A and B
 // generate different scenarios, so there is no row-by-row comparison to
-// draw" - this component only ever reads ITS OWN variant's scenarios and
-// labels; it has no reference to the other variant's data at all, so
-// there is nothing here that could accidentally zip the two together by
-// row index.
-function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, systemTitleById }) {
-  const scenariosQuery = useScenarios({ variant, run: runId });
+// draw" - each instance reads only its own scenarios and labels, so two
+// variants' matrices can never be zipped together by row index.
+function LabelMatrix({
+  testId,
+  heading,
+  what,
+  scenarioParams,
+  phaseRunParams,
+  labelParams,
+  noScenariosTitle,
+  noScenariosMessage,
+  hcvFilter,
+  taxonomies,
+  activeTaxonomy,
+  systemTitleById,
+}) {
+  const scenariosQuery = useScenarios(scenarioParams);
 
   // The labelling PhaseRun(s) THIS variant's own scenarios/labels came
   // from - read directly to resolve which taxonomy was actually pinned
   // (see `resolvePinnedTaxonomy` above), never the active one.
-  const phaseRunsQuery = usePhaseRuns({ pipeline_run: runId, variant, phase: 3 });
+  const phaseRunsQuery = usePhaseRuns(phaseRunParams);
   const phaseRuns = phaseRunsQuery.data?.results ?? [];
   const pinned = resolvePinnedTaxonomy(phaseRuns);
 
@@ -151,7 +163,7 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
   // turn out to be a mismatch would be showing a comparison this screen
   // has not actually confirmed is safe to draw.
   const labelsQuery = useAllLabels(
-    { run: runId, variant, ...(hcvFilter ? { hcv: hcvFilter } : {}) },
+    { ...labelParams, ...(hcvFilter ? { hcv: hcvFilter } : {}) },
     { enabled: pinned.status === 'ok' }
   );
 
@@ -181,18 +193,18 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
     pinnedTaxonomy && activeTaxonomy != null && pinnedTaxonomy.id !== activeTaxonomy.id;
 
   return (
-    <section aria-labelledby={`variant-${variant}-heading`} data-testid={`variant-${variant}-matrix`} className="space-y-3">
-      <h2 id={`variant-${variant}-heading`} className="text-lg font-medium text-gray-900">
-        Variant {variant}
+    <section aria-labelledby={`${testId}-heading`} data-testid={testId} className="space-y-3">
+      <h2 id={`${testId}-heading`} className="text-lg font-medium text-gray-900">
+        {heading}
       </h2>
 
       {isError && <ErrorBanner error={queryError} />}
-      {isLoading && !isError && <p className="text-sm text-gray-500">Loading variant {variant}…</p>}
+      {isLoading && !isError && <p className="text-sm text-gray-500">Loading {what}…</p>}
 
       {!isLoading && !isError && pinned.status === 'ok' && pinnedTaxonomy && (
         <p className="text-xs text-gray-500">
           Columns: <span className="font-medium text-gray-700">{taxonomyLabel(pinnedTaxonomy)}</span> — the
-          taxonomy this variant&apos;s labelling run used
+          taxonomy {what}&apos;s labelling run used
           {differsFromActive
             ? `, not the currently active ${taxonomyLabel(activeTaxonomy)}.`
             : '.'}
@@ -201,22 +213,22 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
 
       {!isLoading && !isError && pinned.status === 'mismatch' && (
         <EmptyState
-          title="This variant used more than one taxonomy version"
+          title={`${heading} used more than one taxonomy version`}
           message="Its runs used different taxonomy versions, which can't be shown in one table. Open each run to compare them."
         />
       )}
 
       {!isLoading && !isError && pinned.status === 'none' && (
         <EmptyState
-          title={`No labelling run for variant ${variant}`}
-          message="This run may not have reached phase 3 for this variant yet."
+          title={`No labelling run for ${what}`}
+          message={`This run may not have reached phase 3 for ${what} yet.`}
         />
       )}
 
       {!isLoading && !isError && pinned.status === 'ok' && scenarios.length === 0 && (
         <EmptyState
-          title={`No variant ${variant} scenarios for this run`}
-          message="This run may not have generated scenarios for this variant yet."
+          title={noScenariosTitle}
+          message={noScenariosMessage}
         />
       )}
 
@@ -267,6 +279,39 @@ function VariantMatrix({ variant, runId, hcvFilter, taxonomies, activeTaxonomy, 
   );
 }
 
+function VariantMatrix({ variant, runId, ...shared }) {
+  return (
+    <LabelMatrix
+      testId={`variant-${variant}-matrix`}
+      heading={`Variant ${variant}`}
+      what={`variant ${variant}`}
+      scenarioParams={{ variant, run: runId }}
+      phaseRunParams={{ pipeline_run: runId, variant, phase: 3 }}
+      labelParams={{ run: runId, variant }}
+      noScenariosTitle={`No variant ${variant} scenarios for this run`}
+      noScenariosMessage="This run may not have generated scenarios for this variant yet."
+      {...shared}
+    />
+  );
+}
+
+// A phase-3-only run labels chosen corpus scenarios, so there is one matrix and no variant.
+function ChosenMatrix({ runId, chosenCount, ...shared }) {
+  return (
+    <LabelMatrix
+      testId="chosen-matrix"
+      heading={`${chosenCount} chosen ${chosenCount === 1 ? 'scenario' : 'scenarios'}`}
+      what="this run"
+      scenarioParams={{ labelled_in_run: runId }}
+      phaseRunParams={{ pipeline_run: runId, phase: 3 }}
+      labelParams={{ run: runId }}
+      noScenariosTitle="The chosen scenarios were deleted"
+      noScenariosMessage="None of the scenarios this run was launched with still exist."
+      {...shared}
+    />
+  );
+}
+
 export default function Labels() {
   // Run detail links here with `?run=<id>` preselected (task 10.2) - typing
   // a repetition id by hand was the only way in before this. Read once at
@@ -310,15 +355,19 @@ export default function Labels() {
 
   const runId = filters.run !== '' ? Number(filters.run) : null;
   const variantsToShow = filters.variant ? [filters.variant] : VARIANTS;
+  const selectedRun = (pipelineRunsQuery.data?.results ?? []).find((run) => run.id === runId) ?? null;
+  const runPhases = selectedRun?.config?.phases;
+  const labelsOnlyRun = Array.isArray(runPhases) && runPhases.length === 1 && runPhases[0] === 3;
+  const chosenCount = selectedRun?.config?.label_scenario_ids?.length ?? 0;
 
   return (
     <div data-testid="labels-page" className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Labels</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-500">
-          One scenario × HCV matrix per variant. Variant A and variant B generate different
-          scenarios by design — read the two matrices side by side rather than expecting matching
-          rows between them. This screen presents what was labelled; drawing a conclusion from it
+          One scenario × HCV matrix per variant, or a single matrix for a run that labels chosen
+          scenarios. Variant A and variant B generate different scenarios by design — read the two
+          matrices side by side rather than expecting matching rows between them. This screen presents what was labelled; drawing a conclusion from it
           is the researcher&apos;s job, not this page&apos;s.
         </p>
       </div>
@@ -336,21 +385,23 @@ export default function Labels() {
           options={runOptions}
           placeholder="Choose a run…"
         />
-        <div>
-          <label htmlFor="labels-filter-variant" className="block text-xs font-medium text-gray-700">
-            Variant
-          </label>
-          <select
-            id="labels-filter-variant"
-            value={filters.variant}
-            onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
-            className="mt-1 block h-9 w-full rounded-md border border-gray-300 px-2 text-sm shadow-sm"
-          >
-            <option value="">All variants</option>
-            <option value="A">A</option>
-            <option value="B">B</option>
-          </select>
-        </div>
+        {!labelsOnlyRun && (
+          <div>
+            <label htmlFor="labels-filter-variant" className="block text-xs font-medium text-gray-700">
+              Variant
+            </label>
+            <select
+              id="labels-filter-variant"
+              value={filters.variant}
+              onChange={(event) => setFilters((current) => ({ ...current, variant: event.target.value }))}
+              className="mt-1 block h-9 w-full rounded-md border border-gray-300 px-2 text-sm shadow-sm"
+            >
+              <option value="">All variants</option>
+              <option value="A">A</option>
+              <option value="B">B</option>
+            </select>
+          </div>
+        )}
         <div>
           <label htmlFor="labels-filter-hcv" className="block text-xs font-medium text-gray-700">
             HCV
@@ -404,17 +455,28 @@ export default function Labels() {
 
       {runId != null && (
         <div className="space-y-8">
-          {variantsToShow.map((variant) => (
-            <VariantMatrix
-              key={variant}
-              variant={variant}
+          {labelsOnlyRun ? (
+            <ChosenMatrix
               runId={runId}
+              chosenCount={chosenCount}
               hcvFilter={filters.hcv}
               taxonomies={taxonomies}
               activeTaxonomy={activeTaxonomy}
               systemTitleById={systemTitleById}
             />
-          ))}
+          ) : (
+            variantsToShow.map((variant) => (
+              <VariantMatrix
+                key={variant}
+                variant={variant}
+                runId={runId}
+                hcvFilter={filters.hcv}
+                taxonomies={taxonomies}
+                activeTaxonomy={activeTaxonomy}
+                systemTitleById={systemTitleById}
+              />
+            ))
+          )}
         </div>
       )}
     </div>

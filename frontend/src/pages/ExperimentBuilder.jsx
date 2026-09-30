@@ -7,12 +7,14 @@ import {
   useFewShots,
   useModels,
   usePromptTemplates,
+  useScenarios,
   useSystemDescriptions,
   useTaxonomies,
   useUpdateExperiment,
 } from '../api/queries';
 import { extractFieldErrors, hasNonFieldError } from '../api/errors';
 import ErrorBanner from '../components/ErrorBanner';
+import LabelScenariosModal from '../components/LabelScenariosModal';
 import ModelPicker from '../components/ModelPicker';
 import SearchableSelect from '../components/SearchableSelect';
 
@@ -32,8 +34,10 @@ const emptyForm = {
   name: '',
   description: '',
   taxonomy: '',
-  // Phase 2 always runs; phase 3 (labelling its output) is optional.
+  // Both phases by default; phase 3 alone labels chosen corpus scenarios.
+  runPhase2: true,
   runPhase3: true,
+  labelScenarioIds: [],
   phase2Model: '',
   phase2Temperature: '1',
   phase2PromptA: '',
@@ -63,7 +67,9 @@ function formFromExperiment(experiment) {
     name: experiment.name ?? '',
     description: experiment.description ?? '',
     taxonomy: experiment.taxonomy != null ? String(experiment.taxonomy) : '',
+    runPhase2: (experiment.phases ?? [2, 3]).includes(2),
     runPhase3: (experiment.phases ?? [2, 3]).includes(3),
+    labelScenarioIds: (experiment.label_scenarios ?? []).map(Number),
     phase2Model: experiment.phase2_model ?? '',
     phase2Temperature: String(experiment.phase2_temperature ?? '1'),
     phase2PromptA: experiment.phase2_prompt_a != null ? String(experiment.phase2_prompt_a) : '',
@@ -170,6 +176,9 @@ export default function ExperimentBuilder() {
   const phase3TemplatesQuery = usePromptTemplates({ phase: 3 }, { enabled: isStaff });
   const systemsQuery = useSystemDescriptions({}, { enabled: isStaff });
   const fewshotsQuery = useFewShots({}, { enabled: isStaff });
+  const labelsOnly = !form.runPhase2 && form.runPhase3;
+  const labelScenariosQuery = useScenarios({}, { enabled: isStaff && labelsOnly });
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const createExperiment = useCreateExperiment();
   const updateExperiment = useUpdateExperiment();
@@ -270,6 +279,12 @@ export default function ExperimentBuilder() {
   // way to tell in advance which system was the problem. Both pickers below
   // read from this filtered list, never the raw `systems` above.
   const selectableSystems = systems.filter((system) => system.origin !== 'generated');
+  // A phase-3-only experiment only uses phase 3 few-shots.
+  const visibleFewshots = form.runPhase2 ? fewshots : fewshots.filter((fewshot) => fewshot.phase === 3);
+  const scenarioSystem = new Map((labelScenariosQuery.data?.results ?? []).map((row) => [row.id, row.system_description]));
+  const chosenSystemCount = new Set(
+    form.labelScenarioIds.map((scenarioId) => scenarioSystem.get(scenarioId)).filter((systemId) => systemId != null)
+  ).size;
 
   // Task 6's own acceptance bar: map every field-shaped DRF error onto the
   // field it names; fall back to ErrorBanner only for what's left
@@ -295,11 +310,16 @@ export default function ExperimentBuilder() {
   async function handleSave(event) {
     event.preventDefault();
     const variants = [...(form.variantA ? ['A'] : []), ...(form.variantB ? ['B'] : [])];
+    // Phase-3-only drops phase 2 few-shots it can't use; unknown ids are kept.
+    const phase2FewshotIds = new Set(fewshots.filter((fewshot) => fewshot.phase === 2).map((fewshot) => String(fewshot.id)));
+    const fewshotIds = labelsOnly
+      ? form.fewshotIds.filter((fewshotId) => !phase2FewshotIds.has(fewshotId))
+      : form.fewshotIds;
     const payload = {
       name: form.name,
       description: form.description,
       taxonomy: form.taxonomy ? Number(form.taxonomy) : null,
-      phases: form.runPhase3 ? [2, 3] : [2],
+      phases: [...(form.runPhase2 ? [2] : []), ...(form.runPhase3 ? [3] : [])],
       phase2_model: form.phase2Model,
       phase2_temperature: Number(form.phase2Temperature || 0),
       phase2_prompt_a: form.phase2PromptA ? Number(form.phase2PromptA) : null,
@@ -307,14 +327,15 @@ export default function ExperimentBuilder() {
       phase3_model: form.phase3Model,
       phase3_temperature: Number(form.phase3Temperature || 0),
       phase3_prompt: form.phase3Prompt ? Number(form.phase3Prompt) : null,
-      seed_systems: form.seedSystemIds.map(Number),
-      fewshots: form.fewshotIds.map(Number),
+      seed_systems: labelsOnly ? [] : form.seedSystemIds.map(Number),
+      fewshots: fewshotIds.map(Number),
       generate_systems: form.generateSystems,
       generate_scenarios: form.generateScenarios,
       target_system: !form.generateSystems && form.targetSystem ? Number(form.targetSystem) : null,
       n_systems: Number(form.nSystems || 0),
       n_scenarios_per_system: Number(form.nScenariosPerSystem || 0),
       variants,
+      label_scenarios: labelsOnly ? form.labelScenarioIds : [],
     };
     try {
       const saved = isEditing
@@ -389,10 +410,14 @@ export default function ExperimentBuilder() {
 
         <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Phases</legend>
-          <label htmlFor="phase-2" className="flex items-center gap-2 text-sm text-gray-500">
-            <input id="phase-2" type="checkbox" checked disabled />
+          <label htmlFor="phase-2" className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              id="phase-2"
+              type="checkbox"
+              checked={form.runPhase2}
+              onChange={(event) => updateField('runPhase2', event.target.checked)}
+            />
             Phase 2 — generate scenarios
-            <span className="text-xs">(always runs: phase 3 labels what it generates)</span>
           </label>
           <label htmlFor="phase-3" className="flex items-center gap-2 text-sm text-gray-700">
             <input
@@ -401,66 +426,69 @@ export default function ExperimentBuilder() {
               checked={form.runPhase3}
               onChange={(event) => updateField('runPhase3', event.target.checked)}
             />
-            Phase 3 — label the generated scenarios
+            Phase 3 — label scenarios
           </label>
           <p className="text-xs text-gray-500">
-            {form.runPhase3
-              ? 'Each repetition generates scenarios, then labels them against the taxonomy.'
-              : 'Each repetition only generates scenarios; nothing is labelled.'}
+            {form.runPhase2 && form.runPhase3 && 'Each repetition generates scenarios, then labels them against the taxonomy.'}
+            {form.runPhase2 && !form.runPhase3 && 'Each repetition only generates scenarios; nothing is labelled.'}
+            {labelsOnly && 'Each repetition labels the scenarios you choose below; nothing is generated.'}
+            {!form.runPhase2 && !form.runPhase3 && 'Choose at least one phase.'}
           </p>
           <FieldError message={fieldErrors.phases} />
         </fieldset>
 
-        <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
-          <legend className="px-1 text-sm font-semibold text-gray-900">Phase 2 — generation</legend>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ModelPicker
-              id="phase2-model"
-              label="Phase 2 model"
-              value={form.phase2Model}
-              onChange={(value) => updateField('phase2Model', value)}
-              modelsQuery={modelsQuery}
-              fieldError={fieldErrors.phase2_model}
-            />
-            <div>
-              <label htmlFor="phase2-temperature" className="block text-xs font-medium text-gray-700">
-                Phase 2 temperature
-              </label>
-              <input
-                id="phase2-temperature"
-                type="number"
-                step="0.1"
-                min="0"
-                value={form.phase2Temperature}
-                onChange={(event) => updateField('phase2Temperature', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+        {form.runPhase2 && (
+          <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">Phase 2 — generation</legend>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <ModelPicker
+                id="phase2-model"
+                label="Phase 2 model"
+                value={form.phase2Model}
+                onChange={(value) => updateField('phase2Model', value)}
+                modelsQuery={modelsQuery}
+                fieldError={fieldErrors.phase2_model}
               />
-              <FieldError message={fieldErrors.phase2_temperature} />
+              <div>
+                <label htmlFor="phase2-temperature" className="block text-xs font-medium text-gray-700">
+                  Phase 2 temperature
+                </label>
+                <input
+                  id="phase2-temperature"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={form.phase2Temperature}
+                  onChange={(event) => updateField('phase2Temperature', event.target.value)}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                />
+                <FieldError message={fieldErrors.phase2_temperature} />
+              </div>
+              <div>
+                <SearchableSelect
+                  id="phase2-prompt-a"
+                  label="Phase 2 prompt — Variant A"
+                  value={form.phase2PromptA}
+                  onChange={(value) => updateField('phase2PromptA', value)}
+                  options={phase2PromptAOptions}
+                  placeholder="Select a template…"
+                />
+                <FieldError message={fieldErrors.phase2_prompt_a} />
+              </div>
+              <div>
+                <SearchableSelect
+                  id="phase2-prompt-b"
+                  label="Phase 2 prompt — Variant B"
+                  value={form.phase2PromptB}
+                  onChange={(value) => updateField('phase2PromptB', value)}
+                  options={phase2PromptBOptions}
+                  placeholder="Select a template…"
+                />
+                <FieldError message={fieldErrors.phase2_prompt_b} />
+              </div>
             </div>
-            <div>
-              <SearchableSelect
-                id="phase2-prompt-a"
-                label="Phase 2 prompt — Variant A"
-                value={form.phase2PromptA}
-                onChange={(value) => updateField('phase2PromptA', value)}
-                options={phase2PromptAOptions}
-                placeholder="Select a template…"
-              />
-              <FieldError message={fieldErrors.phase2_prompt_a} />
-            </div>
-            <div>
-              <SearchableSelect
-                id="phase2-prompt-b"
-                label="Phase 2 prompt — Variant B"
-                value={form.phase2PromptB}
-                onChange={(value) => updateField('phase2PromptB', value)}
-                options={phase2PromptBOptions}
-                placeholder="Select a template…"
-              />
-              <FieldError message={fieldErrors.phase2_prompt_b} />
-            </div>
-          </div>
-        </fieldset>
+          </fieldset>
+        )}
 
         {form.runPhase3 && (
           <fieldset className="space-y-3 rounded-md border border-gray-200 p-3">
@@ -504,32 +532,66 @@ export default function ExperimentBuilder() {
           </fieldset>
         )}
 
-        <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
-          <legend className="px-1 text-sm font-semibold text-gray-900">Seed systems</legend>
-          <p className="text-xs text-gray-500">
-            Only seed and hand-written systems are listed. Generated systems can&apos;t be seeds: their text
-            already reflects what a model produced, which would skew the comparison.
-          </p>
-          {selectableSystems.map((system) => (
-            <label key={system.id} htmlFor={`seed-system-${system.id}`} className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                id={`seed-system-${system.id}`}
-                type="checkbox"
-                checked={form.seedSystemIds.includes(String(system.id))}
-                onChange={() => toggleInList('seedSystemIds', system.id)}
-              />
-              <span>
-                {system.title}{' '}
-                <span className="text-xs text-gray-500">({ORIGIN_LABELS[system.origin] ?? system.origin})</span>
+        {labelsOnly && (
+          <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">Scenarios to label</legend>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm text-gray-700">
+                {form.labelScenarioIds.length === 0
+                  ? 'No scenarios chosen yet.'
+                  : `${form.labelScenarioIds.length} ${form.labelScenarioIds.length === 1 ? 'scenario' : 'scenarios'} · ${chosenSystemCount} ${chosenSystemCount === 1 ? 'system' : 'systems'}`}
               </span>
-            </label>
-          ))}
-          <FieldError message={fieldErrors.seed_systems} />
-        </fieldset>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(true)}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-100"
+              >
+                {form.labelScenarioIds.length === 0 ? 'Choose scenarios…' : 'Edit'}
+              </button>
+            </div>
+            <FieldError message={fieldErrors.label_scenarios} />
+          </fieldset>
+        )}
+        {pickerOpen && (
+          <LabelScenariosModal
+            initialIds={form.labelScenarioIds}
+            excludeExperimentId={isEditing ? Number(id) : null}
+            onApply={(ids) => {
+              updateField('labelScenarioIds', ids);
+              setPickerOpen(false);
+            }}
+            onClose={() => setPickerOpen(false)}
+          />
+        )}
+
+        {form.runPhase2 && (
+          <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">Seed systems</legend>
+            <p className="text-xs text-gray-500">
+              Only seed and hand-written systems are listed. Generated systems can&apos;t be seeds: their text
+              already reflects what a model produced, which would skew the comparison.
+            </p>
+            {selectableSystems.map((system) => (
+              <label key={system.id} htmlFor={`seed-system-${system.id}`} className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  id={`seed-system-${system.id}`}
+                  type="checkbox"
+                  checked={form.seedSystemIds.includes(String(system.id))}
+                  onChange={() => toggleInList('seedSystemIds', system.id)}
+                />
+                <span>
+                  {system.title}{' '}
+                  <span className="text-xs text-gray-500">({ORIGIN_LABELS[system.origin] ?? system.origin})</span>
+                </span>
+              </label>
+            ))}
+            <FieldError message={fieldErrors.seed_systems} />
+          </fieldset>
+        )}
 
         <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
           <legend className="px-1 text-sm font-semibold text-gray-900">Few-shots</legend>
-          {fewshots.map((fewshot) => (
+          {visibleFewshots.map((fewshot) => (
             <label key={fewshot.id} htmlFor={`fewshot-${fewshot.id}`} className="flex items-center gap-2 text-sm text-gray-700">
               <input
                 id={`fewshot-${fewshot.id}`}
@@ -545,100 +607,104 @@ export default function ExperimentBuilder() {
           <FieldError message={fieldErrors.fewshots} />
         </fieldset>
 
-        <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
-          <legend className="px-1 text-sm font-semibold text-gray-900">What to generate</legend>
-          <label htmlFor="generate-systems" className="flex items-center gap-2 text-sm text-gray-700">
-            <input
-              id="generate-systems"
-              type="checkbox"
-              checked={form.generateSystems}
-              onChange={(event) => updateField('generateSystems', event.target.checked)}
-            />
-            Generate systems
-          </label>
-          <label htmlFor="generate-scenarios" className="flex items-center gap-2 text-sm text-gray-700">
-            <input
-              id="generate-scenarios"
-              type="checkbox"
-              checked={form.generateScenarios}
-              onChange={(event) => updateField('generateScenarios', event.target.checked)}
-            />
-            Generate scenarios
-          </label>
-          <FieldError message={fieldErrors.generate_systems} />
-          <FieldError message={fieldErrors.generate_scenarios} />
-
-          {!form.generateSystems && (
-            <div>
-              <SearchableSelect
-                id="target-system"
-                label="Target system"
-                value={form.targetSystem}
-                onChange={(value) => updateField('targetSystem', value)}
-                options={selectableSystems.map((system) => ({
-                  value: String(system.id),
-                  label: `${system.title} (${ORIGIN_LABELS[system.origin] ?? system.origin})`,
-                }))}
-                placeholder="Select a system…"
-              />
-              <FieldError message={fieldErrors.target_system} />
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label htmlFor="n-systems" className="block text-xs font-medium text-gray-700">
-                Systems per repetition
-              </label>
+        {form.runPhase2 && (
+          <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">What to generate</legend>
+            <label htmlFor="generate-systems" className="flex items-center gap-2 text-sm text-gray-700">
               <input
-                id="n-systems"
-                type="number"
-                min="1"
-                value={form.nSystems}
-                onChange={(event) => updateField('nSystems', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                id="generate-systems"
+                type="checkbox"
+                checked={form.generateSystems}
+                onChange={(event) => updateField('generateSystems', event.target.checked)}
               />
-              <FieldError message={fieldErrors.n_systems} />
-            </div>
-            <div>
-              <label htmlFor="n-scenarios" className="block text-xs font-medium text-gray-700">
-                Scenarios per system
-              </label>
+              Generate systems
+            </label>
+            <label htmlFor="generate-scenarios" className="flex items-center gap-2 text-sm text-gray-700">
               <input
-                id="n-scenarios"
-                type="number"
-                min="1"
-                value={form.nScenariosPerSystem}
-                onChange={(event) => updateField('nScenariosPerSystem', event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                id="generate-scenarios"
+                type="checkbox"
+                checked={form.generateScenarios}
+                onChange={(event) => updateField('generateScenarios', event.target.checked)}
               />
-              <FieldError message={fieldErrors.n_scenarios_per_system} />
-            </div>
-          </div>
-        </fieldset>
+              Generate scenarios
+            </label>
+            <FieldError message={fieldErrors.generate_systems} />
+            <FieldError message={fieldErrors.generate_scenarios} />
 
-        <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
-          <legend className="px-1 text-sm font-semibold text-gray-900">Variants</legend>
-          <label htmlFor="variant-a" className="flex items-center gap-2 text-sm text-gray-700">
-            <input
-              id="variant-a"
-              type="checkbox"
-              checked={form.variantA}
-              onChange={(event) => updateField('variantA', event.target.checked)}
-            />
-            Variant A
-          </label>
-          <label htmlFor="variant-b" className="flex items-center gap-2 text-sm text-gray-700">
-            <input
-              id="variant-b"
-              type="checkbox"
-              checked={form.variantB}
-              onChange={(event) => updateField('variantB', event.target.checked)}
-            />
-            Variant B
-          </label>
-          <FieldError message={fieldErrors.variants} />
-        </fieldset>
+            {!form.generateSystems && (
+              <div>
+                <SearchableSelect
+                  id="target-system"
+                  label="Target system"
+                  value={form.targetSystem}
+                  onChange={(value) => updateField('targetSystem', value)}
+                  options={selectableSystems.map((system) => ({
+                    value: String(system.id),
+                    label: `${system.title} (${ORIGIN_LABELS[system.origin] ?? system.origin})`,
+                  }))}
+                  placeholder="Select a system…"
+                />
+                <FieldError message={fieldErrors.target_system} />
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label htmlFor="n-systems" className="block text-xs font-medium text-gray-700">
+                  Systems per repetition
+                </label>
+                <input
+                  id="n-systems"
+                  type="number"
+                  min="1"
+                  value={form.nSystems}
+                  onChange={(event) => updateField('nSystems', event.target.value)}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                />
+                <FieldError message={fieldErrors.n_systems} />
+              </div>
+              <div>
+                <label htmlFor="n-scenarios" className="block text-xs font-medium text-gray-700">
+                  Scenarios per system
+                </label>
+                <input
+                  id="n-scenarios"
+                  type="number"
+                  min="1"
+                  value={form.nScenariosPerSystem}
+                  onChange={(event) => updateField('nScenariosPerSystem', event.target.value)}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm shadow-sm"
+                />
+                <FieldError message={fieldErrors.n_scenarios_per_system} />
+              </div>
+            </div>
+          </fieldset>
+        )}
+
+        {form.runPhase2 && (
+          <fieldset className="space-y-2 rounded-md border border-gray-200 p-3">
+            <legend className="px-1 text-sm font-semibold text-gray-900">Variants</legend>
+            <label htmlFor="variant-a" className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                id="variant-a"
+                type="checkbox"
+                checked={form.variantA}
+                onChange={(event) => updateField('variantA', event.target.checked)}
+              />
+              Variant A
+            </label>
+            <label htmlFor="variant-b" className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                id="variant-b"
+                type="checkbox"
+                checked={form.variantB}
+                onChange={(event) => updateField('variantB', event.target.checked)}
+              />
+              Variant B
+            </label>
+            <FieldError message={fieldErrors.variants} />
+          </fieldset>
+        )}
 
         {showSaveBanner && <ErrorBanner error={saveExperiment.error} />}
 

@@ -17,7 +17,7 @@ from pipeline.execution_config import config_snapshot, generation_config_from_sn
 from pipeline.failures import describe_failure
 from pipeline.generation import render_generation_prompt, run_phase2
 from pipeline.labelling import failed_calls, finish_labelling_run, label_scenario, scenarios_for
-from pipeline.models import PHASE_LABELLING, LLMCall, PhaseRun, PipelineRun
+from pipeline.models import PHASE_GENERATION, PHASE_LABELLING, LLMCall, PhaseRun, PipelineRun
 from prompts.rendering import VARIANT_GUIDED, VARIANT_UNBIASED, PromptRenderError, TaxonomyLeak
 
 # The django-q task path a queued run is handed to. A plain string — the
@@ -143,6 +143,7 @@ def launch(experiment, n_repetitions=1, inline=False):
 
     Labelling `PhaseRun`s are created only when the pinned snapshot's
     `phases` includes 3 — read from `config`, so the rows match the record.
+    A phase-3-only snapshot gets one labelling run over `label_scenario_ids`.
     """
     resolve_openrouter_key()
     experiment.full_clean()
@@ -159,7 +160,9 @@ def launch(experiment, n_repetitions=1, inline=False):
     # nothing mutates a `.config` in place after creation, but cheap
     # insurance against that changing later).
     config = config_snapshot(experiment)
-    _refuse_templates_that_fail_as_their_own_variant(experiment, config)
+    generates = PHASE_GENERATION in config["phases"]
+    if generates:
+        _refuse_templates_that_fail_as_their_own_variant(experiment, config)
     labels = PHASE_LABELLING in config["phases"]
 
     for offset in range(n_repetitions):
@@ -168,6 +171,19 @@ def launch(experiment, n_repetitions=1, inline=False):
             repetition_index=highest + offset + 1,
             config=copy.deepcopy(config),
         )
+        if not generates:
+            # Phase 3 only: one labelling run over the frozen selection.
+            PhaseRun.objects.create(
+                pipeline_run=run,
+                phase=3,
+                model=experiment.phase3_model,
+                temperature=experiment.phase3_temperature,
+                prompt_template=experiment.phase3_prompt,
+                taxonomy=experiment.taxonomy,
+                scenario_ids=list(config["label_scenario_ids"]),
+            )
+            created.append(run)
+            continue
         for variant in experiment.variants:
             generation = PhaseRun.objects.create(
                 pipeline_run=run, **_generation_run_fields(experiment, variant)
@@ -388,6 +404,12 @@ def execute_pipeline_run(pipeline_run, on_progress=None):
                 if on_progress:
                     on_progress(labelling)
             continue
+        run_labelling(labelling, on_progress=on_progress)
+
+    # Phase-3-only repetitions: labelling runs over a frozen selection.
+    for labelling in pipeline_run.phase_runs.filter(phase=3, scenario_ids__isnull=False).order_by(
+        "id"
+    ):
         run_labelling(labelling, on_progress=on_progress)
 
     return roll_up(pipeline_run)
