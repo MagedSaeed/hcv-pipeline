@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from corpus.models import Scenario
 from pipeline.execution_config import ChosenInputUnavailable, chosen_generation_config
+from pipeline.failures import describe_provider_error
 from pipeline.models import (
     VARIANTS,
     Experiment,
@@ -596,6 +597,9 @@ class PhaseRunCreateSerializer(serializers.ModelSerializer):
 
 
 class LLMCallSerializer(serializers.ModelSerializer):
+    # A plain-language reason for a failed call; the raw `transport_error` stays alongside it.
+    error_summary = serializers.SerializerMethodField()
+
     class Meta:
         model = LLMCall
         fields = [
@@ -613,6 +617,7 @@ class LLMCallSerializer(serializers.ModelSerializer):
             "stray_scenarios",
             "http_status",
             "transport_error",
+            "error_summary",
             "model",
             "finish_reason",
             "prompt_tokens",
@@ -623,6 +628,10 @@ class LLMCallSerializer(serializers.ModelSerializer):
             "guarded_by",
             "created_at",
         ]
+
+
+    def get_error_summary(self, obj):
+        return describe_provider_error(obj.http_status, obj.transport_error)
 
 
 class LabelSerializer(serializers.ModelSerializer):

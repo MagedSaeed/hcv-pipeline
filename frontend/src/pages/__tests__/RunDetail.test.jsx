@@ -397,6 +397,39 @@ describe('RunDetail', () => {
     expect(screen.getAllByRole('button', { name: /^copy$/i }).length).toBeGreaterThanOrEqual(3);
   });
 
+  it('a failed call says why in plain words, and the inspector shows the raw provider error', async () => {
+    const user = userEvent.setup();
+    const run = pipelineRun({ status: 'failed' });
+    const labelling = phaseRun({ id: 9001, phase: 3, variant: '', status: 'failed' });
+    installBaseFixtures({ run, phaseRuns: [labelling] });
+    const raw = "APIStatusError: Error code: 402 - {'error': {'message': 'Needs more credits'}}";
+    server.use(
+      http.get('/api/phase-runs/9001/calls/', () =>
+        HttpResponse.json(
+          paginated([
+            call({
+              id: 1,
+              parsed_ok: false,
+              raw_response: '',
+              http_status: 402,
+              transport_error: raw,
+              error_summary: 'Not enough OpenRouter credit. OpenRouter said: “Needs more credits”',
+            }),
+          ])
+        )
+      )
+    );
+
+    renderApp({ initialEntries: ['/pipeline-runs/501'] });
+
+    await user.click(await screen.findByRole('button', { name: /view calls/i }));
+    expect(await screen.findByText(/not enough openrouter credit\. openrouter said/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^inspect$/i }));
+    expect(screen.getByText('Provider error')).toBeInTheDocument();
+    expect(screen.getByText(/HTTP 402/)).toBeInTheDocument();
+    expect(screen.getByText(raw, { exact: false })).toBeInTheDocument();
+  });
+
   it('the call inspector lists every call, not just the first 50 (fails if only page 1 is read)', async () => {
     const user = userEvent.setup();
     const run = pipelineRun({ status: 'completed' });

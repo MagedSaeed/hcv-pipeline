@@ -31,7 +31,7 @@ from llm.schemas import (
 )
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_generation_config
-from pipeline.failures import describe_failure
+from pipeline.failures import describe_failure, describe_provider_error
 from pipeline.models import LLMCall, PhaseRun
 from prompts.rendering import (
     VARIANT_UNBIASED,
@@ -460,7 +460,11 @@ def _call_and_persist(phase_run, rendered, config):
 
     if not result.ok:
         call.save()
-        return _fail(phase_run, result.transport_error or "The call returned no body.")
+        return _fail(
+            phase_run,
+            describe_provider_error(result.http_status, result.transport_error)
+            or "The call returned no body.",
+        )
 
     try:
         parsed = parse_phase2(loads_response(result.raw_response))

@@ -174,6 +174,7 @@ function CallRow({ callRow, onInspect }) {
           ? 'Taxonomy check ran on this call.'
           : 'Taxonomy check did not run on this call.'}
       </p>
+      {callRow.error_summary && <p className="text-red-700">{callRow.error_summary}</p>}
       {!callRow.parsed_ok && callRow.parse_error && (
         <p className="text-red-700">Parse error: {callRow.parse_error}</p>
       )}
@@ -194,6 +195,14 @@ function CallInspector({ callRow, onClose }) {
         <CodeBlock title="Rendered system prompt" code={callRow.rendered_system_prompt} />
         <CodeBlock title="Rendered user prompt" code={callRow.rendered_user_prompt} />
         <CodeBlock title="Verbatim response" code={callRow.raw_response} />
+        {callRow.transport_error && (
+          <div className="lg:col-span-3">
+            <CodeBlock
+              title="Provider error"
+              code={`HTTP ${callRow.http_status ?? '—'}\n${callRow.transport_error}`}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
