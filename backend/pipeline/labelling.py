@@ -21,7 +21,7 @@ from llm.schemas import (
 )
 from pipeline.clients import get_llm_client
 from pipeline.execution_config import resolve_labelling_fewshots
-from pipeline.failures import describe_failure
+from pipeline.failures import describe_failure, describe_provider_error
 from pipeline.models import Label, LLMCall, PhaseRun
 from prompts.rendering import (
     PromptRenderError,
@@ -254,6 +254,13 @@ def finish_labelling_run(phase_run):
     if failed:
         phase_run.status = PhaseRun.Status.FAILED
         phase_run.error = f"{failed} scenario(s) failed to label."
+        # One shared provider reason (credit, key, rate limit…) is worth naming on the run.
+        reasons = {
+            describe_provider_error(status, error)
+            for status, error in failed_calls(phase_run).values_list("http_status", "transport_error")
+        }
+        if len(reasons) == 1 and "" not in reasons:
+            phase_run.error = f"{phase_run.error} {reasons.pop()}"
     else:
         phase_run.status = PhaseRun.Status.COMPLETED
         phase_run.error = ""
