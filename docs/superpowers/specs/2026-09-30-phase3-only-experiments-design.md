@@ -91,6 +91,8 @@ Opened from the experiment builder when "Phase 3 only" is selected. Uses
 - Apply saves drafts through the existing corpus endpoints (origin `manual`),
   then ticks the new scenarios. Server errors are shown against the draft that
   caused them, and nothing in the selection changes until every draft saves.
+- Saving to the corpus is mandatory. A muted note under the draft forms reads
+  "New systems and scenarios are saved to the corpus when you apply."
 
 **Footer**
 - "N scenarios from M systems selected", Cancel, Apply.
