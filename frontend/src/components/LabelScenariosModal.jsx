@@ -284,12 +284,12 @@ export default function LabelScenariosModal({ initialIds, excludeExperimentId, o
               className="rounded-md border border-gray-300 px-2 py-1 text-xs shadow-sm"
             />
             <select
-              aria-label="Load scenarios from an experiment"
+              aria-label="Load scenarios from a phase-3-only experiment"
               value={copiedFrom ? String(copiedFrom.id) : ''}
               onChange={(event) => copySelectionFrom(event.target.value)}
               className="rounded-md border border-gray-300 px-2 py-1 text-xs shadow-sm"
             >
-              <option value="">Load scenarios from an experiment…</option>
+              <option value="">Load scenarios from a phase-3-only experiment…</option>
               {copyOptions.map((experiment) => (
                 <option key={experiment.id} value={experiment.id}>
                   {experiment.name}

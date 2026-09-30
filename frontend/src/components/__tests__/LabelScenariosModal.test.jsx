@@ -152,7 +152,7 @@ describe('LabelScenariosModal', () => {
   it('loads another phase-3-only experiment selection', async () => {
     const user = userEvent.setup();
     renderModal({ initialIds: [1] });
-    const copy = await screen.findByRole('combobox', { name: /load scenarios from an experiment/i });
+    const copy = await screen.findByRole('combobox', { name: /load scenarios from a phase-3-only experiment/i });
     expect(within(copy).queryByRole('option', { name: /baseline/i })).not.toBeInTheDocument();
     await user.selectOptions(copy, within(copy).getByRole('option', { name: /labeller gpt/i }));
     expect(screen.getByText('2 scenarios from 2 systems selected')).toBeInTheDocument();

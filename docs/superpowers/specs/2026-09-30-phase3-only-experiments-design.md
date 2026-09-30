@@ -77,7 +77,7 @@ Opened from the experiment builder when "Phase 3 only" is selected. Uses
   that run wrote scenarios for, and the right pane to that run's scenarios.
   Scratch runs are not listed.
 - Search box over system titles and scenario text.
-- "Load scenarios from an experiment…": lists earlier `[3]` experiments. Choosing one
+- "Load scenarios from a phase-3-only experiment…": lists earlier `[3]` experiments. Choosing one
   replaces the current selection with that experiment's `label_scenarios`.
 
 **Left pane: systems**
