@@ -401,3 +401,23 @@ def test_renders_with_the_frozen_title(analysis, staff, queue, fake):
 
     assert "Smart Parking" in fake.calls[0]["user_prompt"]
     assert "Renamed meanwhile" not in fake.calls[0]["user_prompt"]
+
+
+def test_a_label_run_names_the_scenario_it_is_working_on(analysis, staff, queue, fake, generate):
+    from analyses.serializers import run_json
+
+    generate(scenarios_reply("sc_01", "sc_02"))
+    generation = analysis.runs.get(kind="generate")
+    for _ in range(2):
+        fake.queue(labels_reply("HCV-17"))
+    run = runs.start_labelling(analysis, staff)
+    first, second = run.targets
+
+    assert run_json(run)["working_on"] == first
+    queue.step()
+    run.refresh_from_db()
+    assert run_json(run)["working_on"] == second
+    queue.step()
+    run.refresh_from_db()
+    assert run_json(run)["working_on"] is None
+    assert run_json(generation)["working_on"] is None

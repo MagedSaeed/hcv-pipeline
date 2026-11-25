@@ -3,7 +3,7 @@
 from rest_framework import serializers
 
 from analyses import state
-from analyses.models import AnalysisScenario
+from analyses.models import AnalysisRun, AnalysisScenario
 from taxonomy.models import Taxonomy
 
 DESCRIPTION_MAX_LENGTH = 50_000
@@ -103,7 +103,16 @@ def run_json(run):
         "notice": run.notice,
         "error": run.error,
         "created_at": run.created_at.isoformat(),
+        "working_on": _working_on(run),
     }
+
+
+def _working_on(run):
+    """The scenario a label run is on now: tasks go one at a time, in target order."""
+    active = run.status in (AnalysisRun.Status.QUEUED, AnalysisRun.Status.RUNNING)
+    if run.kind != AnalysisRun.Kind.LABEL or not active or run.position >= len(run.targets):
+        return None
+    return run.targets[run.position]
 
 
 def taxonomy_json(taxonomy):
