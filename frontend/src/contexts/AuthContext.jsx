@@ -59,6 +59,9 @@ export function AuthProvider({ children }) {
   const value = {
     user,
     isStaff: Boolean(user?.is_staff),
+    // Analysts use Analyses only; they and staff may create and run analyses.
+    isAnalyst: user?.role === 'analyst',
+    canRunAnalyses: Boolean(user?.is_staff) || user?.role === 'analyst',
     // True only while the very first check is in flight and there is no
     // settled answer yet (success OR error both count as settled). This is
     // the flag ProtectedRoute must wait on: deciding while this is still

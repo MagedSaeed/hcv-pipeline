@@ -5,10 +5,16 @@ from core.managers import UserManager
 
 
 class User(AbstractBaseUser, PermissionsMixin):
+    class Role(models.TextChoices):
+        RESEARCHER = "researcher", "Researcher"
+        ANALYST = "analyst", "Analyst"
+
     email = models.EmailField(unique=True)
     name = models.CharField(max_length=200, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    # Analysts use Analyses only: their own analyses, and nothing of the Experiment Lab.
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.RESEARCHER)
     # Admins hand out passwords, so a new account changes it on first login.
     must_change_password = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -20,6 +26,10 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+    @property
+    def is_analyst(self):
+        return self.role == self.Role.ANALYST
 
 
 class AppSettings(models.Model):

@@ -32,7 +32,12 @@ _COPY_SUFFIX = re.compile(r" \(\d+\)$")
 
 
 class StaffWrites(BaseStaffWrites):
+    """Staff and analysts write; other researchers read."""
+
     message = "Only staff may create, change or run analyses."
+
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) or request.user.is_analyst
 
 
 class Refused(APIException):
@@ -160,10 +165,19 @@ class AnalysisViewSet(viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated, StaffWrites]
     lookup_value_regex = "[0-9]+"
 
+    def _visible(self):
+        """Every analysis, or only an analyst's own."""
+        user = self.request.user
+        return Analysis.objects.filter(owner=user) if user.is_analyst else Analysis.objects.all()
+
     def get_queryset(self):
-        return Analysis.objects.select_related("owner", "taxonomy").prefetch_related(
-            # Polled every two seconds, so the prompts and replies stay in the database.
-            Prefetch("runs", AnalysisRun.objects.defer("pinned", "targets")),
+        return (
+            self._visible()
+            .select_related("owner", "taxonomy")
+            .prefetch_related(
+                # Polled every two seconds, so the prompts and replies stay in the database.
+                Prefetch("runs", AnalysisRun.objects.defer("pinned", "targets")),
+            )
         )
 
     def _loaded(self, pk):
@@ -176,7 +190,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     def _held(self, pk):
         """The row, held until the transaction ends, so a start can't interleave."""
-        return get_object_or_404(Analysis.objects.select_for_update(), pk=pk)
+        return get_object_or_404(self._visible().select_for_update(), pk=pk)
 
     def list(self, request):
         runs.expire_stuck()
@@ -187,7 +201,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
         return self.get_paginated_response([summary_json(row) for row in page])
 
     def retrieve(self, request, pk=None):
-        runs.expire_stuck(get_object_or_404(Analysis.objects.only("id"), pk=pk))
+        runs.expire_stuck(get_object_or_404(self._visible().only("id"), pk=pk))
         return Response(detail_json(self._loaded(pk)))
 
     def create(self, request):
@@ -246,7 +260,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     def destroy(self, request, pk=None):
         with transaction.atomic():
-            analysis = get_object_or_404(Analysis, pk=pk)
+            analysis = get_object_or_404(self._visible(), pk=pk)
             # Waits for a save in progress and stops any later one.
             analysis.runs.filter(status__in=AnalysisRun.ACTIVE).update(
                 status=AnalysisRun.Status.CANCELLED
@@ -273,7 +287,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=["post"], url_path="start-new")
     def start_new(self, request, pk=None, format=None):
-        source = get_object_or_404(Analysis, pk=pk)
+        source = get_object_or_404(self._visible(), pk=pk)
         copy = _create_analysis(
             request.user, _next_name(request.user, source.name), source.description
         )
@@ -281,7 +295,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=["post"])
     def extract(self, request, pk=None, format=None):
-        analysis = get_object_or_404(Analysis, pk=pk)
+        analysis = get_object_or_404(self._visible(), pk=pk)
         try:
             run = runs.start_extraction(analysis, request.user)
         except runs.RunRefused as error:
@@ -439,7 +453,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=["post"])
     def generate(self, request, pk=None, format=None):
-        analysis = get_object_or_404(Analysis, pk=pk)
+        analysis = get_object_or_404(self._visible(), pk=pk)
         try:
             run = runs.start_generation(analysis, request.user)
         except runs.RunRefused as error:
@@ -450,7 +464,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
     def label(self, request, pk=None, format=None):
         serializer = LabelRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        analysis = get_object_or_404(Analysis, pk=pk)
+        analysis = get_object_or_404(self._visible(), pk=pk)
         try:
             run = runs.start_labelling(analysis, request.user, **serializer.validated_data)
         except runs.RunRefused as error:
@@ -459,7 +473,7 @@ class AnalysisViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None, format=None):
-        run = state.active_run(get_object_or_404(Analysis, pk=pk))
+        run = state.active_run(get_object_or_404(self._visible(), pk=pk))
         if run is None:
             raise Refused("Nothing is running.", code="not_running")
         return Response(run_json(runs.cancel(run)))

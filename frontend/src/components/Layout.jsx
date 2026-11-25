@@ -29,7 +29,7 @@ function ModeLink({ to, active, children }) {
 
 // Two modes: Analyses for system analysts, Experiment Lab for the experiment screens and their menu.
 export default function Layout() {
-  const { user, isStaff, logout } = useAuth();
+  const { user, isStaff, isAnalyst, logout } = useAuth();
   const { pathname } = useLocation();
   const research = !pathname.startsWith('/analyses');
 
@@ -38,15 +38,20 @@ export default function Layout() {
       <header className="border-b border-gray-200 bg-white print:hidden">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-            <span className="text-sm font-semibold text-gray-900">HCV Pipeline</span>
-            <nav aria-label="Main navigation" className="inline-flex gap-1 rounded-lg bg-gray-100 p-1">
-              <ModeLink to="/analyses" active={!research}>
-                Analyses
-              </ModeLink>
-              <ModeLink to="/dashboard" active={research}>
-                Experiment Lab
-              </ModeLink>
-            </nav>
+            <Link to="/" className="text-sm font-semibold text-gray-900 hover:text-brand-700">
+              HCV Pipeline
+            </Link>
+            {/* Analysts have Analyses only, so there is no mode to switch to. */}
+            {!isAnalyst && (
+              <nav aria-label="Main navigation" className="inline-flex gap-1 rounded-lg bg-gray-100 p-1">
+                <ModeLink to="/analyses" active={!research}>
+                  Analyses
+                </ModeLink>
+                <ModeLink to="/dashboard" active={research}>
+                  Experiment Lab
+                </ModeLink>
+              </nav>
+            )}
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <span className="text-sm text-gray-500">{user?.email}</span>
@@ -59,7 +64,7 @@ export default function Layout() {
             </button>
           </div>
         </div>
-        {research && (
+        {research && !isAnalyst && (
           <div className="border-t border-gray-100">
             <nav
               aria-label="Experiment Lab navigation"

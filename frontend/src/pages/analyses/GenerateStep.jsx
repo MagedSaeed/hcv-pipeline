@@ -156,7 +156,7 @@ function GenerateControl({
 }
 
 export default function GenerateStep({ analysis, goTo }) {
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const options = useAnalysisOptions(analysis.taxonomy.id);
   const saver = useSettingsSaver(analysis, 'generation');
   const generate = useGenerate(analysis.id);
@@ -171,7 +171,7 @@ export default function GenerateStep({ analysis, goTo }) {
   const running = Boolean(activeRunOf(analysis));
   const hasGenerated = analysis.scenarios.some((scenario) => !scenario.is_manual);
   const blocked = running || generate.isPending || (takesCount && !countValid);
-  const editable = isStaff && !running;
+  const editable = canRunAnalyses && !running;
 
   async function start() {
     setConfirming(false);

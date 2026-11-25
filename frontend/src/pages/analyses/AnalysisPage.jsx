@@ -34,7 +34,7 @@ function reachableSteps(analysis) {
 
 function Workspace({ id, step }) {
   const navigate = useNavigate();
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const query = useAnalysis(id);
   // A step with unsaved input registers a save, which must succeed before leaving it.
   const beforeLeave = useRef(null);
@@ -59,7 +59,7 @@ function Workspace({ id, step }) {
   if (analysis && !STEPS.some(({ key }) => key === step)) {
     return <Navigate to={`/analyses/${id}/${analysis.resume_step}`} replace />;
   }
-  if (!analysis && !isStaff) return <Navigate to="/analyses" replace />;
+  if (!analysis && !canRunAnalyses) return <Navigate to="/analyses" replace />;
 
   const current = analysis ? step : 'system';
 
@@ -81,7 +81,7 @@ function Workspace({ id, step }) {
           <h1 dir="auto" className="min-w-0 break-words text-lg font-semibold text-gray-900">
             {analysis ? analysis.name || 'Untitled system' : 'New analysis'}
           </h1>
-          {analysis && isStaff && <AnalysisMenu analysis={analysis} onDeleted={() => navigate('/analyses')} />}
+          {analysis && canRunAnalyses && <AnalysisMenu analysis={analysis} onDeleted={() => navigate('/analyses')} />}
         </div>
       </div>
       <Stepper

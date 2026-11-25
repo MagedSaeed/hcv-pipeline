@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
+import LabOnly from './components/LabOnly';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
@@ -62,34 +63,36 @@ export default function App() {
           <Route path="/analyses" element={<AnalysesList />} />
           {/* One route for new and saved, so the first save doesn't remount the editor. */}
           <Route path="/analyses/:id/:step?" element={<AnalysisPage />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/resources" element={<Resources />} />
-          <Route path="/taxonomy" element={<Taxonomy />} />
-          {/* Corpus was merged into the Resources page's "Systems & scenarios"
+          <Route element={<LabOnly />}>
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/resources" element={<Resources />} />
+            <Route path="/taxonomy" element={<Taxonomy />} />
+            {/* Corpus was merged into the Resources page's "Systems & scenarios"
               tab (task 11) - this old route just forwards there so any
               existing bookmark/link keeps working. */}
-          <Route path="/corpus" element={<Navigate to="/resources?tab=corpus" replace />} />
-          <Route path="/prompts" element={<PromptList />} />
-          {/* Order matters: "new" must match before the ":id" route below,
+            <Route path="/corpus" element={<Navigate to="/resources?tab=corpus" replace />} />
+            <Route path="/prompts" element={<PromptList />} />
+            {/* Order matters: "new" must match before the ":id" route below,
               the same way "/experiments/:id/edit" is ordered ahead of
               "/experiments/:id" - otherwise react-router would try to parse
               "new" as an id. */}
-          <Route path="/prompts/new" element={<PromptEditor />} />
-          <Route path="/prompts/:id/edit" element={<PromptEditor />} />
-          <Route path="/prompts/:id" element={<PromptView />} />
-          <Route path="/experiments/new" element={<ExperimentBuilder />} />
-          {/* task 10.3: an experiment is never stranded - it always has a
+            <Route path="/prompts/new" element={<PromptEditor />} />
+            <Route path="/prompts/:id/edit" element={<PromptEditor />} />
+            <Route path="/prompts/:id" element={<PromptView />} />
+            <Route path="/experiments/new" element={<ExperimentBuilder />} />
+            {/* task 10.3: an experiment is never stranded - it always has a
               route back (`/experiments/:id`, linked from the Dashboard and
               landed on straight after create), and an edit route that
               reuses the SAME builder form via PATCH. Order matters here:
               react-router matches `/experiments/:id/edit` against the more
               specific route below before falling through to the `:id` one,
               so "edit" is never swallowed as if it were an experiment id. */}
-          <Route path="/experiments/:id/edit" element={<ExperimentBuilder />} />
-          <Route path="/experiments/:id" element={<ExperimentDetail />} />
-          <Route path="/pipeline-runs/:id" element={<RunDetail />} />
-          <Route path="/labels" element={<Labels />} />
-          <Route path="/settings" element={<Settings />} />
+            <Route path="/experiments/:id/edit" element={<ExperimentBuilder />} />
+            <Route path="/experiments/:id" element={<ExperimentDetail />} />
+            <Route path="/pipeline-runs/:id" element={<RunDetail />} />
+            <Route path="/labels" element={<Labels />} />
+            <Route path="/settings" element={<Settings />} />
+          </Route>
         </Route>
         <Route path="/" element={<Navigate to="/analyses" replace />} />
         <Route path="*" element={<Navigate to="/analyses" replace />} />

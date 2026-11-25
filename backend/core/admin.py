@@ -8,17 +8,19 @@ from core.models import AppSettings, User
 @admin.register(User)
 class AppUserAdmin(UserAdmin):
     ordering = ("email",)
-    list_display = ("email", "name", "is_staff", "must_change_password")
+    list_display = ("email", "name", "role", "is_staff", "must_change_password")
     search_fields = ("email", "name")
     fieldsets = (
         (None, {"fields": ("email", "password")}),
         ("Profile", {"fields": ("name",)}),
         (
             "Permissions",
-            {"fields": ("is_active", "is_staff", "is_superuser", "must_change_password")},
+            {"fields": ("role", "is_active", "is_staff", "is_superuser", "must_change_password")},
         ),
     )
-    add_fieldsets = ((None, {"classes": ("wide",), "fields": ("email", "password1", "password2")}),)
+    add_fieldsets = (
+        (None, {"classes": ("wide",), "fields": ("email", "role", "password1", "password2")}),
+    )
 
 
 @admin.register(AppSettings)

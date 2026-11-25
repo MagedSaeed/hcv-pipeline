@@ -36,8 +36,8 @@ function StepDots({ steps }) {
 }
 
 export default function AnalysesList() {
-  const { isStaff } = useAuth();
-  const [scope, setScope] = useState(isStaff ? 'mine' : 'all');
+  const { canRunAnalyses, isAnalyst } = useAuth();
+  const [scope, setScope] = useState(canRunAnalyses ? 'mine' : 'all');
   const analyses = useAnalyses(scope);
   const rows = analyses.data?.results;
 
@@ -50,21 +50,24 @@ export default function AnalysesList() {
             Describe a system, and see how people and technology could fail together.
           </p>
         </div>
-        {isStaff && (
+        {canRunAnalyses && (
           <Link to="/analyses/new" className={primaryButton}>
             + New analysis
           </Link>
         )}
       </div>
 
-      <div className="inline-flex gap-1 rounded-lg bg-gray-100 p-1">
-        <ScopeButton active={scope === 'mine'} onClick={() => setScope('mine')}>
-          Mine
-        </ScopeButton>
-        <ScopeButton active={scope === 'all'} onClick={() => setScope('all')}>
-          Everyone&apos;s
-        </ScopeButton>
-      </div>
+      {/* Analysts only ever see their own analyses. */}
+      {!isAnalyst && (
+        <div className="inline-flex gap-1 rounded-lg bg-gray-100 p-1">
+          <ScopeButton active={scope === 'mine'} onClick={() => setScope('mine')}>
+            Mine
+          </ScopeButton>
+          <ScopeButton active={scope === 'all'} onClick={() => setScope('all')}>
+            Everyone&apos;s
+          </ScopeButton>
+        </div>
+      )}
 
       {analyses.isError && <ErrorBanner error={analyses.error} />}
       {analyses.isPending && <p className="text-sm text-gray-500">Loading…</p>}
@@ -73,7 +76,7 @@ export default function AnalysesList() {
         <div className="rounded-xl border border-dashed border-gray-300 px-6 py-14 text-center">
           <p className="font-medium text-gray-900">No analyses yet</p>
           <p className="mt-1 text-sm text-gray-600">
-            {isStaff
+            {canRunAnalyses
               ? 'Start with a description of a system you know. Your work is saved as you go.'
               : 'Analyses will appear here once someone creates one.'}
           </p>
@@ -98,7 +101,7 @@ export default function AnalysesList() {
                   Updated {new Date(analysis.updated_at).toLocaleDateString()}
                 </p>
               </div>
-              {isStaff && <AnalysisMenu analysis={analysis} />}
+              {canRunAnalyses && <AnalysisMenu analysis={analysis} />}
             </li>
           ))}
         </ul>

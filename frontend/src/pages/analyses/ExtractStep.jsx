@@ -471,7 +471,7 @@ function Gaps({ gaps }) {
 }
 
 export default function ExtractStep({ analysis, goTo }) {
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const options = useAnalysisOptions(analysis.taxonomy.id);
   const saver = useSettingsSaver(analysis, 'extraction');
   const extract = useExtract(analysis.id);
@@ -488,7 +488,7 @@ export default function ExtractStep({ analysis, goTo }) {
   const { extraction } = analysis;
   const step = options.data?.extraction;
   const running = Boolean(activeRunOf(analysis));
-  const editable = isStaff && !analysis.locked && !running;
+  const editable = canRunAnalyses && !analysis.locked && !running;
   const elements = extraction.items.filter((item) => item.kind === 'element' && item.ref).map((item) => item.ref);
   const counts = {
     approved: extraction.items.filter((item) => item.decision === 'approved').length,

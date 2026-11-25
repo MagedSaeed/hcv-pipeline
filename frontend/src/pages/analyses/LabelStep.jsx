@@ -44,7 +44,7 @@ function ScenarioLabels({ scenario }) {
 }
 
 export default function LabelStep({ analysis, goTo }) {
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const options = useAnalysisOptions(analysis.taxonomy.id);
   const saver = useSettingsSaver(analysis, 'labelling');
   const label = useLabelScenarios(analysis.id);
@@ -58,7 +58,7 @@ export default function LabelStep({ analysis, goTo }) {
   const hasResults = included.some((scenario) => scenario.label_status === 'current');
   const run = analysis.latest_runs.label;
   const running = Boolean(activeRunOf(analysis));
-  const editable = isStaff && !running;
+  const editable = canRunAnalyses && !running;
   const blocked = label.isPending || !analysis.locked;
   const position = run ? Math.min(run.done + run.failed + 1, run.total) : 0;
 

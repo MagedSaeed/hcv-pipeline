@@ -17,7 +17,7 @@ function Dots() {
 
 // A run's progress while active, and how it ended afterwards.
 export default function RunStatus({ analysisId, run, working, typical }) {
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const cancel = useCancelRun(analysisId);
   if (!run) return null;
 
@@ -39,7 +39,7 @@ export default function RunStatus({ analysisId, run, working, typical }) {
             </span>
             {typical && <span className="text-xs font-normal text-brand-800">{typical}</span>}
           </p>
-          {isStaff && (
+          {canRunAnalyses && (
             <button type="button" disabled={cancel.isPending} onClick={() => cancel.mutate()} className={linkButton}>
               Cancel
             </button>

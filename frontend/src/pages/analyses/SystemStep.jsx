@@ -16,7 +16,7 @@ function changedFields(draft, saved) {
 
 function ReadOnlySystem({ analysis }) {
   const navigate = useNavigate();
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const startNew = useStartNew();
 
   return (
@@ -32,9 +32,9 @@ function ReadOnlySystem({ analysis }) {
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
           <p>
             Locked because scenarios were generated from it.
-            {isStaff && ' To change it, start a new analysis from it.'}
+            {canRunAnalyses && ' To change it, start a new analysis from it.'}
           </p>
-          {isStaff && (
+          {canRunAnalyses && (
             <button
               type="button"
               disabled={startNew.isPending}
@@ -221,8 +221,8 @@ function SystemEditor({ analysis, goTo, registerBeforeLeave }) {
 }
 
 export default function SystemStep(props) {
-  const { isStaff } = useAuth();
+  const { canRunAnalyses } = useAuth();
   const { analysis } = props;
-  if (analysis && (analysis.locked || !isStaff)) return <ReadOnlySystem analysis={analysis} />;
+  if (analysis && (analysis.locked || !canRunAnalyses)) return <ReadOnlySystem analysis={analysis} />;
   return <SystemEditor {...props} />;
 }

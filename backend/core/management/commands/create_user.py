@@ -18,6 +18,12 @@ class Command(BaseCommand):
             help="Password to issue. A random one is generated and printed if omitted.",
         )
         parser.add_argument("--staff", action="store_true", help="Grant is_staff.")
+        parser.add_argument(
+            "--role",
+            choices=User.Role.values,
+            default=User.Role.RESEARCHER,
+            help="analyst: Analyses only, no Experiment Lab.",
+        )
 
     def handle(self, *args, **options):
         email = options["email"].strip().lower()
@@ -30,6 +36,7 @@ class Command(BaseCommand):
             password=password,
             name=options["name"],
             is_staff=options["staff"],
+            role=options["role"],
         )
         self.stdout.write(self.style.SUCCESS(f"Created {email}"))
         if not options["password"]:

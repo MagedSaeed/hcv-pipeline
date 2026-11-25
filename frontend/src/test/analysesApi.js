@@ -149,7 +149,8 @@ export function mockAnalyses({ analyses = [buildAnalysis()], options = buildOpti
 
   function write(method, path, handle) {
     return http[method](path, async ({ request, params }) => {
-      const refused = requireCsrf(request) ?? requireAuth(currentUser()) ?? requireStaff(currentUser());
+      const user = currentUser();
+      const refused = requireCsrf(request) ?? requireAuth(user) ?? (user?.role === 'analyst' ? null : requireStaff(user));
       if (refused) return refused;
       const text = await request.text();
       const body = text ? JSON.parse(text) : {};
