@@ -12,7 +12,7 @@ async function submitLogin(user, email, password) {
 }
 
 describe('Login and the auth flow', () => {
-  it('calls csrf before login, then lands on the dashboard', async () => {
+  it('calls csrf before login, then lands on Analyses', async () => {
     const callOrder = [];
     server.use(
       http.get('/api/auth/csrf/', () => {
@@ -38,7 +38,7 @@ describe('Login and the auth flow', () => {
 
     await submitLogin(user, 'researcher@example.com', 'correct-horse');
 
-    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Your analyses' })).toBeInTheDocument();
     expect(callOrder).toEqual(['csrf', 'login']);
   });
 
@@ -75,7 +75,7 @@ describe('Login and the auth flow', () => {
     renderApp({ initialEntries: ['/login'] });
 
     await submitLogin(user, 'researcher@example.com', 'correct-horse');
-    await screen.findByRole('heading', { name: /dashboard/i });
+    await screen.findByRole('heading', { name: 'Your analyses' });
 
     await user.click(screen.getByRole('button', { name: /log out/i }));
 

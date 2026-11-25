@@ -21,7 +21,7 @@ export default function Login() {
   // briefly unmount/remount the tree sorting that out.
   if (!isLoading && user) {
     const from = location.state?.from?.pathname;
-    const destination = user.must_change_password ? '/change-password' : from || '/dashboard';
+    const destination = user.must_change_password ? '/change-password' : from || '/analyses';
     return <Navigate to={destination} replace />;
   }
 

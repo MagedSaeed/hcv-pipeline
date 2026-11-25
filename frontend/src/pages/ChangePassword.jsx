@@ -21,7 +21,7 @@ export default function ChangePassword() {
     setSubmitting(true);
     try {
       await changePassword(currentPassword, newPassword);
-      navigate('/dashboard', { replace: true });
+      navigate('/analyses', { replace: true });
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {
