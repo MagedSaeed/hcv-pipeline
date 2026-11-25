@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { delay, http, HttpResponse } from 'msw';
+import { http, HttpResponse } from 'msw';
 import { authState, currentUser, server } from '../../test/server';
 import { renderApp } from '../../test/renderApp';
 import { paginated, requireCsrf, requireStaff } from '../../test/mockApi';
@@ -255,9 +255,12 @@ describe('ExperimentDetail', () => {
   });
 
   it('shows a neutral loading notice for the explanation while OPTIONS is in flight', async () => {
+    // Held until the notice has been seen, so a slow render can't miss it.
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
     server.use(
       http.options('/api/experiments/77/run/', async () => {
-        await delay(50);
+        await held;
         return HttpResponse.json(runOptionsResponse('Resolved after the delay.'));
       })
     );
@@ -267,6 +270,7 @@ describe('ExperimentDetail', () => {
     const repetitions = await screen.findByLabelText(/^repetitions$/i);
     expect(repetitions).toHaveValue(1);
     expect(screen.getByText(/loading the explanation/i)).toBeInTheDocument();
+    release();
     expect(await screen.findByText('Resolved after the delay.')).toBeInTheDocument();
   });
 
