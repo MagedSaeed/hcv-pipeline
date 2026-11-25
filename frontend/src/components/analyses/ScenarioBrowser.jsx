@@ -3,6 +3,26 @@ import MasterDetail from './MasterDetail';
 import ScenarioCard, { ScenarioDetails, ScenarioSubtitle } from './ScenarioCard';
 import useWideScreen from './useWideScreen';
 
+// How many vulnerabilities a scenario has; grey when its labels are out of date.
+function FoundCount({ scenario }) {
+  const count = scenario.labels?.length ?? 0;
+  if (count === 0 || scenario.set_aside) return null;
+  const words = `${count} ${count === 1 ? 'vulnerability' : 'vulnerabilities'}`;
+  const tone =
+    scenario.label_status === 'stale'
+      ? 'border-gray-200 bg-gray-50 text-gray-500'
+      : 'border-rose-200 bg-rose-50 text-rose-700';
+  return (
+    <span
+      aria-label={scenario.label_status === 'stale' ? `${words}, out of date` : words}
+      title={words}
+      className={`h-fit shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums ${tone}`}
+    >
+      {count}
+    </span>
+  );
+}
+
 // Scenarios as a list beside the chosen one on wide screens, as cards on phones.
 // `renderBelow` adds a step's own content, such as labels, under each scenario.
 // `numberOf` keeps a scenario's number when the list shown is a subset.
@@ -62,6 +82,7 @@ export default function ScenarioBrowser({
             <ScenarioSubtitle scenario={{ ...scenario, outcome: '' }} />
             {itemNote?.(scenario) && <span className="mt-0.5 block text-xs text-gray-500">{itemNote(scenario)}</span>}
           </span>
+          {showLabels && <FoundCount scenario={scenario} />}
         </span>
       )}
     >

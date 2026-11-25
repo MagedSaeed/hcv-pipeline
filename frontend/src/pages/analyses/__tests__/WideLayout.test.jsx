@@ -148,6 +148,17 @@ describe('Wide screens: list and detail', () => {
     expect(within(detail()).getByRole('heading', { name: 'The scenario' })).toBeInTheDocument();
   });
 
+  it('tags each labelled scenario in the list with how many vulnerabilities it has', async () => {
+    open('label');
+
+    const items = within(await list()).getAllByRole('button');
+    const cleaner = items.find((item) => item.textContent.includes('A cleaner finds a key'));
+    const handover = items.find((item) => item.textContent.includes('Routine shift handover'));
+
+    expect(within(cleaner).getByLabelText('1 vulnerability')).toHaveTextContent('1');
+    expect(within(handover).queryByLabelText(/vulnerabilit/)).not.toBeInTheDocument();
+  });
+
   it('highlights the quoted words in the scenario text', async () => {
     open('label');
     const user = userEvent.setup();
