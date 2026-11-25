@@ -375,8 +375,6 @@ def _finding(number, finding, s):
     if finding["only_manual"]:
         meta += " · Only in manually added scenarios"
     rows = [("Enables", _threats(finding["threats"], s))]
-    if finding["elements"]:
-        rows.append(("At risk", Paragraph(_text("; ".join(finding["elements"])), s["body"])))
     why = []
     for occurrence in finding["occurrences"]:
         why.append(Paragraph(f"<i>{_text(occurrence['title'])}</i>", s["body"]))

@@ -91,7 +91,6 @@ def test_report_pdf_holds_the_whole_report(client_for, staff, analysis, labelled
         "STRIDE",
         "LINDDUN",
         "Data disclosure",
-        "Service delivered by the MobileApp",
         "Tailgating",
         "Only in manually added scenarios",
         "Added manually",
@@ -109,6 +108,7 @@ def test_report_pdf_holds_the_whole_report(client_for, staff, analysis, labelled
     ]:
         assert expected in text, expected
     assert "Labelling" not in text
+    assert "At risk" not in text
 
 
 def test_report_pdf_numbers_its_pages(client_for, staff, analysis, labelled):

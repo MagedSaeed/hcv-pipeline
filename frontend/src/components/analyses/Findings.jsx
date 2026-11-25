@@ -79,12 +79,6 @@ export function Finding({ finding, onShow, bare = false }) {
             </ul>
           )}
         </dd>
-        {finding.elements.length > 0 && (
-          <>
-            <dt className="text-gray-500">At risk</dt>
-            <dd className="text-gray-800">{finding.elements.join('; ')}</dd>
-          </>
-        )}
         <dt className="text-gray-500">Why</dt>
         <dd className="min-w-0 space-y-4">
           {first && <Occurrence occurrence={first} onShow={onShow} />}

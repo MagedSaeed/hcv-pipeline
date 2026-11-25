@@ -227,6 +227,14 @@ describe('Report step', () => {
     expect((await within(details).findAllByText('This model may ignore temperature')).length).toBe(2);
   });
 
+  it('shows no At risk line for a vulnerability', async () => {
+    const report = await open();
+
+    expect(await within(report).findByText('Data disclosure')).toBeInTheDocument();
+    expect(report).not.toHaveTextContent('At risk');
+    expect(report).not.toHaveTextContent('The Service itself');
+  });
+
   it('links Download PDF to the PDF at the top and again above the research details', async () => {
     const report = await open();
 
