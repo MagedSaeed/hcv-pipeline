@@ -88,7 +88,7 @@ export default function ScenarioBrowser({
             <ScenarioSubtitle scenario={{ ...scenario, outcome: '' }} />
             {itemNote?.(scenario) && <span className="mt-0.5 block text-xs text-gray-500">{itemNote(scenario)}</span>}
             {showLabels && <FoundCount scenario={scenario} />}
-            {scenario.id === workingId && <span className="sr-only">(being labelled)</span>}
+            {scenario.id === workingId && <span className="sr-only">(being checked)</span>}
           </span>
         </span>
       )}

@@ -160,7 +160,7 @@ def start_labelling(analysis, user, *, only_failed=False):
     with transaction.atomic():
         held = _lock_idle(analysis)
         if not state.is_locked(held):
-            raise RunRefused("invalid", "Generate scenarios before labelling.")
+            raise RunRefused("invalid", "Generate scenarios before identifying vulnerabilities.")
         wanted = {"failed"} if only_failed else {"unlabelled", "stale", "failed"}
         targets = [
             scenario
@@ -168,7 +168,7 @@ def start_labelling(analysis, user, *, only_failed=False):
             if not scenario.set_aside and state.label_status(held, scenario) in wanted
         ]
         if not targets:
-            raise RunRefused("nothing_to_do", "There are no scenarios to label.")
+            raise RunRefused("nothing_to_do", "There are no scenarios to check.")
         run = _create(
             held,
             user,

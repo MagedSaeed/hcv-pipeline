@@ -44,7 +44,7 @@ export default function ResearchDetails({ report }) {
       {extraction && <Extraction setup={extraction} />}
       {generation && <Setup title="Generation" setup={generation} />}
       {labelling.map((setup, index) => (
-        <Setup key={index} title="Labelling" setup={setup} />
+        <Setup key={index} title="Identification" setup={setup} />
       ))}
       {typeof cost === 'number' && <p>Cost of this analysis so far: ${cost.toFixed(4)}</p>}
       <ul className="space-y-2">

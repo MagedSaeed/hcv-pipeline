@@ -148,7 +148,7 @@ describe('Settings panel', () => {
 
     await within(panel).findByRole('option', { name: 'OTHER v1' });
     await user.selectOptions(within(panel).getByLabelText('Taxonomy'), '9');
-    await user.click(await within(panel).findByRole('button', { name: 'Switch labelling to zero-shot and use it' }));
+    await user.click(await within(panel).findByRole('button', { name: 'Switch identification to zero-shot and use it' }));
 
     await waitFor(() => expect(store.analyses[0].labelling_settings.examples).toEqual([]));
   });

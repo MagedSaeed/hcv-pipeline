@@ -159,7 +159,7 @@ describe('Wide screens: list and detail', () => {
     expect(within(handover).queryByLabelText(/vulnerabilit/)).not.toBeInTheDocument();
   });
 
-  it('fades the row of the scenario being labelled, and says so', async () => {
+  it('fades the row of the scenario being checked, and says so', async () => {
     mockAnalyses({
       analyses: [
         buildAnalysis({
@@ -176,7 +176,7 @@ describe('Wide screens: list and detail', () => {
     const items = within(await list()).getAllByRole('button');
     const working = items.find((item) => item.textContent.includes('Routine shift handover'));
     const waiting = items.find((item) => item.textContent.includes('A cleaner finds a key'));
-    expect(working).toHaveTextContent('(being labelled)');
+    expect(working).toHaveTextContent('(being checked)');
     expect(working.firstElementChild.className).toMatch(/animate-breathe/);
     expect(waiting.firstElementChild.className).not.toMatch(/animate-breathe/);
   });

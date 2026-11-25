@@ -25,8 +25,8 @@ describe('Moving between steps', () => {
     await screen.findByRole('heading', { name: 'Generate scenarios' });
     expect(stepPanel().className).not.toMatch(/animate-/);
 
-    await user.click(screen.getByRole('button', { name: /Continue to labelling/ }));
-    await screen.findByRole('heading', { name: 'Label scenarios' });
+    await user.click(screen.getByRole('button', { name: /Continue to identification/ }));
+    await screen.findByRole('heading', { name: 'Identify vulnerabilities' });
     expect(stepPanel().className).toMatch(/animate-slide-from-right/);
     expect(stepPanel().className).toMatch(/motion-reduce:animate-none/);
 

@@ -84,7 +84,7 @@ export default function AnalysisMenu({ analysis, onDeleted }) {
           <div className="space-y-3">
             <ConfirmDialog
               title={`Delete "${title}"?`}
-              message="This removes its description, scenarios, labels and runs. It can't be undone."
+              message="This removes its description, scenarios, the vulnerabilities found and its runs. It can't be undone."
               confirmLabel="Delete"
               onConfirm={handleDelete}
               onCancel={() => setDialog(null)}

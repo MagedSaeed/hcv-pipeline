@@ -28,7 +28,7 @@ describe('Extract step', () => {
     open();
 
     const steps = within(await screen.findByRole('navigation', { name: 'Analysis steps' })).getAllByRole('button');
-    expect(steps.map((step) => step.textContent.replace(/[^A-Za-z]/g, ''))).toEqual(['System', 'Extract', 'Generate', 'Label', 'Report']);
+    expect(steps.map((step) => step.textContent.replace(/[^A-Za-z]/g, ''))).toEqual(['System', 'Extract', 'Generate', 'Identify', 'Report']);
     expect(screen.getByRole('heading', { name: 'Extract the system’s values' })).toBeInTheDocument();
   });
 

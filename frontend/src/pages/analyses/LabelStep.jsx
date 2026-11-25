@@ -11,10 +11,10 @@ import { primaryButton, secondaryButton, stepTitle } from '../../components/anal
 import useSettingsSaver from '../../components/analyses/useSettingsSaver';
 
 const STATUS_NOTES = {
-  current: 'Labelled',
+  current: 'Checked',
   stale: 'Out of date',
   failed: 'Failed',
-  unlabelled: 'Not labelled yet',
+  unlabelled: 'Not checked yet',
 };
 
 function statusNote(scenario) {
@@ -25,11 +25,11 @@ function statusNote(scenario) {
 
 function ScenarioLabels({ scenario }) {
   const { label_status: status, labels } = scenario;
-  if (scenario.set_aside) return <p className="text-sm text-gray-500">Set aside, not labelled</p>;
+  if (scenario.set_aside) return <p className="text-sm text-gray-500">Set aside, not checked</p>;
   return (
     <div className="space-y-3">
-      {status === 'unlabelled' && <p className="text-sm text-gray-500">Not labelled yet</p>}
-      {status === 'stale' && <p className="text-sm text-amber-800">Out of date. Label again to update.</p>}
+      {status === 'unlabelled' && <p className="text-sm text-gray-500">Not checked yet</p>}
+      {status === 'stale' && <p className="text-sm text-amber-800">Out of date. Identify again to update.</p>}
       {status === 'failed' && <p className="break-words text-sm text-red-700">{scenario.error}</p>}
       {status === 'current' && labels.length === 0 && (
         <p className="text-sm text-gray-600">No vulnerability found in this scenario</p>
@@ -66,13 +66,13 @@ export default function LabelStep({ analysis, goTo }) {
     if (await saver.flush()) label.mutate(body);
   }
 
-  let mainLabel = `Label ${waiting} ${waiting === 1 ? 'scenario' : 'scenarios'}`;
-  if (!waiting) mainLabel = included.length ? 'All scenarios labelled' : 'No scenarios to label';
+  let mainLabel = `Identify vulnerabilities in ${waiting} ${waiting === 1 ? 'scenario' : 'scenarios'}`;
+  if (!waiting) mainLabel = included.length ? 'Every scenario is checked' : 'No scenarios to check';
 
   return (
     <section className="space-y-6">
       <div className="space-y-2">
-        <h2 className={stepTitle}>Label scenarios</h2>
+        <h2 className={stepTitle}>Identify vulnerabilities</h2>
         <SetupSummary
           settings={saver.settings}
           defaults={step?.defaults}

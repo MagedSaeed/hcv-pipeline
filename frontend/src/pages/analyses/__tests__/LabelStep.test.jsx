@@ -33,7 +33,7 @@ describe('Label step', () => {
 
     await screen.findByText('Recommended');
     await user.click(screen.getByRole('button', { name: 'Change' }));
-    const panel = await screen.findByRole('dialog', { name: 'Labelling settings' });
+    const panel = await screen.findByRole('dialog', { name: 'Identification settings' });
 
     const boxes = within(panel).getAllByRole('checkbox');
     expect(boxes).toHaveLength(5);
@@ -65,9 +65,9 @@ describe('Label step', () => {
     });
 
     expect(await screen.findByText('No vulnerability found in this scenario')).toBeInTheDocument();
-    expect(screen.getByText('Out of date. Label again to update.')).toBeInTheDocument();
+    expect(screen.getByText('Out of date. Identify again to update.')).toBeInTheDocument();
     expect(screen.getByText('Rate limited.')).toBeInTheDocument();
-    expect(screen.getByText('Not labelled yet')).toBeInTheDocument();
+    expect(screen.getByText('Not checked yet')).toBeInTheDocument();
   });
 
   it('labels what is not current', async () => {
@@ -76,7 +76,7 @@ describe('Label step', () => {
     });
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: 'Label 1 scenario' }));
+    await user.click(await screen.findByRole('button', { name: 'Identify vulnerabilities in 1 scenario' }));
 
     await waitFor(() => expect(store.requests[0]?.path).toBe('/api/analyses/1/label/'));
     expect(store.requests[0].body).toEqual({});
@@ -94,7 +94,7 @@ describe('Label step', () => {
   it('disables the main button when all are current', async () => {
     open({ scenarios: [buildScenario({ label_status: 'current' })] });
 
-    expect(await screen.findByRole('button', { name: 'All scenarios labelled' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Every scenario is checked' })).toBeDisabled();
   });
 
   it('moves on with Continue to report', async () => {
@@ -112,15 +112,15 @@ describe('Label step', () => {
   it('shows what was set aside without counting it', async () => {
     open({ scenarios: [buildScenario(), buildScenario({ id: 2, title: 'Set aside one', set_aside: true })] });
 
-    expect(await screen.findByRole('button', { name: 'Label 1 scenario' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Identify vulnerabilities in 1 scenario' })).toBeInTheDocument();
     const card = screen.getByText('Set aside one').closest('article');
-    expect(within(card).getByText('Set aside, not labelled')).toBeInTheDocument();
+    expect(within(card).getByText('Set aside, not checked')).toBeInTheDocument();
   });
 
   it('shows non-staff no actions', async () => {
     open({}, 'researcher@example.com');
 
-    expect(await screen.findByText('Not labelled yet')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Change|Label 1|Retry/ })).not.toBeInTheDocument();
+    expect(await screen.findByText('Not checked yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Change|Identify vulnerabilities in 1|Retry/ })).not.toBeInTheDocument();
   });
 });

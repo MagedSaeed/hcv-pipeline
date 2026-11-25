@@ -13,7 +13,7 @@ import { linkButton, secondaryButton, textInput } from './styles';
 const TITLES = {
   extraction: 'Extraction settings',
   generation: 'Generation settings',
-  labelling: 'Labelling settings',
+  labelling: 'Identification settings',
 };
 
 function isTemperature(text) {
@@ -164,7 +164,7 @@ function TaxonomySetting({ analysis }) {
             update.mutate({ ...update.variables, labelling_settings: { ...analysis.labelling_settings, examples: [] } })
           }
         >
-          Switch labelling to zero-shot and use it
+          Switch identification to zero-shot and use it
         </button>
       )}
     </div>

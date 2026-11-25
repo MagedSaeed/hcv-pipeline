@@ -24,7 +24,7 @@ function incompleteText({ unlabelled, failed, stale }) {
   const total = unlabelled + failed + stale;
   if (!total) return '';
   const parts = [
-    unlabelled && `${unlabelled} not labelled`,
+    unlabelled && `${unlabelled} not checked yet`,
     failed && `${failed} failed`,
     stale && `${stale} out of date`,
   ].filter(Boolean);
@@ -69,7 +69,7 @@ function Findings({ report, onShow }) {
   const [selected, setSelected] = useState(null);
 
   if (report.findings.length === 0) {
-    return <p className="py-6 text-sm text-gray-600">No vulnerabilities in the labelled scenarios so far.</p>;
+    return <p className="py-6 text-sm text-gray-600">No vulnerabilities in the scenarios checked so far.</p>;
   }
   if (!wide) {
     return (

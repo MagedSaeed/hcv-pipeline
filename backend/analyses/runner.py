@@ -74,7 +74,7 @@ def _call(run, scenario):
         return _extract_call(run)
     generating = run.kind == AnalysisRun.Kind.GENERATE
     if not generating and scenario is None:
-        return _Outcome(error="The scenario was deleted before it could be labelled.")
+        return _Outcome(error="The scenario was deleted before it could be checked.")
     analysis, pinned = run.analysis, run.pinned
     body = pinned.get("system_body") or analysis.description
     system = (analysis.prompt_title, body, analysis.taxonomy)
@@ -291,7 +291,7 @@ def _finish(run):
     if run.kind == AnalysisRun.Kind.GENERATE:
         run.error = reason
     else:
-        run.error = f"{run.failed} of {run.total} scenarios failed to label. {reason}".strip()
+        run.error = f"{run.failed} of {run.total} scenarios could not be checked. {reason}".strip()
 
 
 def _fail(run_id, message):
@@ -305,4 +305,8 @@ def _enqueue_next(run):
         runs.enqueue(run, run.position)
     except Exception:  # noqa: BLE001 — broker errors vary by backend
         logger.exception("Could not queue the next call of analysis run %s", run.pk)
-        _fail(run.pk, "The job queue became unavailable. Label the remaining scenarios again.")
+        _fail(
+            run.pk,
+            "The job queue became unavailable. "
+            "Identify vulnerabilities in the remaining scenarios again.",
+        )

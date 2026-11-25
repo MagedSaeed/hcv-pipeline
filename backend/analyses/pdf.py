@@ -494,7 +494,9 @@ def _details(report, s):
             ]
         )
     for setup in details["labelling"]:
-        rows.append([Paragraph("Labelling", s["cell"]), Paragraph(_setup_text(setup), s["cell"])])
+        rows.append(
+            [Paragraph("Identification", s["cell"]), Paragraph(_setup_text(setup), s["cell"])]
+        )
     conditions = [
         f"{finding['hcv_id']}: {mapping['condition_class']}"
         + (f" (rule {mapping['rule']})" if mapping["rule"] else "")
@@ -518,7 +520,7 @@ def incomplete_text(incomplete):
     parts = [
         f"{incomplete[key]} {words}"
         for key, words in (
-            ("unlabelled", "not labelled"),
+            ("unlabelled", "not checked yet"),
             ("failed", "failed"),
             ("stale", "out of date"),
         )
@@ -576,7 +578,7 @@ def render(report, order):
     else:
         story += [
             *_section(1, "Summary", s),
-            Paragraph("No vulnerabilities in the labelled scenarios so far.", s["body"]),
+            Paragraph("No vulnerabilities in the scenarios checked so far.", s["body"]),
             *_section(2, "Vulnerabilities", s),
             Paragraph("None.", s["small"]),
         ]

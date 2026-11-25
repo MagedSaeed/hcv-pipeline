@@ -220,7 +220,7 @@ export default function GenerateStep({ analysis, goTo }) {
       {confirming && editable && (
         <ConfirmDialog
           title="Replace the generated scenarios?"
-          message="When the new ones arrive they replace the generated scenarios and their labels. Scenarios added manually stay."
+          message="When the new ones arrive they replace the generated scenarios and the vulnerabilities found in them. Scenarios added manually stay."
           confirmLabel="Replace scenarios"
           onConfirm={start}
           onCancel={() => setConfirming(false)}
@@ -244,7 +244,7 @@ export default function GenerateStep({ analysis, goTo }) {
             />
           )}
           <button type="button" disabled={running} onClick={() => goTo('label')} className={primaryButton}>
-            Continue to labelling →
+            Continue to identification →
           </button>
         </div>
       )}

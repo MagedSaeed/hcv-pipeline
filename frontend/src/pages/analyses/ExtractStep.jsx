@@ -590,8 +590,8 @@ export default function ExtractStep({ analysis, goTo }) {
                 {structuredPart(extraction.body)}
               </pre>
               <p className="mt-3 text-xs text-gray-500">
-                Only approved values appear, followed by your original description. This is what the generator and the
-                labeller read.
+                Only approved values appear, followed by your original description. This is what the models read when they
+                generate scenarios and identify vulnerabilities.
               </p>
             </div>
           ) : (

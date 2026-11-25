@@ -105,8 +105,10 @@ def test_report_pdf_holds_the_whole_report(client_for, staff, analysis, labelled
         "HCV-21 v1.2",
         "UnscopedDevicePermissionCondition (rule E13c)",
         "openai/gpt-5.6-luna-pro",
+        "Identification",
     ]:
         assert expected in text, expected
+    assert "Labelling" not in text
 
 
 def test_report_pdf_numbers_its_pages(client_for, staff, analysis, labelled):

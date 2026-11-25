@@ -193,7 +193,7 @@ describe('Report step', () => {
     const report = await open({ incomplete: { unlabelled: 2, failed: 1, stale: 3 } });
 
     expect(within(report).getByRole('status')).toHaveTextContent(
-      '6 scenarios are not in this report: 2 not labelled, 1 failed, 3 out of date.'
+      '6 scenarios are not in this report: 2 not checked yet, 1 failed, 3 out of date.'
     );
   });
 
