@@ -280,7 +280,7 @@ describe('Extract step', () => {
     const status = await screen.findByRole('status', { name: 'Run progress' });
     expect(status).toHaveTextContent('Reading the description');
     expect(within(status).getByText(/^1:0[5-7]$/)).toHaveAttribute('aria-label', expect.stringMatching(/^Running for 1 minute 0[5-7] seconds$/));
-    expect(status).toHaveTextContent('Usually 1–2 minutes');
+    expect(status).toHaveTextContent('This can take a while');
   });
 
   it('shows edited values with what the model said', async () => {
