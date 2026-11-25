@@ -4,7 +4,7 @@ import { useCreateAnalysis, useStartNew, useUpdateAnalysis } from '../../api/ana
 import { useAuth } from '../../contexts/auth-context';
 import ErrorBanner from '../../components/ErrorBanner';
 import { linkButton, primaryButton, secondaryButton, stepTitle, textInput } from '../../components/analyses/styles';
-import { EXAMPLE_SYSTEM, OUTLINE } from './exampleSystem';
+import { EXAMPLES, OUTLINE } from './exampleSystem';
 
 const AUTOSAVE_DELAY_MS = 800;
 const DESCRIPTION_MAX_LENGTH = 50000;
@@ -129,7 +129,8 @@ function useAutosave(analysis) {
 
 function SystemEditor({ analysis, goTo, registerBeforeLeave }) {
   const { draft, change, save, status } = useAutosave(analysis);
-  const [confirmExample, setConfirmExample] = useState(false);
+  // The example waiting for a yes before it replaces the text.
+  const [pendingExample, setPendingExample] = useState(null);
   const { name, description } = draft;
 
   useEffect(() => {
@@ -137,10 +138,17 @@ function SystemEditor({ analysis, goTo, registerBeforeLeave }) {
     return () => registerBeforeLeave(null);
   }, [registerBeforeLeave, save]);
 
-  function applyExample() {
-    change('description', EXAMPLE_SYSTEM.description);
-    if (!name.trim()) change('name', EXAMPLE_SYSTEM.name);
-    setConfirmExample(false);
+  function applyExample(example) {
+    change('description', example.description);
+    // A name the analyst typed stays; an empty one or another example's follows the text.
+    if (!name.trim() || EXAMPLES.some((other) => other.name === name)) change('name', example.name);
+    setPendingExample(null);
+  }
+
+  function tryExample(example) {
+    const own = description.trim() && !EXAMPLES.some((other) => other.description === description);
+    if (own) setPendingExample(example);
+    else applyExample(example);
   }
 
   function insertOutline() {
@@ -179,13 +187,23 @@ function SystemEditor({ analysis, goTo, registerBeforeLeave }) {
         <button type="button" onClick={insertOutline} className={linkButton}>
           Insert an outline
         </button>
-        <button
-          type="button"
-          onClick={() => (description.trim() ? setConfirmExample(true) : applyExample())}
-          className={linkButton}
-        >
-          Try an example
-        </button>
+        <span className="flex flex-wrap items-center gap-x-2 text-sm text-gray-500">
+          Try an example:
+          {EXAMPLES.map((example, index) => (
+            <span key={example.label} className="flex items-center gap-x-2">
+              {index > 0 && <span aria-hidden="true">·</span>}
+              <button
+                type="button"
+                aria-label={`Try the ${example.label} example`}
+                title={example.name}
+                onClick={() => tryExample(example)}
+                className={linkButton}
+              >
+                {example.label}
+              </button>
+            </span>
+          ))}
+        </span>
         <p aria-live="polite" className="ml-auto text-xs text-gray-500">
           {status.phase === 'saving' && 'Saving…'}
           {status.phase === 'saved' && 'Saved'}
@@ -193,13 +211,13 @@ function SystemEditor({ analysis, goTo, registerBeforeLeave }) {
         </p>
       </div>
 
-      {confirmExample && (
+      {pendingExample && (
         <div className="flex flex-wrap items-center gap-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900">
           The example replaces what you wrote.
-          <button type="button" onClick={applyExample} className={secondaryButton}>
+          <button type="button" onClick={() => applyExample(pendingExample)} className={secondaryButton}>
             Replace with the example
           </button>
-          <button type="button" onClick={() => setConfirmExample(false)} className={linkButton}>
+          <button type="button" onClick={() => setPendingExample(null)} className={linkButton}>
             Keep mine
           </button>
         </div>

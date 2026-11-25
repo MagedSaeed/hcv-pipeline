@@ -137,13 +137,34 @@ describe('System step', () => {
     open();
 
     await nameBox();
-    await user.click(screen.getByRole('button', { name: 'Try an example' }));
+    await user.click(screen.getByRole('button', { name: 'Try the SmartStop example' }));
     expect(descriptionBox()).toHaveValue('An app lets residents pay for parking.');
     await user.click(screen.getByRole('button', { name: 'Replace with the example' }));
 
     expect(descriptionBox().value).toMatch(/^SmartStop is a city service/);
     expect(descriptionBox().value).toContain('Two-step login is not used.');
     expect(screen.getByLabelText('System name')).toHaveValue('Smart Parking');
+  });
+
+  it('offers two examples, each filling its own name and text', async () => {
+    mockAnalyses();
+    const user = userEvent.setup();
+    open('/analyses/new');
+
+    await user.click(await screen.findByRole('button', { name: 'Try the CarePath AI example' }));
+    expect(descriptionBox().value).toMatch(/^CarePath AI is a healthcare service/);
+    expect(descriptionBox().value).toContain('Multi-factor authentication is not used.');
+    expect(screen.getByLabelText('System name')).toHaveValue(
+      'CarePath AI: Remote Patient Monitoring System, Al Noor City (2032)'
+    );
+
+    // An unchanged example is swapped without asking: nothing of the analyst's is lost.
+    await user.click(screen.getByRole('button', { name: 'Try the SmartStop example' }));
+    expect(screen.queryByRole('button', { name: 'Replace with the example' })).not.toBeInTheDocument();
+    expect(descriptionBox().value).toMatch(/^SmartStop is a city service/);
+    expect(screen.getByLabelText('System name')).toHaveValue(
+      'SmartStop: Adaptive Public Transport Assistant, Al Noor City (2032)'
+    );
   });
 
   it('shows why it is locked and starts new from the description', async () => {
