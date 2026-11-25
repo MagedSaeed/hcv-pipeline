@@ -106,3 +106,32 @@ def test_create_user_sets_the_role():
 
     user = get_user_model().objects.get(email="ana@example.com")
     assert (user.role, user.is_staff) == ("analyst", False)
+
+
+@pytest.mark.parametrize("flags", [{"is_staff": True}, {"is_superuser": True, "is_staff": True}])
+def test_staff_and_superusers_cannot_be_saved_as_analysts(flags):
+    from django.core.exceptions import ValidationError
+
+    user = get_user_model()(email="boss@example.com", role="analyst", **flags)
+    user.set_password("pw-123456")
+
+    with pytest.raises(ValidationError) as refused:
+        user.full_clean()
+    assert "role" in refused.value.message_dict
+
+
+def test_the_role_never_limits_staff_already_marked_analyst(signed_in, db):
+    """An older row with both flags keeps full access, so nobody is locked out."""
+    boss = get_user_model().objects.create_user(
+        email="boss@example.com", password="pw-123456", is_staff=True, role="analyst"
+    )
+
+    assert boss.is_analyst is False
+    assert signed_in(boss).get("/api/pipeline-runs/").status_code == 200
+
+
+def test_create_user_refuses_a_staff_analyst():
+    from django.core.management.base import CommandError
+
+    with pytest.raises(CommandError):
+        call_command("create_user", "x@example.com", "--staff", "--role", "analyst")

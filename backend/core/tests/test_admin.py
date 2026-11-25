@@ -43,3 +43,26 @@ def test_the_admin_shows_the_key_masked(settings_admin):
     config.save()
 
     assert settings_admin.masked_key(config) == "sk-o...mnop"
+
+
+@pytest.mark.django_db
+def test_the_user_form_refuses_an_admin_as_analyst(request_from_a_superuser):
+    from core.admin import AppUserAdmin
+
+    boss = User.objects.create_user(email="boss@example.com", password="pw-123456", is_staff=True)
+    user_admin = AppUserAdmin(User, admin.site)
+    form_class = user_admin.get_form(request_from_a_superuser, obj=boss)
+    data = {
+        "email": boss.email,
+        "password": boss.password,
+        "name": "",
+        "role": "analyst",
+        "is_active": True,
+        "is_staff": True,
+        "must_change_password": False,
+    }
+
+    form = form_class(data=data, instance=boss)
+
+    assert not form.is_valid()
+    assert form.errors["role"] == ["An analyst can't be staff or superuser."]

@@ -26,6 +26,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        if options["staff"] and options["role"] == User.Role.ANALYST:
+            raise CommandError("An analyst can't be staff.")
         email = options["email"].strip().lower()
         if User.objects.filter(email__iexact=email).exists():
             raise CommandError(f"An account for {email} already exists.")

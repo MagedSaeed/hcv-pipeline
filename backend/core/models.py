@@ -1,4 +1,5 @@
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from core.managers import UserManager
@@ -29,7 +30,13 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     @property
     def is_analyst(self):
-        return self.role == self.Role.ANALYST
+        # Staff and superusers keep full access, so an admin can't lock themselves out.
+        return self.role == self.Role.ANALYST and not (self.is_staff or self.is_superuser)
+
+    def clean(self):
+        super().clean()
+        if self.role == self.Role.ANALYST and (self.is_staff or self.is_superuser):
+            raise ValidationError({"role": "An analyst can't be staff or superuser."})
 
 
 class AppSettings(models.Model):
