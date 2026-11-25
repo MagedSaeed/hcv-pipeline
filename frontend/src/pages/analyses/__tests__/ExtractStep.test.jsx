@@ -273,14 +273,36 @@ describe('Extract step', () => {
     await waitFor(() => expect(store.requests[0]?.path).toBe('/api/analyses/1/extract/'));
   });
 
-  it('shows progress while extracting: the time so far and how long it usually takes', async () => {
-    const run = buildRun({ kind: 'extract', created_at: new Date(Date.now() - 65_000).toISOString() });
+  it('shows progress while extracting, saying it can take a while', async () => {
+    const run = buildRun({ kind: 'extract' });
     open(buildExtraction({ status: 'none', items: [], run }), { latest_runs: { extract: run, generate: null, label: null } });
 
     const status = await screen.findByRole('status', { name: 'Run progress' });
     expect(status).toHaveTextContent('Reading the description');
-    expect(within(status).getByText(/^1:0[5-7]$/)).toHaveAttribute('aria-label', expect.stringMatching(/^Running for 1 minute 0[5-7] seconds$/));
     expect(status).toHaveTextContent('This can take a while');
+    expect(status).not.toHaveTextContent(/\d:\d\d/);
+  });
+
+  it('marks the step whose model is working in the stepper, and only that one', async () => {
+    const run = buildRun({ kind: 'extract' });
+    open(buildExtraction({ status: 'none', items: [], run }), { latest_runs: { extract: run, generate: null, label: null } });
+
+    const steps = await screen.findByRole('navigation', { name: 'Analysis steps' });
+    const extract = within(steps).getByRole('button', { name: /Extract/ });
+    expect(extract).toHaveTextContent('(working)');
+    expect(extract.firstElementChild.className).toMatch(/animate-breathe/);
+    expect(within(steps).getByRole('button', { name: /Generate/ })).not.toHaveTextContent('(working)');
+  });
+
+  it('shows steps that cannot be opened yet lighter than the rest', async () => {
+    open(buildExtraction({ items: ITEMS() }));
+
+    const steps = await screen.findByRole('navigation', { name: 'Analysis steps' });
+    const generate = within(steps).getByRole('button', { name: /Generate/ });
+    const system = within(steps).getByRole('button', { name: /System/ });
+    expect(generate).toBeDisabled();
+    expect(generate.firstElementChild.className).toMatch(/text-gray-300/);
+    expect(system.firstElementChild.className).not.toMatch(/text-gray-300/);
   });
 
   it('shows edited values with what the model said', async () => {

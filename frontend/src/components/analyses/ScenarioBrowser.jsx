@@ -3,22 +3,22 @@ import MasterDetail from './MasterDetail';
 import ScenarioCard, { ScenarioDetails, ScenarioSubtitle } from './ScenarioCard';
 import useWideScreen from './useWideScreen';
 
+const BREATHE = 'animate-breathe motion-reduce:animate-none';
+
 // How many vulnerabilities a scenario has; grey when its labels are out of date.
 function FoundCount({ scenario }) {
   const count = scenario.labels?.length ?? 0;
   if (count === 0 || scenario.set_aside) return null;
   const words = `${count} ${count === 1 ? 'vulnerability' : 'vulnerabilities'}`;
-  const tone =
-    scenario.label_status === 'stale'
-      ? 'border-gray-200 bg-gray-50 text-gray-500'
-      : 'border-rose-200 bg-rose-50 text-rose-700';
+  const stale = scenario.label_status === 'stale';
   return (
     <span
-      aria-label={scenario.label_status === 'stale' ? `${words}, out of date` : words}
-      title={words}
-      className={`h-fit shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums ${tone}`}
+      aria-label={stale ? `${words}, out of date` : words}
+      className={`mt-1.5 inline-block rounded-full border px-2 py-0.5 text-xs tabular-nums ${
+        stale ? 'border-gray-200 bg-gray-50 text-gray-500' : 'border-brand-100 bg-brand-50 text-brand-700'
+      }`}
     >
-      {count}
+      {words}
     </span>
   );
 }
@@ -26,6 +26,7 @@ function FoundCount({ scenario }) {
 // Scenarios as a list beside the chosen one on wide screens, as cards on phones.
 // `renderBelow` adds a step's own content, such as labels, under each scenario.
 // `numberOf` keeps a scenario's number when the list shown is a subset.
+// `workingId` is the scenario a model is on now; its row fades softly.
 export default function ScenarioBrowser({
   scenarios,
   selectedId,
@@ -35,6 +36,7 @@ export default function ScenarioBrowser({
   itemNote,
   numberOf,
   showLabels = false,
+  workingId = null,
 }) {
   const wide = useWideScreen();
   const number = numberOf ?? ((scenario) => scenarios.indexOf(scenario) + 1);
@@ -67,13 +69,17 @@ export default function ScenarioBrowser({
       onSelect={onSelect}
       itemLabel={({ scenario }) => `${number(scenario)}. ${scenario.title}`}
       renderCompact={({ scenario }) => (
-        <span className={`text-sm tabular-nums ${scenario.set_aside ? 'text-gray-300' : 'text-gray-700'}`}>
+        <span
+          className={`text-sm tabular-nums ${scenario.set_aside ? 'text-gray-300' : 'text-gray-700'} ${
+            scenario.id === workingId ? BREATHE : ''
+          }`}
+        >
           {number(scenario)}
           {scenario.is_manual && <span aria-hidden="true" className="ml-0.5 text-teal-600">•</span>}
         </span>
       )}
       renderItem={({ scenario }) => (
-        <span className={`flex gap-3 ${scenario.set_aside ? 'opacity-60' : ''}`}>
+        <span className={`flex gap-3 ${scenario.set_aside ? 'opacity-60' : ''} ${scenario.id === workingId ? BREATHE : ''}`}>
           <span className="w-5 shrink-0 text-sm tabular-nums text-gray-400">{number(scenario)}</span>
           <span className="min-w-0 flex-1">
             <span dir="auto" className="line-clamp-2 break-words text-sm font-medium text-gray-900">
@@ -81,8 +87,9 @@ export default function ScenarioBrowser({
             </span>
             <ScenarioSubtitle scenario={{ ...scenario, outcome: '' }} />
             {itemNote?.(scenario) && <span className="mt-0.5 block text-xs text-gray-500">{itemNote(scenario)}</span>}
+            {showLabels && <FoundCount scenario={scenario} />}
+            {scenario.id === workingId && <span className="sr-only">(being labelled)</span>}
           </span>
-          {showLabels && <FoundCount scenario={scenario} />}
         </span>
       )}
     >

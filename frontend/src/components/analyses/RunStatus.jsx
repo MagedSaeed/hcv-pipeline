@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { useCancelRun } from '../../api/analyses';
 import { useAuth } from '../../contexts/auth-context';
 import ErrorBanner from '../ErrorBanner';
@@ -12,24 +11,6 @@ function Dots() {
           .
         </span>
       ))}
-    </span>
-  );
-}
-
-// Time since the run was created, ticking each second.
-function Elapsed({ since }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  const seconds = Math.max(0, Math.floor((now - Date.parse(since)) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = String(seconds % 60).padStart(2, '0');
-  const spoken = `Running for ${minutes ? `${minutes} minute${minutes === 1 ? '' : 's'} ` : ''}${rest} seconds`;
-  return (
-    <span aria-label={spoken} className="font-mono tabular-nums text-brand-700">
-      {minutes}:{rest}
     </span>
   );
 }
@@ -56,7 +37,6 @@ export default function RunStatus({ analysisId, run, working, typical }) {
               <span aria-live="polite">{waiting ? 'Waiting to start' : working}</span>
               <Dots />
             </span>
-            {run.created_at && <Elapsed since={run.created_at} />}
             {typical && <span className="text-xs font-normal text-brand-800">{typical}</span>}
           </p>
           {isStaff && (

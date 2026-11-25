@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useAnalysis } from '../../api/analyses';
+import { activeRunOf, useAnalysis } from '../../api/analyses';
 import { useAuth } from '../../contexts/auth-context';
 import ErrorBanner from '../../components/ErrorBanner';
 import AnalysisMenu from '../../components/analyses/AnalysisMenu';
@@ -89,6 +89,7 @@ function Workspace({ id, step }) {
         current={current}
         locked={analysis?.locked}
         reachable={reachableSteps(analysis)}
+        working={activeRunOf(analysis)?.kind}
         onSelect={goTo}
       />
       <div key={current} data-testid="step-panel" className={shown.motion}>

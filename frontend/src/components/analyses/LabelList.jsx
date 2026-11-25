@@ -1,4 +1,18 @@
-export function Evidence({ evidence, rationale }) {
+import { hasQuote, quoteId } from './quotes';
+
+// Scrolls to a quote's highlighted words and lets them glow for a moment.
+function showQuote(id) {
+  const mark = document.querySelector(`mark[data-quote="${id}"]`);
+  if (!mark) return;
+  const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  mark.scrollIntoView?.({ behavior: still ? 'auto' : 'smooth', block: 'center' });
+  mark.classList.remove('animate-glow');
+  void mark.offsetWidth;
+  mark.classList.add('animate-glow');
+}
+
+// `onShow`, when given, makes the quote a link to its words in the scenario.
+export function Evidence({ evidence, rationale, onShow }) {
   return (
     <div className="space-y-1.5 text-sm">
       {rationale && (
@@ -10,7 +24,19 @@ export function Evidence({ evidence, rationale }) {
         <figure>
           <figcaption className="text-xs text-gray-500">From the scenario</figcaption>
           <blockquote dir="auto" className="break-words border-s-2 border-brand-200 ps-3 text-gray-600">
-            {evidence}
+            {onShow ? (
+              <button
+                type="button"
+                onClick={onShow}
+                aria-label={`Show “${evidence}” in the scenario`}
+                title="Show in the scenario"
+                className="text-start decoration-brand-300 underline-offset-2 hover:text-gray-900 hover:underline"
+              >
+                {evidence}
+              </button>
+            ) : (
+              evidence
+            )}
           </blockquote>
         </figure>
       )}
@@ -18,7 +44,8 @@ export function Evidence({ evidence, rationale }) {
   );
 }
 
-export default function LabelList({ labels }) {
+// `scenario`, when given, lets each quote scroll to its words in that scenario's text.
+export default function LabelList({ labels, scenario }) {
   const title = `Vulnerabilities found (${labels.length})`;
   return (
     <section aria-label={title} className="space-y-2">
@@ -32,7 +59,11 @@ export default function LabelList({ labels }) {
               </span>
               <span className="text-sm font-semibold text-gray-900">{label.name}</span>
             </p>
-            <Evidence evidence={label.evidence} rationale={label.rationale} />
+            <Evidence
+              evidence={label.evidence}
+              rationale={label.rationale}
+              onShow={scenario && hasQuote(scenario, label) ? () => showQuote(quoteId(scenario, label)) : undefined}
+            />
           </li>
         ))}
       </ul>

@@ -227,13 +227,18 @@ describe('Report step', () => {
     expect((await within(details).findAllByText('This model may ignore temperature')).length).toBe(2);
   });
 
-  it('links Download PDF to the PDF, so it can also open in a new tab', async () => {
+  it('links Download PDF to the PDF at the top and again above the research details', async () => {
     const report = await open();
 
-    const link = within(report).getByRole('link', { name: 'Download PDF' });
+    const top = within(report).getByRole('link', { name: 'Download PDF' });
+    const bottom = within(report).getByRole('link', { name: 'Download as PDF' });
 
-    expect(link).toHaveAttribute('href', '/api/analyses/1/report/pdf/');
-    expect(link).toHaveAttribute('download');
+    for (const link of [top, bottom]) {
+      expect(link).toHaveAttribute('href', '/api/analyses/1/report/pdf/');
+      expect(link).toHaveAttribute('download');
+    }
+    const details = within(report).getByText('Research details').closest('details');
+    expect(bottom.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByTestId('report-print')).not.toBeInTheDocument();
   });
 });

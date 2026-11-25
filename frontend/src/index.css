@@ -20,6 +20,24 @@
   --animate-slide-from-left: slide-from-left 200ms ease-out;
   --animate-fade-in: fade-in 250ms ease-out;
   --animate-dot: dot 1.5s ease-in-out infinite;
+  --animate-breathe: breathe 2.6s ease-in-out infinite;
+  --animate-glow: glow 1.6s ease-out;
+}
+
+/* Quoted words glow for a moment when a quote is followed to them. */
+@keyframes glow {
+  0%,
+  40% {
+    box-shadow: 0 0 0 3px var(--color-amber-300);
+  }
+}
+
+/* A step whose model is working fades softly to grey and back. */
+@keyframes breathe {
+  50% {
+    opacity: 0.6;
+    filter: grayscale(0.8);
+  }
 }
 
 /* Three dots light up one after another, then start again. */

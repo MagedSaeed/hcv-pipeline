@@ -36,7 +36,7 @@ function ScenarioLabels({ scenario }) {
       )}
       {labels.length > 0 && (
         <div className={status === 'current' ? '' : 'opacity-60'}>
-          <LabelList labels={labels} />
+          <LabelList labels={labels} scenario={scenario} />
         </div>
       )}
     </div>
@@ -115,6 +115,7 @@ export default function LabelStep({ analysis, goTo }) {
         renderBelow={(scenario) => <ScenarioLabels scenario={scenario} />}
         itemNote={statusNote}
         showLabels
+        workingId={running ? run.working_on : null}
       />
 
       {hasResults && (

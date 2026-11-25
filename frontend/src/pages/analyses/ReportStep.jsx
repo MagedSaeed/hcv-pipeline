@@ -51,6 +51,15 @@ function SetAside({ scenarios }) {
   );
 }
 
+// A plain link: a click downloads, and "Open in new tab" shows the PDF.
+function PdfLink({ analysisId, children }) {
+  return (
+    <a href={`/api/analyses/${analysisId}/report/pdf/`} download className={`${secondaryButton} shrink-0`}>
+      {children}
+    </a>
+  );
+}
+
 function plural(count, word) {
   return `${count} ${count === 1 ? word : `${word}s`}`;
 }
@@ -130,14 +139,12 @@ function ReportScreen({ analysisId, report, numberOf }) {
 
   return (
     <div data-testid="report-screen" className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <h2 dir="auto" className={`${stepTitle} min-w-0 break-words`}>
+      {/* The title wraps beside the button, so the button stays at the right. */}
+      <div className="flex items-start justify-between gap-4">
+        <h2 dir="auto" className={`${stepTitle} min-w-0 flex-1 break-words`}>
           {reportTitle(report)}
         </h2>
-        {/* A plain link: a click downloads, and "Open in new tab" shows the PDF. */}
-        <a href={`/api/analyses/${analysisId}/report/pdf/`} download className={secondaryButton}>
-          Download PDF
-        </a>
+        <PdfLink analysisId={analysisId}>Download PDF</PdfLink>
       </div>
       <p className="text-sm leading-relaxed text-gray-600">{DISCLAIMER}</p>
       {incomplete && (
@@ -169,7 +176,7 @@ function ReportScreen({ analysisId, report, numberOf }) {
           scenarios={report.scenarios}
           selectedId={focused}
           onSelect={setFocused}
-          renderBelow={(scenario) => (scenario.labels.length > 0 ? <LabelList labels={scenario.labels} /> : null)}
+          renderBelow={(scenario) => (scenario.labels.length > 0 ? <LabelList labels={scenario.labels} scenario={scenario} /> : null)}
             numberOf={numberOf}
             showLabels
           />
@@ -177,6 +184,9 @@ function ReportScreen({ analysisId, report, numberOf }) {
       </div>
 
       <SetAside scenarios={report.set_aside} />
+      <div className="flex justify-end border-t border-gray-200 pt-5">
+        <PdfLink analysisId={analysisId}>Download as PDF</PdfLink>
+      </div>
       <details className="rounded-xl border border-gray-200 bg-white p-4">
         <summary className="cursor-pointer text-sm text-gray-600">Research details</summary>
         <div className="mt-3">

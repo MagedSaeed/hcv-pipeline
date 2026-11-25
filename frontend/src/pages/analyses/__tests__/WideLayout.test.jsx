@@ -155,8 +155,46 @@ describe('Wide screens: list and detail', () => {
     const cleaner = items.find((item) => item.textContent.includes('A cleaner finds a key'));
     const handover = items.find((item) => item.textContent.includes('Routine shift handover'));
 
-    expect(within(cleaner).getByLabelText('1 vulnerability')).toHaveTextContent('1');
+    expect(within(cleaner).getByLabelText('1 vulnerability')).toHaveTextContent('1 vulnerability');
     expect(within(handover).queryByLabelText(/vulnerabilit/)).not.toBeInTheDocument();
+  });
+
+  it('fades the row of the scenario being labelled, and says so', async () => {
+    mockAnalyses({
+      analyses: [
+        buildAnalysis({
+          locked: true,
+          latest_runs: { generate: null, label: buildRun({ kind: 'label', total: 2, working_on: 1 }) },
+          scenarios: buildScenarios(),
+        }),
+      ],
+    });
+    authState.currentUserEmail = 'admin@example.com';
+    stubWideScreen();
+    renderApp({ initialEntries: ['/analyses/1/label'] });
+
+    const items = within(await list()).getAllByRole('button');
+    const working = items.find((item) => item.textContent.includes('Routine shift handover'));
+    const waiting = items.find((item) => item.textContent.includes('A cleaner finds a key'));
+    expect(working).toHaveTextContent('(being labelled)');
+    expect(working.firstElementChild.className).toMatch(/animate-breathe/);
+    expect(waiting.firstElementChild.className).not.toMatch(/animate-breathe/);
+  });
+
+  it('jumps from a quote to its words in the scenario text', async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    open('label');
+    const user = userEvent.setup();
+
+    await user.click(within(await list()).getByRole('button', { name: /A cleaner finds a key/ }));
+    await user.click(within(detail()).getByRole('button', { name: 'Show “enters behind” in the scenario' }));
+
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    const target = scrolled.mock.contexts[0];
+    expect(target.tagName).toBe('MARK');
+    expect(target).toHaveTextContent('enters behind');
+    delete Element.prototype.scrollIntoView;
   });
 
   it('highlights the quoted words in the scenario text', async () => {

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import ActionMenu from './ActionMenu';
 import ManualTag, { SetAsideTag } from './ManualTag';
+import { quoteId, quotedSpans } from './quotes';
 
 const DETAILS = [
   ['actor', 'Who is involved'],
@@ -10,23 +11,7 @@ const DETAILS = [
   ['outcome', 'Outcome'],
 ];
 
-// The parts of `text` each label quotes, as [start, end, label], without overlaps.
-function quotedSpans(text, labels) {
-  const lower = text.toLowerCase();
-  const spans = [];
-  for (const label of labels) {
-    for (const piece of (label.evidence || '').split(/\.\.\.|…/)) {
-      const quote = piece.trim().toLowerCase();
-      if (quote.length < 3) continue;
-      const start = lower.indexOf(quote);
-      if (start >= 0) spans.push([start, start + quote.length, label]);
-    }
-  }
-  spans.sort((a, b) => a[0] - b[0]);
-  return spans.filter((span, index) => index === 0 || span[0] >= spans[index - 1][1]);
-}
-
-function Highlighted({ text, labels }) {
+function Highlighted({ text, labels, scenario }) {
   const parts = [];
   let at = 0;
   for (const [start, end, label] of quotedSpans(text, labels)) {
@@ -34,6 +19,7 @@ function Highlighted({ text, labels }) {
     parts.push(
       <mark
         key={start}
+        data-quote={quoteId(scenario, label)}
         title={`${label.name} (${label.hcv_id})`}
         className="rounded bg-amber-100 px-0.5 text-gray-900 underline decoration-amber-400 decoration-2 underline-offset-2"
       >
@@ -61,7 +47,7 @@ export function ScenarioDetails({ scenario, labels = [] }) {
           <div key={key}>
             <dt className="text-xs font-medium text-gray-500">{title}</dt>
             <dd dir="auto" className="whitespace-pre-wrap break-words text-gray-800">
-              <Highlighted text={scenario[key]} labels={labels} />
+              <Highlighted text={scenario[key]} labels={labels} scenario={scenario} />
             </dd>
           </div>
         ))}
