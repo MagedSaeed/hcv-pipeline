@@ -46,7 +46,8 @@ _HCV_ROWS_COME_FROM_IMPORT = (
 class HCVInline(admin.TabularInline):
     model = HCV
     extra = 0
-    readonly_fields = _HCV_SCAN_FIELDS
+    # threat_mappings is edited on the Taxonomy page, which validates it.
+    readonly_fields = (*_HCV_SCAN_FIELDS, "threat_mappings")
 
     def has_add_permission(self, request, obj=None):
         """No blank-row route through the nested inline either — see
@@ -68,7 +69,7 @@ class TaxonomyAdmin(admin.ModelAdmin):
     # (`taxonomy.models.Taxonomy.Meta`) now refuses that write, and Django's
     # `validate_constraints()` surfaces it here as an ordinary form error
     # with the constraint's own `violation_error_message`, not a 500.
-    list_display = ("vocabulary_id", "version", "is_active", "created_at")
+    list_display = ("vocabulary_id", "version", "is_active", "is_analysis_default", "created_at")
     inlines = [HCVInline]
 
 
@@ -77,7 +78,7 @@ class HCVAdmin(admin.ModelAdmin):
     list_display = ("hcv_id", "name", "taxonomy", "has_condition_class")
     list_filter = ("taxonomy",)
     search_fields = ("hcv_id", "name", "definition")
-    readonly_fields = _HCV_SCAN_FIELDS
+    readonly_fields = (*_HCV_SCAN_FIELDS, "threat_mappings")
 
     def has_add_permission(self, request):
         """See `_HCV_ROWS_COME_FROM_IMPORT`: with every scannable field

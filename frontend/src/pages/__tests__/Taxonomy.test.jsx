@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { authState, server } from '../../test/server';
@@ -299,5 +299,104 @@ describe('Taxonomy editing (staff)', () => {
     await user.click(within(confirm).getByRole('button', { name: /delete/i }));
 
     expect(screen.queryByText('HCV-99 — Updated Condition')).not.toBeInTheDocument();
+  });
+});
+
+describe('Taxonomy threat mappings', () => {
+  const MAPPING = {
+    condition_class: 'UnprotectedPasswordAuthenticationCondition',
+    element: 'Element protected by the AuthenticationMechanism',
+    rule: 'E17',
+    stride: ['Spoofing'],
+    linddun: [],
+    qualifier: '',
+  };
+
+  function serve({ locked = false, isDefault = false } = {}) {
+    const requests = [];
+    const taxonomy = {
+      ...TAXONOMIES[1],
+      is_locked: locked,
+      locked_reason: locked ? 'Used by a run.' : '',
+      is_analysis_default: isDefault,
+    };
+    const hcv = { ...buildHcvs(2, 1)[0], threat_mappings: [MAPPING] };
+    server.use(
+      http.get('/api/taxonomies/', () => HttpResponse.json(paginated([taxonomy]))),
+      http.get('/api/taxonomies/:id/hcvs/', () => HttpResponse.json(paginated([hcv]))),
+      http.patch('/api/hcvs/:id/', async ({ request }) => {
+        const body = await request.json();
+        requests.push(body);
+        return HttpResponse.json({ ...hcv, ...body });
+      }),
+      http.post('/api/taxonomies/:id/analysis-default/', () => {
+        requests.push('analysis-default');
+        taxonomy.is_analysis_default = true;
+        return HttpResponse.json(taxonomy);
+      })
+    );
+    authState.currentUserEmail = 'admin@example.com';
+    renderApp({ initialEntries: ['/taxonomy'] });
+    return requests;
+  }
+
+  it('shows each condition, element, rule and threat', async () => {
+    serve();
+
+    const row = (await screen.findByText('HCV-01 — Condition 1')).closest('li');
+
+    for (const text of [MAPPING.condition_class, MAPPING.element, 'E17', 'Spoofing']) {
+      expect(row).toHaveTextContent(text);
+    }
+  });
+
+  it('adds, edits and removes mapping rows with category checkboxes', async () => {
+    const requests = serve();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const first = screen.getByRole('group', { name: 'Threat mapping 1' });
+    await user.click(within(first).getByRole('checkbox', { name: 'Tampering' }));
+    await user.click(screen.getByRole('button', { name: 'Add threat mapping' }));
+    const second = screen.getByRole('group', { name: 'Threat mapping 2' });
+    await user.type(within(second).getByLabelText('Condition class'), 'NewCondition');
+    await user.click(within(second).getByRole('checkbox', { name: 'Unawareness' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].threat_mappings).toEqual([
+      { ...MAPPING, stride: ['Spoofing', 'Tampering'] },
+      { condition_class: 'NewCondition', element: '', rule: '', stride: [], linddun: ['Unawareness'], qualifier: '' },
+    ]);
+  });
+
+  it('removes a mapping row', async () => {
+    const requests = serve();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await user.click(screen.getByRole('button', { name: 'Remove threat mapping 1' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].threat_mappings).toEqual([]);
+  });
+
+  it('cannot edit mappings of a locked version', async () => {
+    serve({ locked: true });
+
+    await screen.findByText('HCV-01 — Condition 1');
+
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+  });
+
+  it('makes a version the default for analyses, separately from Activate', async () => {
+    const requests = serve();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Make default for analyses' }));
+
+    expect(await screen.findByText('Default for analyses')).toBeInTheDocument();
+    expect(requests).toEqual(['analysis-default']);
   });
 });

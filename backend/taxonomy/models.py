@@ -35,6 +35,8 @@ class Taxonomy(models.Model):
     version = models.CharField(max_length=20)
     notes = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=False)
+    # Separate from is_active, so analyses can move without moving research.
+    is_analysis_default = models.BooleanField(default=False, db_default=False)
     source_json = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -76,6 +78,12 @@ class Taxonomy(models.Model):
                     "`import_taxonomy --activate`, which does both in one step."
                 ),
             ),
+            models.UniqueConstraint(
+                fields=["is_analysis_default"],
+                condition=Q(is_analysis_default=True),
+                name="only_one_analysis_default_taxonomy",
+                violation_error_message="Another taxonomy is already the default for analyses.",
+            ),
         ]
         ordering = ["vocabulary_id", "version"]
 
@@ -109,6 +117,11 @@ class Taxonomy(models.Model):
             )
         return rows[0] if rows else None
 
+    @classmethod
+    def for_analyses(cls):
+        """The taxonomy new analyses start with, or None."""
+        return cls.objects.filter(is_analysis_default=True).first()
+
 
 class HCV(models.Model):
     """One human-centric vulnerability row of a taxonomy."""
@@ -119,6 +132,8 @@ class HCV(models.Model):
     definition = models.TextField(blank=True, default="")
     # Empty by design for rows the ontology carries no condition class for.
     condition_classes = models.JSONField(default=list, blank=True)
+    # Nullable so code from before this column can still insert; read with `or []`.
+    threat_mappings = models.JSONField(null=True, blank=True)
     order = models.PositiveIntegerField(default=0)
 
     class Meta:

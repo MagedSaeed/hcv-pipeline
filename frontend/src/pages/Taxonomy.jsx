@@ -5,6 +5,7 @@ import {
   useCreateHcv,
   useCreateTaxonomyVersion,
   useDeleteHcv,
+  useSetAnalysisDefault,
   useTaxonomies,
   useTaxonomyHcvs,
   useUpdateHcv,
@@ -13,8 +14,9 @@ import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
+import ThreatMappings, { ThreatMappingsEditor } from '../components/ThreatMappings';
 
-const emptyHcvForm = { hcv_id: '', name: '', definition: '', condition_classes: '', order: '' };
+const emptyHcvForm = { hcv_id: '', name: '', definition: '', condition_classes: '', threat_mappings: [], order: '' };
 
 // "1.1" -> "1.2": bump the trailing integer segment. Anything that doesn't
 // end in a plain integer (e.g. "draft") falls back to "<version>-2" rather
@@ -88,6 +90,10 @@ function HcvForm({ form, onChange, onSubmit, onCancel, pending, error, submitLab
           className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm"
         />
       </div>
+      <ThreatMappingsEditor
+        mappings={form.threat_mappings}
+        onChange={(threatMappings) => onChange({ ...form, threat_mappings: threatMappings })}
+      />
       <div>
         <label htmlFor="hcv-order" className="block text-sm font-medium text-gray-700">
           Order
@@ -142,6 +148,7 @@ export default function Taxonomy() {
   const hcvs = [...(hcvsQuery.data?.results ?? [])].sort((a, b) => a.order - b.order);
 
   const activateTaxonomy = useActivateTaxonomy();
+  const setAnalysisDefault = useSetAnalysisDefault();
   const createVersion = useCreateTaxonomyVersion();
   const createHcv = useCreateHcv();
   const updateHcv = useUpdateHcv();
@@ -168,6 +175,7 @@ export default function Taxonomy() {
       name: hcv.name,
       definition: hcv.definition ?? '',
       condition_classes: (hcv.condition_classes ?? []).join(', '),
+      threat_mappings: hcv.threat_mappings ?? [],
       order: String(hcv.order),
     });
     setHcvModalMode('edit');
@@ -185,6 +193,7 @@ export default function Taxonomy() {
       name: hcvForm.name.trim(),
       definition: hcvForm.definition,
       condition_classes: parseConditionClasses(hcvForm.condition_classes),
+      threat_mappings: hcvForm.threat_mappings,
       order: Number(hcvForm.order),
     };
     try {
@@ -287,6 +296,11 @@ export default function Taxonomy() {
             Active taxonomy
           </span>
         )}
+        {selectedTaxonomy?.is_analysis_default && (
+          <span className="mt-5 inline-flex items-center rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-medium text-brand-700">
+            Default for analyses
+          </span>
+        )}
         {hcvsQuery.isSuccess && <span className="mt-5 text-sm text-gray-500">{hcvs.length} HCVs</span>}
       </div>
 
@@ -304,6 +318,21 @@ export default function Taxonomy() {
             The active version is what new experiments and prompt tests use by default.
           </p>
           {activateTaxonomy.isError && <ErrorBanner error={activateTaxonomy.error} />}
+        </div>
+      )}
+
+      {isStaff && selectedTaxonomy && !selectedTaxonomy.is_analysis_default && (
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => setAnalysisDefault.mutate(effectiveId)}
+            disabled={setAnalysisDefault.isPending}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-60"
+          >
+            Make default for analyses
+          </button>
+          <p className="text-xs text-gray-500">New analyses start with this version. Experiments are not affected.</p>
+          {setAnalysisDefault.isError && <ErrorBanner error={setAnalysisDefault.error} />}
         </div>
       )}
 
@@ -364,6 +393,7 @@ export default function Taxonomy() {
               {hcv.condition_classes?.length > 0 && (
                 <p className="mt-2 text-xs text-gray-400">{hcv.condition_classes.join(', ')}</p>
               )}
+              <ThreatMappings mappings={hcv.threat_mappings ?? []} />
               {deletingHcv?.id === hcv.id && (
                 <div className="mt-3 space-y-2">
                   <ConfirmDialog

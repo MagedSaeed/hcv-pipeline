@@ -164,7 +164,7 @@ async function fetchAllPages(url, params) {
 // backed a given query; it always just reads `.results`. `count`/`next`/
 // `previous` are meaningless once every page has already been walked, so
 // they are deliberately not carried through.
-async function fetchAllPagesEnvelope(url, params) {
+export async function fetchAllPagesEnvelope(url, params) {
   return { results: await fetchAllPages(url, params) };
 }
 
@@ -576,6 +576,13 @@ export function useDeleteHcv() {
 export function useActivateTaxonomy() {
   return useTaxonomyMutation(async (id) => {
     const { data } = await apiClient.post(`/taxonomies/${id}/activate/`);
+    return data;
+  });
+}
+
+export function useSetAnalysisDefault() {
+  return useTaxonomyMutation(async (id) => {
+    const { data } = await apiClient.post(`/taxonomies/${id}/analysis-default/`);
     return data;
   });
 }

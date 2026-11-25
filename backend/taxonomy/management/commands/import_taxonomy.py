@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from taxonomy.categories import validate_mappings
 from taxonomy.models import HCV, Taxonomy
 
 DEFAULT_PATH = "taxonomy/hcv21_v1.1.json"
@@ -24,6 +25,11 @@ class Command(BaseCommand):
             "--activate",
             action="store_true",
             help="Mark this version active and deactivate all others.",
+        )
+        parser.add_argument(
+            "--analysis-default",
+            action="store_true",
+            help="Make this version the default for analyses, if no version is yet.",
         )
         parser.add_argument(
             "--if-missing",
@@ -80,6 +86,10 @@ class Command(BaseCommand):
                 # updating in place would quietly let the later row win.
                 if row["hcv_id"] in seen:
                     raise CommandError(f"{path}: row {index} repeats hcv_id {row['hcv_id']!r}.")
+                try:
+                    mappings = validate_mappings(row.get("threat_mappings"))
+                except ValueError as error:
+                    raise CommandError(f"{path}: row {index}: {error}") from error
                 HCV.objects.update_or_create(
                     taxonomy=taxonomy,
                     hcv_id=row["hcv_id"],
@@ -87,6 +97,7 @@ class Command(BaseCommand):
                         "name": row["name"],
                         "definition": row.get("definition", ""),
                         "condition_classes": row.get("condition_classes", []),
+                        "threat_mappings": mappings,
                         "order": index,
                     },
                 )
@@ -99,6 +110,10 @@ class Command(BaseCommand):
                 Taxonomy.objects.exclude(pk=taxonomy.pk).update(is_active=False)
                 taxonomy.is_active = True
                 taxonomy.save(update_fields=["is_active"])
+
+            if options["analysis_default"] and Taxonomy.for_analyses() is None:
+                taxonomy.is_analysis_default = True
+                taxonomy.save(update_fields=["is_analysis_default"])
 
         self.stdout.write(
             self.style.SUCCESS(

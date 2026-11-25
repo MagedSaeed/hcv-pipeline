@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from taxonomy.categories import validate_mappings
 from taxonomy.models import HCV, Taxonomy
 
 
@@ -10,10 +11,13 @@ def taxonomy_lock_reason(taxonomy):
     an experiment that points at it): runs read the rows live, so editing them
     would change what those runs were shown and guarded against after the fact.
     """
+    from analyses.models import AnalysisRun
     from pipeline.models import PhaseRun, PipelineRun
 
-    if PhaseRun.objects.filter(taxonomy=taxonomy).exists() or (
-        PipelineRun.objects.filter(experiment__taxonomy=taxonomy).exists()
+    if (
+        PhaseRun.objects.filter(taxonomy=taxonomy).exists()
+        or PipelineRun.objects.filter(experiment__taxonomy=taxonomy).exists()
+        or AnalysisRun.objects.filter(analysis__taxonomy=taxonomy).exists()
     ):
         return (
             f"{taxonomy} has been used by a run, so its rows are frozen as the record of "
@@ -25,7 +29,26 @@ def taxonomy_lock_reason(taxonomy):
 class HCVSerializer(serializers.ModelSerializer):
     class Meta:
         model = HCV
-        fields = ["id", "hcv_id", "name", "definition", "condition_classes", "order"]
+        fields = [
+            "id",
+            "hcv_id",
+            "name",
+            "definition",
+            "condition_classes",
+            "threat_mappings",
+            "order",
+        ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["threat_mappings"] = data["threat_mappings"] or []
+        return data
+
+    def validate_threat_mappings(self, value):
+        try:
+            return validate_mappings(value)
+        except ValueError as error:
+            raise serializers.ValidationError(str(error)) from error
 
     def validate_hcv_id(self, value):
         value = value.strip()
@@ -65,6 +88,7 @@ class TaxonomySerializer(serializers.ModelSerializer):
             "version",
             "notes",
             "is_active",
+            "is_analysis_default",
             "is_locked",
             "locked_reason",
             "hcv_count",

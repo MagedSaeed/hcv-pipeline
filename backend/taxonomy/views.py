@@ -62,6 +62,18 @@ class TaxonomyViewSet(viewsets.ReadOnlyModelViewSet):
             taxonomy.save(update_fields=["is_active"])
         return Response(self.get_serializer(taxonomy).data)
 
+    @action(detail=True, methods=["post"], url_path="analysis-default")
+    def analysis_default(self, request, pk=None, format=None):
+        """Make this the taxonomy new analyses start with; is_active is untouched."""
+        taxonomy = self.get_object()
+        with transaction.atomic():
+            Taxonomy.objects.exclude(pk=taxonomy.pk).filter(is_analysis_default=True).update(
+                is_analysis_default=False
+            )
+            taxonomy.is_analysis_default = True
+            taxonomy.save(update_fields=["is_analysis_default"])
+        return Response(self.get_serializer(taxonomy).data)
+
     @action(detail=True, methods=["post"], url_path="new-version")
     def new_version(self, request, pk=None, format=None):
         """Copy this taxonomy and all its HCV rows into a new, inactive version."""
@@ -85,6 +97,7 @@ class TaxonomyViewSet(viewsets.ReadOnlyModelViewSet):
                         name=row.name,
                         definition=row.definition,
                         condition_classes=row.condition_classes,
+                        threat_mappings=row.threat_mappings,
                         order=row.order,
                     )
                     for row in source.hcvs.all()

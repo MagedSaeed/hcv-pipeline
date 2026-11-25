@@ -170,6 +170,7 @@ def test_the_bundle_pins_exact_key_sets_per_section(experiment):
         "name",
         "definition",
         "condition_classes",
+        "threat_mappings",
         "order",
     }
 
@@ -794,6 +795,7 @@ def test_the_csv_zip_pins_the_exact_header_row_of_every_member(experiment):
         "name",
         "definition",
         "condition_classes",
+        "threat_mappings",
         "order",
     ]
     assert header("prompts") == [

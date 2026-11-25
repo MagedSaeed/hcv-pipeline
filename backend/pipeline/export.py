@@ -131,6 +131,7 @@ def _taxonomy(phase_run_ids):
                     "name": row.name,
                     "definition": row.definition,
                     "condition_classes": row.condition_classes,
+                    "threat_mappings": row.threat_mappings or [],
                     "order": row.order,
                 }
                 # HCV.Meta.ordering = ["order", "hcv_id"]; hcv_id is unique
