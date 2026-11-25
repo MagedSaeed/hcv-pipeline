@@ -70,11 +70,22 @@ describe('Wide screens: list and detail', () => {
     const user = userEvent.setup();
 
     await user.click(within(await list()).getByRole('button', { name: /A cleaner finds a key/ }));
-    expect(within(detail()).getByRole('heading', { name: 'A cleaner finds a key' })).toBeInTheDocument();
+    expect(within(detail()).getByRole('heading', { name: 'Scenario 3' })).toBeInTheDocument();
     await user.click(within(detail()).getByRole('button', { name: /Actions for/ }));
     await user.click(screen.getByRole('menuitem', { name: 'Set aside' }));
 
     await waitFor(() => expect(store.requests[0]?.path).toBe('/api/analyses/1/scenarios/101/'));
+  });
+
+  it('heads the chosen scenario with its number, not its cut-off title', async () => {
+    open('generate');
+    const user = userEvent.setup();
+
+    await user.click(within(await list()).getByRole('button', { name: /A cleaner finds a key/ }));
+
+    const heading = within(detail()).getByRole('heading', { level: 3 });
+    expect(heading).toHaveTextContent(/^Scenario 3$/);
+    expect(within(detail()).queryByText('A cleaner finds a key', { selector: 'h3' })).not.toBeInTheDocument();
   });
 
   it('starts with the list open, collapses it to numbers and remembers that', async () => {
@@ -92,7 +103,7 @@ describe('Wide screens: list and detail', () => {
     const third = within(collapsed).getByRole('button', { name: /A cleaner finds a key/ });
     expect(third).toHaveTextContent('3');
     await user.click(third);
-    expect(within(detail()).getByRole('heading', { name: 'A cleaner finds a key' })).toBeInTheDocument();
+    expect(within(detail()).getByRole('heading', { name: 'Scenario 3' })).toBeInTheDocument();
     expect(window.localStorage.getItem('analyses:list-collapsed')).toBe('true');
 
     await user.click(screen.getByRole('button', { name: 'Expand list' }));

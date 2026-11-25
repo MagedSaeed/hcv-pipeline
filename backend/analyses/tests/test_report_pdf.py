@@ -109,6 +109,7 @@ def test_report_pdf_holds_the_whole_report(client_for, staff, analysis, labelled
         assert expected in text, expected
     assert "Labelling" not in text
     assert "At risk" not in text
+    assert "Scenario 1" in text
 
 
 def test_report_pdf_numbers_its_pages(client_for, staff, analysis, labelled):

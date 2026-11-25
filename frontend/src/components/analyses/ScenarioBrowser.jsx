@@ -97,10 +97,8 @@ export default function ScenarioBrowser({
         <div className="space-y-5">
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-xs text-gray-400">Scenario {number(selected)}</p>
-              <h3 dir="auto" className="break-words text-base font-semibold text-gray-900">
-                {selected.title}
-              </h3>
+              {/* The title is a cut of the occasion, shown in full below, so the number heads it. */}
+              <h3 className="text-base font-semibold text-gray-900">Scenario {number(selected)}</h3>
               <ScenarioSubtitle scenario={selected} />
             </div>
             <ActionMenu label={`Actions for scenario ${number(selected)}`} items={menuFor(selected)} />

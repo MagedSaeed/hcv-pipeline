@@ -407,10 +407,8 @@ _FIELDS = (
 def _scenario(number, scenario, s):
     story = [
         CondPageBreak(4 * cm),
-        Paragraph(
-            f"<font color='#1e3a5f'>S{number}</font>&nbsp;&nbsp;{_text(scenario['title'])}",
-            s["subsection"],
-        ),
+        # The title is a cut of the occasion, printed in full below, so the number heads it.
+        Paragraph(f"Scenario {number}", s["subsection"]),
         Spacer(1, 4),
     ]
     if scenario["is_manual"]:
