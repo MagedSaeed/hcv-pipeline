@@ -86,7 +86,7 @@ export default function LabelStep({ analysis, goTo }) {
         analysisId={analysis.id}
         run={run}
         working={`Examining scenario ${position} of ${run?.total}`}
-        typical="About 10 seconds a scenario"
+        typical="This can take a while"
       />
       {label.isError && <ErrorBanner error={label.error} />}
 
