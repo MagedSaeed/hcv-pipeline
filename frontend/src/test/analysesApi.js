@@ -139,7 +139,7 @@ export function buildAnalysis(fields = {}) {
 }
 
 export function buildRun(fields = {}) {
-  return { id: 7, kind: 'generate', status: 'running', total: 1, done: 0, failed: 0, notice: '', error: '', ...fields };
+  return { id: 7, kind: 'generate', status: 'running', total: 1, done: 0, failed: 0, notice: '', error: '', created_at: new Date().toISOString(), ...fields };
 }
 
 // Installs the handlers and returns the store, whose `requests` log every write.

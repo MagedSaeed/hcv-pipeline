@@ -1,10 +1,41 @@
+import { useEffect, useState } from 'react';
 import { useCancelRun } from '../../api/analyses';
 import { useAuth } from '../../contexts/auth-context';
 import ErrorBanner from '../ErrorBanner';
 import { linkButton } from './styles';
 
+function Dots() {
+  return (
+    <span aria-hidden="true" className="inline-flex w-5">
+      {[0, 250, 500].map((delay) => (
+        <span key={delay} style={{ animationDelay: `${delay}ms` }} className="animate-dot motion-reduce:animate-none">
+          .
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// Time since the run was created, ticking each second.
+function Elapsed({ since }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - Date.parse(since)) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = String(seconds % 60).padStart(2, '0');
+  const spoken = `Running for ${minutes ? `${minutes} minute${minutes === 1 ? '' : 's'} ` : ''}${rest} seconds`;
+  return (
+    <span aria-label={spoken} className="font-mono tabular-nums text-brand-700">
+      {minutes}:{rest}
+    </span>
+  );
+}
+
 // A run's progress while active, and how it ended afterwards.
-export default function RunStatus({ analysisId, run, working }) {
+export default function RunStatus({ analysisId, run, working, typical }) {
   const { isStaff } = useAuth();
   const cancel = useCancelRun(analysisId);
   if (!run) return null;
@@ -13,11 +44,20 @@ export default function RunStatus({ analysisId, run, working }) {
     const finished = run.done + run.failed;
     const waiting = run.status === 'queued' && finished === 0;
     return (
-      <div className="space-y-3 rounded-xl border border-brand-100 bg-brand-50 p-4">
+      <div
+        role="status"
+        aria-label="Run progress"
+        className="space-y-3 rounded-xl border border-brand-100 bg-brand-50 p-4"
+      >
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p aria-live="polite" className="text-sm font-medium text-brand-900">
-            <span aria-hidden="true" className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-brand-600" />
-            {waiting ? 'Waiting to start…' : working}
+          <p className="flex flex-wrap items-baseline gap-x-3 text-sm font-medium text-brand-900">
+            <span>
+              <span aria-hidden="true" className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-brand-600" />
+              <span aria-live="polite">{waiting ? 'Waiting to start' : working}</span>
+              <Dots />
+            </span>
+            {run.created_at && <Elapsed since={run.created_at} />}
+            {typical && <span className="text-xs font-normal text-brand-800">{typical}</span>}
           </p>
           {isStaff && (
             <button type="button" disabled={cancel.isPending} onClick={() => cancel.mutate()} className={linkButton}>

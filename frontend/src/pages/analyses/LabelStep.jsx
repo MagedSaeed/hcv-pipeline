@@ -82,7 +82,12 @@ export default function LabelStep({ analysis, goTo }) {
 
       {options.isError && <ErrorBanner error={options.error} />}
       {saver.error && !panelOpen && <ErrorBanner error={saver.error} />}
-      <RunStatus analysisId={analysis.id} run={run} working={`Examining scenario ${position} of ${run?.total}…`} />
+      <RunStatus
+        analysisId={analysis.id}
+        run={run}
+        working={`Examining scenario ${position} of ${run?.total}`}
+        typical="About 10 seconds a scenario"
+      />
       {label.isError && <ErrorBanner error={label.error} />}
 
       {editable && (

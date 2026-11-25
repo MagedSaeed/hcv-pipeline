@@ -273,12 +273,14 @@ describe('Extract step', () => {
     await waitFor(() => expect(store.requests[0]?.path).toBe('/api/analyses/1/extract/'));
   });
 
-  it('shows progress while extracting', async () => {
-    open(buildExtraction({ status: 'none', items: [], run: buildRun({ kind: 'extract' }) }), {
-      latest_runs: { extract: buildRun({ kind: 'extract' }), generate: null, label: null },
-    });
+  it('shows progress while extracting: the time so far and how long it usually takes', async () => {
+    const run = buildRun({ kind: 'extract', created_at: new Date(Date.now() - 65_000).toISOString() });
+    open(buildExtraction({ status: 'none', items: [], run }), { latest_runs: { extract: run, generate: null, label: null } });
 
-    expect(await screen.findByText('Reading the description…')).toBeInTheDocument();
+    const status = await screen.findByRole('status', { name: 'Run progress' });
+    expect(status).toHaveTextContent('Reading the description');
+    expect(within(status).getByText(/^1:0[5-7]$/)).toHaveAttribute('aria-label', expect.stringMatching(/^Running for 1 minute 0[5-7] seconds$/));
+    expect(status).toHaveTextContent('Usually 1–2 minutes');
   });
 
   it('shows edited values with what the model said', async () => {

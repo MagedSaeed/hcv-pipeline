@@ -101,6 +101,7 @@ def test_detail_shows_the_extraction(client, extracted_api):
     assert body["settings"] == {"model": "anthropic/claude-sonnet-5.5", "temperature": 0.0}
     assert body["gaps"]["not_assessable"] == [{"area": "Physical entry", "reason": "None."}]
     assert body["run"]["status"] == "completed"
+    assert body["run"]["created_at"].startswith(str(extracted_api.runs.get().created_at.date()))
     first = body["items"][0]
     assert {
         key: first[key] for key in ("ref", "field", "value", "fact_type", "decision", "edited")

@@ -191,7 +191,7 @@ export default function GenerateStep({ analysis, goTo }) {
 
       {options.isError && <ErrorBanner error={options.error} />}
       {saver.error && !panelOpen && <ErrorBanner error={saver.error} />}
-      <RunStatus analysisId={analysis.id} run={run} working="Writing scenarios…" />
+      <RunStatus analysisId={analysis.id} run={run} working="Writing scenarios" typical="Usually under a minute" />
       {generate.isError && <ErrorBanner error={generate.error} />}
 
       {/* Shown once the prompt list says whether it takes a count, so the button doesn't change under the cursor. */}

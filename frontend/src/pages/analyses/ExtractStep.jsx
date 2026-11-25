@@ -513,7 +513,7 @@ export default function ExtractStep({ analysis, goTo }) {
         />
       </div>
 
-      <RunStatus analysisId={analysis.id} run={analysis.latest_runs.extract} working="Reading the description…" />
+      <RunStatus analysisId={analysis.id} run={analysis.latest_runs.extract} working="Reading the description" typical="Usually 1–2 minutes" />
       {extract.isError && <ErrorBanner error={extract.error} />}
       {update.isError && <ErrorBanner error={update.error} />}
       {approveSection.isError && <ErrorBanner error={approveSection.error} />}

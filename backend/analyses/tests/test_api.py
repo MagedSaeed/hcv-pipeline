@@ -333,6 +333,7 @@ def test_generate_label_cancel(client, analysis, queue):
         "failed",
         "notice",
         "error",
+        "created_at",
     }
     assert (again.status_code, again.json()["code"]) == (409, "already_running")
     assert cancelled.json()["status"] == "cancelled"

@@ -102,6 +102,7 @@ def run_json(run):
         "failed": run.failed,
         "notice": run.notice,
         "error": run.error,
+        "created_at": run.created_at.isoformat(),
     }
 
 

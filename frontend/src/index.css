@@ -19,6 +19,22 @@
   --animate-slide-from-right: slide-from-right 200ms ease-out;
   --animate-slide-from-left: slide-from-left 200ms ease-out;
   --animate-fade-in: fade-in 250ms ease-out;
+  --animate-dot: dot 1.5s ease-in-out infinite;
+}
+
+/* Three dots light up one after another, then start again. */
+@keyframes dot {
+  0%,
+  15% {
+    opacity: 0;
+  }
+  35%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 @keyframes fade-in {
