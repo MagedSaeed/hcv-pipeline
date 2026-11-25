@@ -304,12 +304,14 @@ export default function RunDetail() {
   const { isStaff } = useAuth();
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Off while a delete is in flight, so no refresh can fetch the deleted run back.
+  const [deleting, setDeleting] = useState(false);
 
-  const runQuery = usePipelineRun(runId);
+  const runQuery = usePipelineRun(runId, { enabled: !deleting });
   const run = runQuery.data ?? null;
 
   const experimentQuery = useExperiment(run?.experiment, { enabled: run != null });
-  const phaseRunsQuery = usePhaseRuns({ pipeline_run: runId });
+  const phaseRunsQuery = usePhaseRuns({ pipeline_run: runId }, { enabled: !deleting });
   const systemsQuery = useSystemDescriptions();
   const fewshotsQuery = useFewShots();
 
@@ -367,10 +369,12 @@ export default function RunDetail() {
   }
 
   async function handleDeleteConfirmed() {
+    setDeleting(true);
     try {
       await deleteRun.mutateAsync(runId);
       navigate('/dashboard', { replace: true });
     } catch {
+      setDeleting(false);
       // Surfaced below via deleteRun.isError/error - dialog stays open.
     }
   }

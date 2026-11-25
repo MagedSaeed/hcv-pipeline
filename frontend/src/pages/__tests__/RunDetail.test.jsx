@@ -685,6 +685,37 @@ describe('RunDetail', () => {
     });
   });
 
+  it('stops refreshing the run while its delete is in flight, so nothing can fetch it back', async () => {
+    const user = userEvent.setup();
+    const run = pipelineRun({ status: 'running' });
+    installBaseFixtures({ run, phaseRuns: [] });
+    let finishDelete;
+    server.use(
+      http.delete(
+        '/api/pipeline-runs/501/',
+        guardedStaffWrite(() => new Promise((resolve) => (finishDelete = () => resolve(new HttpResponse(null, { status: 204 })))))
+      )
+    );
+    const fetched = [];
+    const record = ({ request }) => request.method === 'GET' && fetched.push(new URL(request.url).pathname);
+    server.events.on('request:start', record);
+
+    const { queryClient } = renderApp({ initialEntries: ['/pipeline-runs/501'] });
+    await screen.findByText(/repetition 1/i);
+    await user.click(await screen.findByRole('button', { name: /^delete run$/i }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /^confirm$/i }));
+    await vi.waitFor(() => expect(finishDelete).toBeTypeOf('function'));
+
+    fetched.length = 0;
+    await act(() => queryClient.refetchQueries({ type: 'active' }));
+    finishDelete();
+    await vi.waitFor(() => expect(queryClient.getQueryData(queryKeys.pipelineRuns.detail(501))).toBeUndefined());
+    server.events.removeListener('request:start', record);
+
+    expect(fetched).not.toContain('/api/pipeline-runs/501/');
+    expect(fetched).not.toContain('/api/phase-runs/');
+  });
+
   it('hides cancel/delete/retry for a non-staff viewer, who can still export', async () => {
     authState.currentUserEmail = 'researcher@example.com'; // not staff
     const run = pipelineRun({ status: 'running' });
