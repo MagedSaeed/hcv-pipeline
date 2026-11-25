@@ -449,7 +449,7 @@ def _system_rows(systems):
     return [{"title": s.title, "body": s.body, "slug": s.slug} for s in systems]
 
 
-def _make_resource(variant):
+def _make_resource(variant, resources=None):
     """Build the `resource()` template global.
 
     Bound fresh per render so it can refuse a taxonomy-kind ResourceFile under
@@ -457,6 +457,9 @@ def _make_resource(variant):
     context layer, since a template author could otherwise reach the taxonomy
     without ever touching the `taxonomy` context variable.
     """
+
+    if resources is not None:
+        return resources
 
     def resource(name):
         try:
@@ -581,17 +584,20 @@ def _is_phase3_context(context):
     return context.keys() >= PHASE3_CONTEXT_KEYS
 
 
-def _environment(context):
+def _environment(context, resources=None):
     env = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
-    env.globals["resource"] = _make_resource(context.get("_variant"))
+    env.globals["resource"] = _make_resource(context.get("_variant"), resources)
     taxonomy = context.get("_taxonomy_object")
     if taxonomy is not None:
         env.globals["hcv_table"] = lambda: format_hcv_table(taxonomy)
     return env
 
 
-def render(template, context):
+def render(template, context, *, resources=None):
     """Render both halves of a template. This is the ONLY renderer.
+
+    `resources` replaces the database lookup behind `resource()` with pinned text.
+    It skips that lookup's kind check, so variant A refuses it.
 
     Preview and the pipeline both call it, so what an admin sees previewed is
     byte-identical to what is sent. For a Run A context, the rendered strings and
@@ -628,7 +634,10 @@ def render(template, context):
             "build_phase3_context() for labelling."
         )
 
-    env = _environment(context)
+    if resources is not None and variant == VARIANT_UNBIASED:
+        raise TaxonomyLeak("Variant A reads resources from the database only.")
+
+    env = _environment(context, resources)
     exposed = {key: value for key, value in context.items() if not key.startswith("_")}
     try:
         rendered = RenderedPrompt(

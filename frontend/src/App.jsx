@@ -15,6 +15,8 @@ import ExperimentDetail from './pages/ExperimentDetail';
 import RunDetail from './pages/RunDetail';
 import Labels from './pages/Labels';
 import Settings from './pages/Settings';
+import AnalysesList from './pages/analyses/AnalysesList';
+import AnalysisPage from './pages/analyses/AnalysisPage';
 
 // The axios response interceptor (src/api/client.js) has no Router context
 // of its own - it is plain JS, not a component - so on a genuine
@@ -57,6 +59,9 @@ export default function App() {
             </ProtectedRoute>
           }
         >
+          <Route path="/analyses" element={<AnalysesList />} />
+          {/* One route for new and saved, so the first save doesn't remount the editor. */}
+          <Route path="/analyses/:id/:step?" element={<AnalysisPage />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/resources" element={<Resources />} />
           <Route path="/taxonomy" element={<Taxonomy />} />
@@ -86,8 +91,8 @@ export default function App() {
           <Route path="/labels" element={<Labels />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to="/analyses" replace />} />
+        <Route path="*" element={<Navigate to="/analyses" replace />} />
       </Routes>
     </>
   );

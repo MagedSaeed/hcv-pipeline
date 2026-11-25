@@ -18,10 +18,14 @@ dependencies = [
     "whitenoise==6.12.0",
     "python-decouple==3.8",
     "dj-database-url==3.1.2",
+    "reportlab==5.1.0",
+    "arabic-reshaper==3.1.0",
+    "python-bidi==0.6.12",
 ]
 
 [dependency-groups]
 dev = [
+    "pypdf==7.1.1",
     "pytest==9.1.1",
     "pytest-django==4.14.0",
     "ruff==0.16.6",

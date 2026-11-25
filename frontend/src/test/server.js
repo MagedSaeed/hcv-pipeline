@@ -227,6 +227,8 @@ export function resetFixtures() {
 }
 
 export const handlers = [
+  http.get('/api/analyses/', ({ request }) => HttpResponse.json(paginate([], request))),
+
   http.get('/api/auth/csrf/', () => {
     // A real Set-Cookie response header isn't reliably picked up by
     // document.cookie through msw's Node interceptors under jsdom, so this

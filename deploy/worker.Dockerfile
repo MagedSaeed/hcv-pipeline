@@ -16,6 +16,8 @@ COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY backend/ ./
+# Analyses read their preset from ../resources (settings.RESOURCES_DIR).
+COPY resources/ /app/resources/
 COPY deploy/start-worker.sh /app/deploy/
 
 CMD ["sh", "/app/deploy/start-worker.sh"]

@@ -7,6 +7,7 @@ python manage.py migrate --noinput
 # Seed data is added only when missing, so what researchers change in the app
 # survives every redeploy.
 python manage.py import_taxonomy --activate --if-missing
+python manage.py import_taxonomy ../resources/taxonomy/hcv21_v1.2.json --if-missing --analysis-default
 python manage.py seed_corpus --if-missing
 python manage.py seed_prompts
 

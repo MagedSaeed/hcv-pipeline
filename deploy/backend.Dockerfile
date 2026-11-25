@@ -10,6 +10,9 @@ RUN npm run build
 FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.12 /uv /usr/local/bin/uv
+# DejaVu Sans draws Arabic in PDF reports (analyses.pdf).
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \

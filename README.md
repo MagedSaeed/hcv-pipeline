@@ -44,6 +44,7 @@ cd backend
 uv sync
 uv run python manage.py migrate
 uv run python manage.py import_taxonomy --activate
+uv run python manage.py import_taxonomy ../resources/taxonomy/hcv21_v1.2.json --if-missing --analysis-default
 uv run python manage.py seed_corpus
 uv run python manage.py seed_prompts
 uv run python manage.py create_user you@example.com --staff

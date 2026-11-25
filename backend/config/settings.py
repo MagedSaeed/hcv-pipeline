@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "corpus",
     "prompts",
     "pipeline",
+    "analyses",
 ]
 
 AUTH_USER_MODEL = "core.User"

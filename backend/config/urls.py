@@ -28,6 +28,7 @@ urlpatterns = [
     path("api/", include("corpus.urls")),
     path("api/", include("prompts.urls")),
     path("api/", include("pipeline.urls")),
+    path("api/", include("analyses.urls")),
     path("api/models/", AvailableModelsView.as_view(), name="available-models"),
     # Last, and never for api/, admin/ or static/: an unknown API path stays a
     # 404, and /admin still gets APPEND_SLASH's redirect to /admin/.

@@ -15,8 +15,41 @@
   --color-brand-700: #4338ca;
   --color-brand-800: #3730a3;
   --color-brand-900: #312e81;
+
+  --animate-slide-from-right: slide-from-right 200ms ease-out;
+  --animate-slide-from-left: slide-from-left 200ms ease-out;
+  --animate-fade-in: fade-in 250ms ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes slide-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(1.5rem);
+  }
+}
+
+@keyframes slide-from-left {
+  from {
+    opacity: 0;
+    transform: translateX(-1.5rem);
+  }
 }
 
 body {
   @apply bg-gray-50 text-gray-900 antialiased;
+}
+
+/* Paper is white, and keeps the threat colours that tell STRIDE from LINDDUN. */
+@media print {
+  body {
+    background: #fff;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
 }
